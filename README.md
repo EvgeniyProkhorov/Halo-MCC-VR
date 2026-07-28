@@ -14,7 +14,7 @@
 | SMAA T2X Support                                   | 🟡 In Progress |
 | Optional 2D Theater Mode for Cutscenes             | 🟡 In Progress |
 | Gamepad support/Head-Aiming Mode                   | 🟡 In Progress |
-|                                                    | 🟡 In Progress |
+|  Scopes and weapon zoom fixes                                                  | 🟡 In Progress |
 | Complete F1 Menu UI Restructure and Reorganization | 🟡 In Progress |
 
 > **Note:** The optional 2D theater mode will be enabled by default for cutscenes, but players will be able to disable it.
