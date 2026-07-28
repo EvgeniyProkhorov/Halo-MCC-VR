@@ -27,8 +27,9 @@ the acceptance test.
    after confirming MCC is closed, preserving the previous install, and
    verifying installed hashes. Never launch the game or change configuration.
 6. For a requested headset test, record the source commit, DLL SHA-256, unique
-   package path, embedded log source/configuration, title coverage, and result.
-   Verify the installed file's hash separately; the log does not contain it.
+   package path, embedded log source/configuration, title coverage, MCC edition,
+   OpenXR runtime, headset, and result. Verify the installed file's hash
+   separately; the log does not contain it.
 7. Advance `docs/CURRENT-STATE.md` only after explicit headset acceptance.
 8. Revert failed behavior before making another candidate.
 
@@ -52,6 +53,13 @@ deploy/restore scripts remain forbidden.
 - Preserve one universal `halomccvr.cfg` and F1 experience.
 - Use H3ODSTEK and `halo3odst.dll` as primary ODST evidence. Halo 3 offsets and
   semantics are not ODST proof.
+- Support both the Steam and Microsoft Store (Xbox app / Game Pass) editions.
+  Install every candidate to both, every time — the user alternates between
+  them. `halo3xr.log` names the edition, the OpenXR runtime and the headset;
+  ask which one a result came from rather than assuming. See
+  `docs/MCC-EDITIONS-EVIDENCE.md`, and note that the game modules are
+  byte-identical across editions, so a game-code difference never explains an
+  edition-specific bug.
 
 Definition of done is: clean diff, Release build, passing tests, exact candidate
 identity, requested headset confirmation, and any required Halo 3 regression.

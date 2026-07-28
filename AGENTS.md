@@ -135,6 +135,25 @@ four identical crashes.
 - One build serves both editions: the per-game modules are byte-identical apart
   from their Authenticode signature (`docs/MCC-EDITIONS-EVIDENCE.md`). Only the
   launcher is edition-aware.
+
+## MCC editions
+
+Both the Steam and the Microsoft Store (Xbox app / Game Pass) editions are
+supported and **every candidate installs to both, every time**. The user
+alternates between them, so never deploy to only one.
+
+- Ask which edition a result came from, or read it: `halo3xr.log` names it on
+  the `MCC edition:` line, right under the build identity, alongside the
+  `OpenXR runtime:` and `headset:` lines. A report that does not identify the
+  edition, runtime and headset is not reproducible.
+- The Store executable **cannot** be started with `CreateProcess` — it exits
+  with code 0 in about 210 ms because the process has no package identity, and
+  no `CreateProcess` attribute can grant it. It is started through
+  `IApplicationActivationManager` instead. Renaming the executable to the Steam
+  name does not fix this and never did.
+- A game-code difference is never a valid explanation for an
+  edition-specific bug. The modules are byte-identical; look at launch,
+  environment or host-process differences instead.
 - `tools/install-candidate.ps1` requires git `HEAD` to equal the package's
   `source_commit`. To reinstall an older candidate, check out that commit first.
 - Verify the installed DLL's SHA-256 separately; the log does not contain it.

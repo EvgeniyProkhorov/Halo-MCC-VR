@@ -1,5 +1,6 @@
 #include <windows.h>
 #include <string>
+#include <cwctype>
 #include <MinHook.h>
 #include "../common/log.h"
 #include "../common/config.h"
@@ -29,6 +30,29 @@
 
 static HMODULE g_hModule = nullptr;
 
+// Record WHICH edition of MCC this session ran on, for the same reason the
+// headset name is recorded: a log that cannot tell its own sessions apart
+// cannot settle an argument. The two editions ship byte-identical game modules
+// (docs/MCC-EDITIONS-EVIDENCE.md) but launch completely differently, so a
+// report that does not name the edition is not reproducible.
+//
+// Derived from this process, never from the launcher, so it is still right when
+// the DLL is injected some other way. The WindowsApps path test comes first
+// because it survives someone renaming the executable to the Steam name - the
+// old community workaround - which the name test alone would misreport.
+static const char* DetectMccEdition(const wchar_t* exePath)
+{
+    std::wstring path(exePath);
+    for (wchar_t& c : path)
+        c = towlower(c);
+    if (path.find(L"\\windowsapps\\") != std::wstring::npos ||
+        path.find(L"mccwinstore-win64-shipping.exe") != std::wstring::npos)
+        return "Microsoft Store / Xbox app (Game Pass)";
+    if (path.find(L"mcc-win64-shipping.exe") != std::wstring::npos)
+        return "Steam";
+    return "unrecognised host executable";
+}
+
 static DWORD WINAPI InitThread(LPVOID)
 {
     wchar_t path[MAX_PATH];
@@ -44,6 +68,9 @@ static DWORD WINAPI InitThread(LPVOID)
         __DATE__ " " __TIME__ ")", GetCurrentProcessId(),
         HALOMCCVR_BUILD_COMMIT, HALOMCCVR_BUILD_ODST,
         HALOMCCVR_BUILD_REACH, HALOMCCVR_BUILD_REACH_RENDER);
+    wchar_t hostExe[MAX_PATH] = {};
+    GetModuleFileNameW(nullptr, hostExe, MAX_PATH);
+    LOG("MCC edition: %s (%ls)", DetectMccEdition(hostExe), hostExe);
     const std::wstring primaryConfig = dir + L"halomccvr.cfg";
     const std::wstring legacyConfig = dir + L"halo3xr.cfg";
     ConfigLoadMigrating(primaryConfig.c_str(), legacyConfig.c_str());
