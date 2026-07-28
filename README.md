@@ -7,7 +7,7 @@
 | -------------------------------------------------- | -------------- |
 | ALVR Support                                       | 🟡 In Progress |
 | Halo: Reach Visual/UI Fixes                        | 🟡 In Progress |
-| Space-Sky Bloom Bug Fix                            | 🟡 In Progress |
+| Space-Sky Bloom Bug Fix (Halo Reach)               | 🟡 In Progress |
 | Xbox App / Game Pass Support                       | 🟡 In Progress |
 | SMAA T2X Support                                   | 🟡 In Progress |
 | Optional 2D Theater Mode for Cutscenes             | 🟡 In Progress |
