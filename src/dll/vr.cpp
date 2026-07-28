@@ -6071,23 +6071,132 @@ float4 ps_scope_linearize(VSOut i):SV_Target { return paint(i.uv,true); }
             // per-eye orientations. Submitting a shared midpoint orientation
             // here under-covers the outward-angled lens edge and shows as a
             // black border at the outer edge of each eye.
-            // The FOV submitted must be the FOV Halo actually rastered with
-            // (symmetric, widened by RenderViewHook to cover the headset's
-            // per-eye angles). Fixed headset angles warp during head turns
-            // whenever Halo's internal projection produces different scales.
+            // Halo can only raster a SYMMETRIC frustum, so RenderViewHook renders
+            // a symmetric cover wide enough to contain the headset's asymmetric
+            // per-eye angles, and Game_GetRenderHalfFovs reports that cover.
+            //
+            // We used to submit the cover itself as the layer FOV over the whole
+            // slice. That is legal OpenXR and SteamVR's compositor resolves it
+            // correctly, but ALVR does not: it lens-corrects and reprojects using
+            // its own view parameters rather than the layer's, so a layer whose
+            // FOV is not the native view FOV gets sampled with the wrong frustum -
+            // warped, stretched, and wrong differently per eye, which the viewer
+            // cannot fuse. That is alvr-org/ALVR#1306, open since 2022: "ALVR does
+            // not account for the missing space in the frame when the FOV is any
+            // lower than 100%".
+            //
+            // Measured 2026-07-28, one Quest 3, one build (2458ed8), identical
+            // reported optics (L-54.0 R40.0 U44.0 D-55.0, IPD 69.3 mm): clean
+            // through Virtual Desktop and Steam Link, doubled through ALVR at both
+            // 90 and 120 Hz, and the image snaps correct the instant the SteamVR
+            // dashboard composites it.
+            //
+            // So submit the runtime's OWN per-eye FOV and let imageRect select the
+            // sub-rectangle of the cover that corresponds to it. Every other VR
+            // application submits the FOV the runtime handed it; doing the same
+            // costs no resolution, because the compositor was already cropping to
+            // exactly this region, and it makes the layer correct for any
+            // compositor rather than only for those that honour a custom FOV.
             float haloHalfX[2] = {atanf(1.091595f), atanf(1.091595f)};
             float haloHalfY[2] = {atanf(1.114286f), atanf(1.114286f)};
             const bool renderFovsValid = Game_GetRenderHalfFovs(
                 g_preparedFrame.serial, haloHalfX, haloHalfY);
-            for (uint32_t i = 0; renderFovsValid && i < locatedViewCount; ++i)
+            bool nativeFovValid = renderFovsValid;
+            for (uint32_t i = 0; nativeFovValid && i < locatedViewCount; ++i)
             {
+                // Tangent space: the cover maps linearly across the slice, x from
+                // -coverX (left edge) to +coverX, y from +coverY (TOP row) down to
+                // -coverY. Solve for the native frustum's edges in pixels.
+                const XrFovf& native = g_views[i].fov;
+                const float coverX = tanf(haloHalfX[i]);
+                const float coverY = tanf(haloHalfY[i]);
+                const float nl = tanf(native.angleLeft);
+                const float nr = tanf(native.angleRight);
+                const float nu = tanf(native.angleUp);
+                const float nd = tanf(native.angleDown);
+                const float w = static_cast<float>(g_stereoW);
+                const float h = static_cast<float>(g_stereoH);
+                if (!std::isfinite(coverX) || !std::isfinite(coverY) ||
+                    coverX <= 0.0f || coverY <= 0.0f || w <= 0.0f || h <= 0.0f ||
+                    !std::isfinite(nl) || !std::isfinite(nr) ||
+                    !std::isfinite(nu) || !std::isfinite(nd) ||
+                    nr <= nl || nu <= nd ||
+                    // The cover must actually contain the native frustum. If it
+                    // does not, the raster is missing pixels the headset wants and
+                    // cropping to it would show a hard edge, so keep the whole
+                    // slice for this frame instead of inventing coverage.
+                    nl < -coverX || nr > coverX || nu > coverY || nd < -coverY)
+                {
+                    nativeFovValid = false;
+                    break;
+                }
+
+                auto clampToSlice = [](long value, long lo, long hi) -> int32_t {
+                    return static_cast<int32_t>(
+                        value < lo ? lo : (value > hi ? hi : value));
+                };
+                int32_t x0 = clampToSlice(
+                    lroundf(w * (nl + coverX) / (2.0f * coverX)), 0, (long)g_stereoW - 1);
+                int32_t x1 = clampToSlice(
+                    lroundf(w * (nr + coverX) / (2.0f * coverX)), x0 + 1, (long)g_stereoW);
+                int32_t y0 = clampToSlice(
+                    lroundf(h * (coverY - nu) / (2.0f * coverY)), 0, (long)g_stereoH - 1);
+                int32_t y1 = clampToSlice(
+                    lroundf(h * (coverY - nd) / (2.0f * coverY)), y0 + 1, (long)g_stereoH);
+
+                // Rounding to whole pixels moves the edges by up to half a pixel,
+                // so derive the submitted FOV back from the integer rect. The pair
+                // then describes the same frustum exactly, which is the property
+                // the compositor relies on.
                 projectionViews[i].pose = g_views[i].pose;
                 projectionViews[i].fov = {
-                    -haloHalfX[i], haloHalfX[i], haloHalfY[i], -haloHalfY[i]};
+                    atanf(coverX * (2.0f * x0 / w - 1.0f)),
+                    atanf(coverX * (2.0f * x1 / w - 1.0f)),
+                    atanf(coverY * (1.0f - 2.0f * y0 / h)),
+                    atanf(coverY * (1.0f - 2.0f * y1 / h))};
                 projectionViews[i].subImage.swapchain = g_stereoChain;
                 projectionViews[i].subImage.imageRect = {
-                    {0, 0}, {(int32_t)g_stereoW, (int32_t)g_stereoH}};
+                    {x0, y0}, {x1 - x0, y1 - y0}};
                 projectionViews[i].subImage.imageArrayIndex = i;
+
+                static bool loggedNativeFov = false;
+                if (!loggedNativeFov && i + 1 == locatedViewCount)
+                {
+                    loggedNativeFov = true;
+                    LOG("M2: submitting native per-eye FOV; eye %u cover "
+                        "%.1f/%.1f deg -> rect (%d,%d)+%dx%d of %ux%u, fov "
+                        "L%.1f R%.1f U%.1f D%.1f deg",
+                        i, haloHalfX[i] * 57.2958f, haloHalfY[i] * 57.2958f,
+                        x0, y0, x1 - x0, y1 - y0, g_stereoW, g_stereoH,
+                        projectionViews[i].fov.angleLeft * 57.2958f,
+                        projectionViews[i].fov.angleRight * 57.2958f,
+                        projectionViews[i].fov.angleUp * 57.2958f,
+                        projectionViews[i].fov.angleDown * 57.2958f);
+                }
+            }
+            if (renderFovsValid && !nativeFovValid)
+            {
+                // Loud, never silent: fall back to submitting the full cover, which
+                // is what shipped through 0.3.0 and is correct on SteamVR.
+                for (uint32_t i = 0; i < locatedViewCount; ++i)
+                {
+                    projectionViews[i].pose = g_views[i].pose;
+                    projectionViews[i].fov = {
+                        -haloHalfX[i], haloHalfX[i], haloHalfY[i], -haloHalfY[i]};
+                    projectionViews[i].subImage.swapchain = g_stereoChain;
+                    projectionViews[i].subImage.imageRect = {
+                        {0, 0}, {(int32_t)g_stereoW, (int32_t)g_stereoH}};
+                    projectionViews[i].subImage.imageArrayIndex = i;
+                }
+                static bool loggedCoverFallback = false;
+                if (!loggedCoverFallback)
+                {
+                    loggedCoverFallback = true;
+                    LOG("M2 WARNING: the symmetric raster cover does not contain "
+                        "the headset's native per-eye frustum, so the whole slice "
+                        "is submitted at the cover FOV. Compositors that ignore a "
+                        "custom layer FOV (ALVR) will show a doubled image.");
+                }
             }
             if (renderFovsValid)
             {
