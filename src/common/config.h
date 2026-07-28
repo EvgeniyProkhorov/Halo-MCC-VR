@@ -179,6 +179,21 @@ struct Config
     // ON by default -- the headset must never inherit the desktop's refresh.
     bool desktop_present_unlocked = true;
 
+    // Explain a stuttering GAME instead of leaving you staring at it. When MCC's
+    // own loop stops, the headset keeps showing the last frame the mod submitted,
+    // so the picture stays smooth and head tracking still works -- it just never
+    // changes, which reads as a crash. With this on, once the game has gone about
+    // a second without drawing anything, a panel appears in front of you saying
+    // it is still loading, with a running count, and it disappears the moment the
+    // game draws again. It cannot show up during normal play: the game has to
+    // have stopped drawing for it to arm at all.
+    //
+    // Limit worth knowing: the panel is drawn inside the game's own frame, so a
+    // game that stops drawing COMPLETELY takes the panel with it. It covers a
+    // game that is crawling, not one that is hard-blocked. Either way the log
+    // records what happened. ON by default.
+    bool stall_notice = true;
+
     // Image quality (mod-owned, applied live when each eye is expanded into the
     // headset — universal to every title, no restart). These replace/augment the
     // plain linear upscale that made edges shimmer even at high resolution.

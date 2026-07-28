@@ -230,6 +230,8 @@ void ConfigLoad(const wchar_t* path)
             g_config.fit_desktop_window = atoi(val) != 0;
         else if (!strcmp(key, "desktop_present_unlocked"))
             g_config.desktop_present_unlocked = atoi(val) != 0;
+        else if (!strcmp(key, "stall_notice"))
+            g_config.stall_notice = atoi(val) != 0;
         else if (!strcmp(key, "draw_distance"))
             g_config.draw_distance = (float)atof(val);
         else if (!strcmp(key, "upscale_filter"))
@@ -547,6 +549,19 @@ void ConfigSave()
     fprintf(f, "# (default %d)\n", d.desktop_present_unlocked ? 1 : 0);
     fprintf(f, "desktop_present_unlocked = %d\n\n",
             g_config.desktop_present_unlocked ? 1 : 0);
+    fprintf(f, "# Explain a stuttering game instead of leaving you staring at it.\n");
+    fprintf(f, "# When MCC's own loop stops, your headset keeps showing the last\n");
+    fprintf(f, "# frame the mod handed it, so the picture stays smooth and you can\n");
+    fprintf(f, "# still look around; it just never changes, which looks exactly like\n");
+    fprintf(f, "# a crash. With this on, after the game has gone about a second\n");
+    fprintf(f, "# without drawing anything, a panel says it is still loading and\n");
+    fprintf(f, "# counts how long, then disappears the moment the game draws again.\n");
+    fprintf(f, "# It cannot appear during normal play. Worth knowing: the panel is\n");
+    fprintf(f, "# drawn inside the game's own frame, so a game that stops drawing\n");
+    fprintf(f, "# COMPLETELY takes the panel with it -- this covers a game that is\n");
+    fprintf(f, "# crawling, not one that is fully locked up. 1 = on, 0 = off.\n");
+    fprintf(f, "# (default %d)\n", d.stall_notice ? 1 : 0);
+    fprintf(f, "stall_notice = %d\n\n", g_config.stall_notice ? 1 : 0);
     fprintf(f, "# Draw distance: how far the game renders the whole scene, as a\n");
     fprintf(f, "# fraction of stock. Applies live to all three games (Halo 3, ODST,\n");
     fprintf(f, "# Reach). 1.00 = full stock draw distance. Lower brings the far plane\n");

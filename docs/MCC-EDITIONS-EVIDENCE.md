@@ -270,3 +270,52 @@ Meta Link and ALVR both report `OpenXR runtime: SteamVR/OpenXR` with system name
 `SteamVR/OpenXR : oculus`, so the log cannot distinguish them. A one-off
 upside-down spawn was reported on Link and could not be attributed to a session
 for exactly this reason, and the log had already rotated away.
+
+### Correction 2026-07-28: every measured stall happened while NOT VISIBLE
+
+Re-reading the preserved Store log line by line before building the in-headset
+notice turned up something the stall numbers above do not say. The full session
+state timeline of that capture:
+
+```
+[11:39:48.837] status: session=focused       shouldRender=1 layers=1
+[11:40:07.320] status: session=synchronized  shouldRender=1 layers=1
+[11:40:07.369] status: session=synchronized  shouldRender=0 layers=0
+[11:40:20.285] STALL: the game has not presented for 1000ms
+[11:40:28.271] STALL ENDED: the game resumed presenting after 9000ms
+[11:40:34.215] Alt+F4 received
+```
+
+`XR_SESSION_STATE_SYNCHRONIZED` means the runtime is **not showing the app**. The
+session left `focused` at 11:40:07 — **13 seconds before the stall** — and never
+returned; `shouldRender=0 layers=0` for the whole remainder, including the entire
+nine-second stall. Heartbeat totals for the two captures:
+
+| | focused | visible | synchronized |
+| --- | --- | --- | --- |
+| Steam | 34 | 4 | **0** |
+| Game Pass | 10 | 2 | **13** |
+
+**The nine-second stall was measured while the headset was not being shown the
+game at all.** `fit: menu cursor read` lines during and after it show mouse
+movement in MCC's menus, i.e. desktop use. So that measurement is real as a
+measurement of the GAME loop, and it is *not* evidence about what a player saw in
+the headset. The reported in-headset loading hang has never been captured with
+the session focused.
+
+Two consequences, both load-bearing:
+
+1. **The old STALL wording was wrong.** It asserted "the headset is showing a
+   reprojected frame and the player sees a freeze". With `layers=0` nothing of
+   ours was on the headset. The line now reports the session state and
+   `shouldRender`, and says explicitly when nobody saw the stall.
+2. **A render-thread notice cannot cover this stall.** Zero Presents crossed the
+   nine seconds, and everything the mod draws happens inside the game's Present.
+   The notice covers a crawling game; a hard-blocked game takes it with it. The
+   only mechanism that could cover a hard block is the wait worker submitting a
+   pre-rendered panel itself — a real change to the frame path — and it must not
+   be built until one stall is captured with the session focused.
+
+Next measurement needed: one Game Pass launch with the headset **on and worn
+through the whole loading screen**, so a stall is recorded with `session=focused
+shouldRender=1`. The build carries the logging to settle it in one run.

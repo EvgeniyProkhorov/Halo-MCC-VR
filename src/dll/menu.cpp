@@ -36,6 +36,11 @@ namespace
     };
     VrPointerInput g_vrPointer;
     bool g_resetArmed = false; // "reset all settings" needs a second click
+    // Freeze notice. Written and read on the game's render thread, inside the
+    // same lock the menu draws under, so the text can never change mid-frame.
+    std::atomic<bool> g_noticeActive{false};
+    char g_noticeTitle[128] = {};
+    char g_noticeDetail[320] = {};
     // ImGui gets input on the game's window thread but draws on its render
     // thread; this lock keeps the two from touching ImGui at the same time.
     CRITICAL_SECTION g_cs;
@@ -258,8 +263,62 @@ namespace
         return CallWindowProcW(g_origWndProc, hwnd, msg, wp, lp);
     }
 
+    // Centered line of text at the current font scale.
+    void CenteredText(const char* text)
+    {
+        const float width = ImGui::CalcTextSize(text).x;
+        const float room = ImGui::GetContentRegionAvail().x;
+        if (room > width)
+            ImGui::SetCursorPosX(ImGui::GetCursorPosX() + (room - width) * 0.5f);
+        ImGui::TextUnformatted(text);
+    }
+
+    // The freeze notice: no title bar, no interaction, nothing to dismiss. It
+    // exists to answer one question -- "has this crashed?" -- so it says the one
+    // thing that answers it and gets out of the way when the game comes back.
+    void DrawNotice()
+    {
+        const ImVec2 size(MENU_W * 0.80f, MENU_H * 0.38f);
+        ImGui::SetNextWindowPos(
+            ImVec2((MENU_W - size.x) * 0.5f, (MENU_H - size.y) * 0.5f),
+            ImGuiCond_Always);
+        ImGui::SetNextWindowSize(size, ImGuiCond_Always);
+        ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.03f, 0.04f, 0.06f, 0.94f));
+        ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.45f, 0.62f, 0.85f, 0.85f));
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 2.0f);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(28, 24));
+        if (ImGui::Begin("##halomccvr_stall_notice", nullptr,
+                         ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+                             ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar |
+                             ImGuiWindowFlags_NoScrollWithMouse |
+                             ImGuiWindowFlags_NoSavedSettings |
+                             ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoInputs |
+                             ImGuiWindowFlags_NoFocusOnAppearing))
+        {
+            ImGui::SetWindowFontScale(1.7f);
+            ImGui::Dummy(ImVec2(0, 6));
+            CenteredText(g_noticeTitle);
+            ImGui::SetWindowFontScale(1.0f);
+            ImGui::Dummy(ImVec2(0, 10));
+            ImGui::Separator();
+            ImGui::Dummy(ImVec2(0, 10));
+            ImGui::PushTextWrapPos(ImGui::GetContentRegionAvail().x);
+            ImGui::TextUnformatted(g_noticeDetail);
+            ImGui::PopTextWrapPos();
+        }
+        ImGui::End();
+        ImGui::PopStyleVar(2);
+        ImGui::PopStyleColor(2);
+    }
+
     void DrawUI()
     {
+        if (g_noticeActive.load(std::memory_order_acquire))
+            DrawNotice();
+        // The notice can be up on its own, with the settings menu closed.
+        if (!g_open.load(std::memory_order_acquire))
+            return;
+
         ImGui::SetNextWindowPos(ImVec2(16, 16), ImGuiCond_FirstUseEver);
         ImGui::SetNextWindowSize(ImVec2(MENU_W - 32, MENU_H - 32), ImGuiCond_FirstUseEver);
         ImGui::Begin("HaloMCCVR Settings", nullptr, ImGuiWindowFlags_NoCollapse);
@@ -626,6 +685,16 @@ namespace
             "the desktop window shrinks to fit and the GPU downscales into it (no\n"
             "extra render pass, no measurable cost). OFF by default. Takes effect on\n"
             "the next launch -- close MCC and relaunch.");
+        changed |= ImGui::Checkbox("Explain it when the game freezes",
+                                   &g_config.stall_notice);
+        ImGui::TextDisabled(
+            "When MCC's own loop stops, your headset keeps showing the last frame it\n"
+            "was given -- smooth, head tracking works, but nothing changes, which looks\n"
+            "like a crash. This puts a \"still loading\" panel in front of you with a\n"
+            "running count, and takes it away the moment the game draws again. It can\n"
+            "never appear during normal play. The panel is drawn inside the game's own\n"
+            "frame, so a game that stops drawing COMPLETELY takes it with it: this\n"
+            "covers a crawling game, not a fully locked-up one. ON by default.");
         changed |= ImGui::SliderFloat("Game brightness", &g_config.game_brightness, 0.5f, 2.0f, "%.2f");
         ImGui::TextDisabled("Brightens/darkens the whole game. 1.0 = the game's own brightness.");
         changed |= ImGui::Checkbox("Motion blur", &g_config.motion_blur);
@@ -783,6 +852,27 @@ bool Menu_Init(HWND gameWindow, ID3D11Device* device, ID3D11DeviceContext* conte
 bool Menu_IsOpen()
 {
     return g_ready && g_open;
+}
+
+void Menu_SetNotice(const char* title, const char* detail)
+{
+    if (!g_ready)
+        return; // no menu texture was ever created; nothing can be drawn
+    EnterCriticalSection(&g_cs);
+    strncpy_s(g_noticeTitle, title ? title : "", _TRUNCATE);
+    strncpy_s(g_noticeDetail, detail ? detail : "", _TRUNCATE);
+    LeaveCriticalSection(&g_cs);
+    g_noticeActive.store(true, std::memory_order_release);
+}
+
+void Menu_ClearNotice()
+{
+    g_noticeActive.store(false, std::memory_order_release);
+}
+
+bool Menu_HasNotice()
+{
+    return g_ready && g_noticeActive.load(std::memory_order_acquire);
 }
 
 bool Menu_Toggle()

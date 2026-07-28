@@ -15,3 +15,11 @@ bool Menu_Toggle();
 void Menu_SetVrPointer(bool hit, float u, float v, bool pressed, float scrollY);
 void Menu_ClearVrPointer();
 ID3D11Texture2D* Menu_Render(); // draws the current frame of UI; nullptr on failure
+
+// "The game is frozen, here's why" panel. It shares the settings menu's texture
+// and quad, so raising it costs no new swapchain and no new submission path.
+// vr.cpp raises it from the render thread when the game stops presenting; it can
+// be up with the F1 menu open or closed, and Menu_Render() runs for either.
+void Menu_SetNotice(const char* title, const char* detail);
+void Menu_ClearNotice();
+bool Menu_HasNotice();
