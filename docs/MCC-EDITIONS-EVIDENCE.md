@@ -232,8 +232,41 @@ main loop stalled for about nine seconds and then recovered.
 Game Pass loads `xgameruntime.dll` and `gamingservicesproxy_13.dll`, which the
 Steam build does not. That is the only platform-layer difference found so far.
 
-**OPEN, and not yet attributable to the mod.** The decisive test has not been
-run: load the same level on Game Pass *without* the mod and see whether the same
-loading stall occurs. Until that control group exists, do not build a fix for
-this — the stall's signature (game loop frozen, VR render unaffected) is equally
-consistent with normal Game Pass behaviour.
+### A/B result, 2026-07-28, build `0c42334` with stall timing
+
+Same DLL, same runtime (SteamVR/OpenXR 2.17.6 via ALVR), same headset, back to
+back:
+
+| | Game Pass A | Game Pass B | Steam C |
+| --- | --- | --- | --- |
+| stalls | **1 x 9031 ms** | **1 x 9000 ms** | **0** |
+| settled frame interval p95 | 15.7 ms | — | 15.5 ms |
+| settled fps | **72** | — | **72** |
+| Reach preflight | PASS | — | PASS |
+
+**The stall is Game Pass-specific and reproducible; Steam records
+`stalls=0 worstStall=0ms`.** Three measured stalls — 9074 ms, 9031 ms, 9000 ms —
+all within 74 ms of exactly 9.0 s.
+
+That constancy is the signature of a **timeout**, not disk I/O or asset
+streaming: variable work does not land on the same number three times. Game Pass
+is also the edition that loads `xgameruntime.dll` and `gamingservicesproxy_13.dll`.
+A licence or services call giving up after ~9 s fits. **Stated as a hypothesis,
+not a finding** — nothing has yet been instrumented inside that layer.
+
+**Performance is not halved.** Both editions reach the same 72 fps ceiling with
+comparable settled frame intervals (15.7 ms vs 15.5 ms). Game Pass is worse only
+during the loading phase. An earlier comparison here that appeared to show a
+large gap was comparing Game Pass's loading phase against Steam's settled phase;
+that was not like-for-like.
+
+**Consequence:** if the 9 s is a platform timeout, it is not the mod's to remove.
+The correct response is to tell the player the game is loading rather than to
+chase a fix we do not own.
+
+### Log gap worth closing
+
+Meta Link and ALVR both report `OpenXR runtime: SteamVR/OpenXR` with system name
+`SteamVR/OpenXR : oculus`, so the log cannot distinguish them. A one-off
+upside-down spawn was reported on Link and could not be attributed to a session
+for exactly this reason, and the log had already rotated away.
