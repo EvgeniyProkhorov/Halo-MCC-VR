@@ -6,14 +6,26 @@ Supports Halo 3, Halo 3: ODST and Halo: Reach. Reach is new in 0.3.0.
 On Reach the left trigger and X are swapped compared to Halo 3 and ODST, so
 grenades sit on X.
 
+Works with both the Steam copy of MCC and the Microsoft Store / Xbox app
+(Game Pass) copy. You do NOT need to rename anything - if you renamed
+MCCWinStore-Win64-Shipping.exe to make an older build work, rename it back.
+
 There is no installer, uninstaller, deploy, or restore script.
 
 INSTALL
 -------
-1. In Steam, right-click Halo: The Master Chief Collection and choose:
-   Manage > Browse local files.
+1. Open the main game folder.
 
-2. In the main game folder, create a folder named exactly:
+   Steam:            right-click Halo: The Master Chief Collection and choose
+                     Manage > Browse local files.
+   Microsoft Store:  in the Xbox app, click the "..." next to Halo: MCC and
+                     choose Manage > Files > Browse... Then open the Content
+                     folder inside it.
+
+   The correct folder is the one that contains the MCC folder. On the
+   Microsoft Store that is the Content folder, next to MicrosoftGame.config.
+
+2. In that folder, create a folder named exactly:
 
    Halo_MCC_VR
 
@@ -23,15 +35,22 @@ INSTALL
    halo3xr_launcher.exe
    halomccvr.cfg
 
-4. Make SteamVR the default OpenXR runtime. Start Steam and SteamVR, then run
-   halo3xr_launcher.exe.
+4. Make SteamVR the default OpenXR runtime, then run halo3xr_launcher.exe.
 
-The final path must be:
+   Steam:            start Steam and SteamVR first.
+   Microsoft Store:  Steam does not have to be running for the game, but
+                     SteamVR does have to be running for the headset.
+
+The final path must be one of:
 
    Halo The Master Chief Collection\Halo_MCC_VR\halo3xr_launcher.exe
+   ...\Halo- The Master Chief Collection\Content\Halo_MCC_VR\halo3xr_launcher.exe
 
 Do not put the files loose in the main MCC folder. Launch only through the
 included launcher and never use the mod in anti-cheat-enabled matchmaking.
+
+The launcher writes the edition it detected into halo3xr_launcher.log, so if it
+ever picks the wrong one that line tells you.
 
 UPDATE - REPLACE YOUR CONFIG
 ----------------------------

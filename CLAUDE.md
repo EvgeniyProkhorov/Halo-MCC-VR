@@ -22,7 +22,8 @@ the acceptance test.
    `BUILDING.md`. Stop on any compiler or test failure.
 4. Package only into the repository's ignored `out/` directory.
 5. A successful candidate package automatically installs its exact
-   manifest-verified DLL and launcher into the dedicated `Halo_MCC_VR` folder
+   manifest-verified DLL and launcher into the dedicated `Halo_MCC_VR` folder of
+   every MCC edition installed on this machine (Steam and Microsoft Store),
    after confirming MCC is closed, preserving the previous install, and
    verifying installed hashes. Never launch the game or change configuration.
 6. For a requested headset test, record the source commit, DLL SHA-256, unique
@@ -35,8 +36,11 @@ the acceptance test.
 automatically by `tools/package-candidate.ps1` after every clean candidate build.
 It accepts only a manifest-backed package under `out/candidates`, requires MCC
 closed, preserves the prior DLL/launcher/log/config under `out/deploy-backups`,
-verifies staged and installed hashes, never launches MCC, and never changes
-`halomccvr.cfg`. Old deploy/restore scripts remain forbidden.
+verifies staged and installed hashes, never launches MCC, and never changes an
+existing `halomccvr.cfg`. It installs into every requested edition whose MCC
+install is present, seeding a first-time folder from the live config so both
+editions run identical settings, and reports any edition it skipped. Old
+deploy/restore scripts remain forbidden.
 
 ## Non-negotiable implementation rules
 

@@ -3,8 +3,16 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$CandidateDir,
 
-    [string]$GameDir =
-        'N:\SteamLibrary\steamapps\common\Halo The Master Chief Collection\Halo_MCC_VR'
+    # Every MCC edition installed on this machine. One build serves both: the
+    # per-game modules the DLL hooks are byte-identical between the Steam and
+    # Microsoft Store editions apart from their Authenticode signature, and the
+    # launcher detects the edition at run time. A requested target whose game
+    # install is not present is reported and skipped; a target that IS present
+    # must install cleanly or the whole deployment fails.
+    [string[]]$GameDir = @(
+        'N:\SteamLibrary\steamapps\common\Halo The Master Chief Collection\Halo_MCC_VR',
+        'N:\XBOX\Halo- The Master Chief Collection\Content\Halo_MCC_VR'
+    )
 )
 
 # Installs one already-packaged cumulative candidate. The package manifest is
@@ -14,8 +22,33 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+$steamExeName = 'MCC-Win64-Shipping.exe'
+$storeExeName = 'MCCWinStore-Win64-Shipping.exe'
+
 function Get-Sha256([string]$Path) {
     return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToUpperInvariant()
+}
+
+# The mod folder is only valid where a real MCC install sits beside it. For the
+# Store edition the install root is the package's Content folder.
+function Test-InstallRoot([string]$Root) {
+    foreach ($exe in @($steamExeName, $storeExeName)) {
+        $path = Join-Path $Root (Join-Path 'MCC\Binaries\Win64' $exe)
+        if (Test-Path -LiteralPath $path -PathType Leaf) {
+            return $true
+        }
+    }
+    return $false
+}
+
+function Get-EditionLabel([string]$Root) {
+    if (Test-Path -LiteralPath (Join-Path $Root 'MicrosoftGame.config') -PathType Leaf) {
+        return 'store'
+    }
+    if (Test-Path -LiteralPath (Join-Path $Root (Join-Path 'MCC\Binaries\Win64' $storeExeName)) -PathType Leaf) {
+        return 'store'
+    }
+    return 'steam'
 }
 
 function Assert-FileIdentity(
@@ -104,36 +137,15 @@ $dllHash = Assert-FileIdentity `
 $launcherHash = Assert-FileIdentity `
     $candidateLauncher $manifest.files.'halo3xr_launcher.exe' 'Candidate launcher'
 
-$gamePath = [IO.Path]::GetFullPath($GameDir)
-if (-not (Test-Path -LiteralPath $gamePath -PathType Container)) {
-    throw "Dedicated Halo_MCC_VR directory does not exist: $gamePath"
-}
-$installedDll = Join-Path $gamePath 'halo3xr.dll'
-$installedLauncher = Join-Path $gamePath 'halo3xr_launcher.exe'
-if (-not (Test-Path -LiteralPath $installedDll -PathType Leaf) -or
-        -not (Test-Path -LiteralPath $installedLauncher -PathType Leaf)) {
-    throw 'Existing dedicated mod DLL/launcher pair is incomplete; refusing automatic install.'
-}
-
 $running = @(Get-Process -ErrorAction SilentlyContinue | Where-Object {
-    $_.ProcessName -in @('MCC-Win64-Shipping', 'halo3xr_launcher')
+    $_.ProcessName -in @(
+        'MCC-Win64-Shipping', 'MCCWinStore-Win64-Shipping', 'halo3xr_launcher')
 })
 if ($running.Count -ne 0) {
     $owners = ($running | ForEach-Object {
         '{0}:{1}' -f $_.ProcessName, $_.Id
     }) -join ', '
     throw "MCC or its launcher is running ($owners); automatic install made no changes."
-}
-
-$priorDllHash = Get-Sha256 $installedDll
-$priorLauncherHash = Get-Sha256 $installedLauncher
-if ($priorDllHash -ceq $dllHash -and
-        $priorLauncherHash -ceq $launcherHash) {
-    Write-Host "Candidate already installed: $packageId"
-    Write-Host "Installed source:   $($manifest.source_commit)"
-    Write-Host "Installed DLL:      $dllHash"
-    Write-Host "Installed launcher: $launcherHash"
-    return
 }
 
 $backupRoot = [IO.Path]::GetFullPath(
@@ -145,105 +157,222 @@ if (-not $backupRoot.StartsWith(
         [StringComparison]::OrdinalIgnoreCase)) {
     throw "Backup root escaped the repository out directory: $backupRoot"
 }
+
+# Resolve every requested target up front. A target whose MCC install is absent
+# is reported and skipped - that edition simply is not on this machine - but at
+# least one must be present, and every present one must install cleanly.
+$targets = @()
+foreach ($requested in $GameDir) {
+    $resolved = [IO.Path]::GetFullPath($requested)
+    $installRoot = Split-Path -Parent $resolved
+    $targets += [pscustomobject]@{
+        GameDir     = $resolved
+        InstallRoot = $installRoot
+        Present     = (Test-InstallRoot $installRoot)
+        Edition     = (Get-EditionLabel $installRoot)
+    }
+}
+if (@($targets | Where-Object { $_.Present }).Count -eq 0) {
+    throw ('No Halo: MCC install was found for any requested deployment target: ' +
+        (($targets | ForEach-Object { $_.GameDir }) -join ', '))
+}
+
+# A mod folder created for the first time inherits the live configuration from
+# an edition that already has one, so both editions run identical settings. An
+# existing halomccvr.cfg is never touched.
+$seedConfig = $null
+foreach ($target in $targets) {
+    $existingConfig = Join-Path $target.GameDir 'halomccvr.cfg'
+    if ($target.Present -and (Test-Path -LiteralPath $existingConfig -PathType Leaf)) {
+        $seedConfig = $existingConfig
+        break
+    }
+}
+
 $createdUtc = [DateTime]::UtcNow
-$backupId = '{0}-before-{1}-{2}' -f `
-    $priorDllHash.Substring(0, 7).ToLowerInvariant(),
-    $manifest.source_commit.Substring(0, 7),
-    $createdUtc.ToString("yyyyMMdd-HHmmssfff'Z'")
-$backupDir = Join-Path $backupRoot $backupId
-if (Test-Path -LiteralPath $backupDir) {
-    throw "Refusing to reuse deployment backup directory: $backupDir"
-}
-New-Item -ItemType Directory -Path $backupDir | Out-Null
+$results = @()
 
-$configPath = Join-Path $gamePath 'halomccvr.cfg'
-$logPath = Join-Path $gamePath 'halo3xr.log'
-$configHashBefore = $null
-Copy-Item -LiteralPath $installedDll -Destination `
-    (Join-Path $backupDir 'halo3xr.dll')
-Copy-Item -LiteralPath $installedLauncher -Destination `
-    (Join-Path $backupDir 'halo3xr_launcher.exe')
-if (Test-Path -LiteralPath $configPath -PathType Leaf) {
-    $configHashBefore = Get-Sha256 $configPath
-    Copy-Item -LiteralPath $configPath -Destination `
-        (Join-Path $backupDir 'halomccvr.cfg')
-}
-if (Test-Path -LiteralPath $logPath -PathType Leaf) {
-    Copy-Item -LiteralPath $logPath -Destination `
-        (Join-Path $backupDir 'halo3xr.log')
-}
-
-if ((Get-Sha256 (Join-Path $backupDir 'halo3xr.dll')) -cne $priorDllHash -or
-        (Get-Sha256 (Join-Path $backupDir 'halo3xr_launcher.exe')) -cne
-            $priorLauncherHash) {
-    throw 'Deployment backup verification failed; automatic install made no changes.'
-}
-
-$stagedDll = Join-Path $gamePath ("halo3xr.dll.$packageId.pending")
-$stagedLauncher = Join-Path $gamePath `
-    ("halo3xr_launcher.exe.$packageId.pending")
-if ((Test-Path -LiteralPath $stagedDll) -or
-        (Test-Path -LiteralPath $stagedLauncher)) {
-    throw 'A candidate staging file already exists; refusing to overwrite it.'
-}
-
-try {
-    Copy-Item -LiteralPath $candidateDll -Destination $stagedDll
-    Copy-Item -LiteralPath $candidateLauncher -Destination $stagedLauncher
-    if ((Get-Sha256 $stagedDll) -cne $dllHash -or
-            (Get-Sha256 $stagedLauncher) -cne $launcherHash) {
-        throw 'Staged candidate hash verification failed; installed files remain unchanged.'
+foreach ($target in $targets) {
+    $gamePath = $target.GameDir
+    if (-not $target.Present) {
+        Write-Warning ("SKIPPED - no Halo: MCC install under {0}, so nothing was written to {1}" -f `
+            $target.InstallRoot, $gamePath)
+        $results += [pscustomobject]@{
+            GameDir = $gamePath; Edition = $target.Edition
+            Action = 'skipped-not-installed'; Backup = $null
+        }
+        continue
     }
 
-    Copy-Item -LiteralPath $stagedDll -Destination $installedDll -Force
-    Copy-Item -LiteralPath $stagedLauncher -Destination $installedLauncher -Force
-}
-finally {
-    if (Test-Path -LiteralPath $stagedDll -PathType Leaf) {
-        Remove-Item -LiteralPath $stagedDll -Force
+    $installedDll = Join-Path $gamePath 'halo3xr.dll'
+    $installedLauncher = Join-Path $gamePath 'halo3xr_launcher.exe'
+    $configPath = Join-Path $gamePath 'halomccvr.cfg'
+    $logPath = Join-Path $gamePath 'halo3xr.log'
+    $hasExistingPair =
+        (Test-Path -LiteralPath $gamePath -PathType Container) -and
+        (Test-Path -LiteralPath $installedDll -PathType Leaf) -and
+        (Test-Path -LiteralPath $installedLauncher -PathType Leaf)
+
+    if (-not $hasExistingPair) {
+        # First install into a verified MCC install root. There is no prior pair
+        # to preserve, so the folder is seeded instead of refused.
+        Write-Host ("First install for the {0} edition: {1}" -f $target.Edition, $gamePath)
+        if (-not (Test-Path -LiteralPath $gamePath -PathType Container)) {
+            New-Item -ItemType Directory -Path $gamePath | Out-Null
+        }
+        foreach ($extra in @('LICENSE', 'MANUAL-README.txt')) {
+            $extraSource = Join-Path $candidatePath $extra
+            if (Test-Path -LiteralPath $extraSource -PathType Leaf) {
+                Copy-Item -LiteralPath $extraSource `
+                    -Destination (Join-Path $gamePath $extra) -Force
+            }
+        }
+        if ($null -ne $seedConfig -and
+                -not (Test-Path -LiteralPath $configPath -PathType Leaf)) {
+            Copy-Item -LiteralPath $seedConfig -Destination $configPath
+            Write-Host "  seeded halomccvr.cfg from $seedConfig"
+        }
+        Copy-Item -LiteralPath $candidateDll -Destination $installedDll -Force
+        Copy-Item -LiteralPath $candidateLauncher -Destination $installedLauncher -Force
+        $newDllHash = Get-Sha256 $installedDll
+        $newLauncherHash = Get-Sha256 $installedLauncher
+        if ($newDllHash -cne $dllHash -or $newLauncherHash -cne $launcherHash) {
+            throw ("First-install hash mismatch at {0}: DLL={1} launcher={2}" -f `
+                $gamePath, $newDllHash, $newLauncherHash)
+        }
+        Write-Host "  installed DLL:      $newDllHash"
+        Write-Host "  installed launcher: $newLauncherHash"
+        $results += [pscustomobject]@{
+            GameDir = $gamePath; Edition = $target.Edition
+            Action = 'first-install'; Backup = $null
+        }
+        continue
     }
-    if (Test-Path -LiteralPath $stagedLauncher -PathType Leaf) {
-        Remove-Item -LiteralPath $stagedLauncher -Force
+
+    $priorDllHash = Get-Sha256 $installedDll
+    $priorLauncherHash = Get-Sha256 $installedLauncher
+    if ($priorDllHash -ceq $dllHash -and
+            $priorLauncherHash -ceq $launcherHash) {
+        Write-Host ("Already installed for the {0} edition: {1}" -f $target.Edition, $gamePath)
+        $results += [pscustomobject]@{
+            GameDir = $gamePath; Edition = $target.Edition
+            Action = 'already-installed'; Backup = $null
+        }
+        continue
+    }
+
+    $backupId = '{0}-{1}-before-{2}-{3}' -f `
+        $priorDllHash.Substring(0, 7).ToLowerInvariant(),
+        $target.Edition,
+        $manifest.source_commit.Substring(0, 7),
+        $createdUtc.ToString("yyyyMMdd-HHmmssfff'Z'")
+    $backupDir = Join-Path $backupRoot $backupId
+    if (Test-Path -LiteralPath $backupDir) {
+        throw "Refusing to reuse deployment backup directory: $backupDir"
+    }
+    New-Item -ItemType Directory -Path $backupDir | Out-Null
+
+    $configHashBefore = $null
+    Copy-Item -LiteralPath $installedDll -Destination `
+        (Join-Path $backupDir 'halo3xr.dll')
+    Copy-Item -LiteralPath $installedLauncher -Destination `
+        (Join-Path $backupDir 'halo3xr_launcher.exe')
+    if (Test-Path -LiteralPath $configPath -PathType Leaf) {
+        $configHashBefore = Get-Sha256 $configPath
+        Copy-Item -LiteralPath $configPath -Destination `
+            (Join-Path $backupDir 'halomccvr.cfg')
+    }
+    if (Test-Path -LiteralPath $logPath -PathType Leaf) {
+        Copy-Item -LiteralPath $logPath -Destination `
+            (Join-Path $backupDir 'halo3xr.log')
+    }
+
+    if ((Get-Sha256 (Join-Path $backupDir 'halo3xr.dll')) -cne $priorDllHash -or
+            (Get-Sha256 (Join-Path $backupDir 'halo3xr_launcher.exe')) -cne
+                $priorLauncherHash) {
+        throw 'Deployment backup verification failed; automatic install made no changes.'
+    }
+
+    $stagedDll = Join-Path $gamePath ("halo3xr.dll.$packageId.pending")
+    $stagedLauncher = Join-Path $gamePath `
+        ("halo3xr_launcher.exe.$packageId.pending")
+    if ((Test-Path -LiteralPath $stagedDll) -or
+            (Test-Path -LiteralPath $stagedLauncher)) {
+        throw 'A candidate staging file already exists; refusing to overwrite it.'
+    }
+
+    try {
+        Copy-Item -LiteralPath $candidateDll -Destination $stagedDll
+        Copy-Item -LiteralPath $candidateLauncher -Destination $stagedLauncher
+        if ((Get-Sha256 $stagedDll) -cne $dllHash -or
+                (Get-Sha256 $stagedLauncher) -cne $launcherHash) {
+            throw 'Staged candidate hash verification failed; installed files remain unchanged.'
+        }
+
+        Copy-Item -LiteralPath $stagedDll -Destination $installedDll -Force
+        Copy-Item -LiteralPath $stagedLauncher -Destination $installedLauncher -Force
+    }
+    finally {
+        if (Test-Path -LiteralPath $stagedDll -PathType Leaf) {
+            Remove-Item -LiteralPath $stagedDll -Force
+        }
+        if (Test-Path -LiteralPath $stagedLauncher -PathType Leaf) {
+            Remove-Item -LiteralPath $stagedLauncher -Force
+        }
+    }
+
+    $installedDllHash = Get-Sha256 $installedDll
+    $installedLauncherHash = Get-Sha256 $installedLauncher
+    if ($installedDllHash -cne $dllHash -or
+            $installedLauncherHash -cne $launcherHash) {
+        throw ("Post-install hash mismatch at {0}: DLL={1} launcher={2}" -f `
+            $gamePath, $installedDllHash, $installedLauncherHash)
+    }
+    if ($null -ne $configHashBefore -and
+            (Get-Sha256 $configPath) -cne $configHashBefore) {
+        throw 'Shared configuration changed during deployment.'
+    }
+
+    $deployment = [ordered]@{
+        schema_version = 2
+        deployed_utc = $createdUtc.ToString('o')
+        package_id = $packageId
+        source_commit = [string]$manifest.source_commit
+        game_dir = $gamePath
+        edition = $target.Edition
+        previous = [ordered]@{
+            halo3xr_dll_sha256 = $priorDllHash
+            halo3xr_launcher_sha256 = $priorLauncherHash
+        }
+        installed = [ordered]@{
+            halo3xr_dll_sha256 = $installedDllHash
+            halo3xr_launcher_sha256 = $installedLauncherHash
+            config_sha256 = $configHashBefore
+        }
+        launched = $false
+    }
+    $deploymentPath = Join-Path $backupDir 'DEPLOYMENT-MANIFEST.json'
+    [IO.File]::WriteAllText(
+        $deploymentPath,
+        ($deployment | ConvertTo-Json -Depth 5) + [Environment]::NewLine,
+        [Text.UTF8Encoding]::new($false))
+
+    Write-Host ("Installed for the {0} edition: {1}" -f $target.Edition, $gamePath)
+    Write-Host "  installed DLL:      $installedDllHash"
+    Write-Host "  installed launcher: $installedLauncherHash"
+    Write-Host "  preserved previous: $backupDir"
+    $results += [pscustomobject]@{
+        GameDir = $gamePath; Edition = $target.Edition
+        Action = 'installed'; Backup = $backupDir
     }
 }
 
-$installedDllHash = Get-Sha256 $installedDll
-$installedLauncherHash = Get-Sha256 $installedLauncher
-if ($installedDllHash -cne $dllHash -or
-        $installedLauncherHash -cne $launcherHash) {
-    throw "Post-install hash mismatch: DLL=$installedDllHash launcher=$installedLauncherHash"
-}
-if ($null -ne $configHashBefore -and
-        (Get-Sha256 $configPath) -cne $configHashBefore) {
-    throw 'Shared configuration changed during deployment.'
-}
-
-$deployment = [ordered]@{
-    schema_version = 1
-    deployed_utc = $createdUtc.ToString('o')
-    package_id = $packageId
-    source_commit = [string]$manifest.source_commit
-    game_dir = $gamePath
-    previous = [ordered]@{
-        halo3xr_dll_sha256 = $priorDllHash
-        halo3xr_launcher_sha256 = $priorLauncherHash
-    }
-    installed = [ordered]@{
-        halo3xr_dll_sha256 = $installedDllHash
-        halo3xr_launcher_sha256 = $installedLauncherHash
-        config_sha256 = $configHashBefore
-    }
-    launched = $false
-}
-$deploymentPath = Join-Path $backupDir 'DEPLOYMENT-MANIFEST.json'
-[IO.File]::WriteAllText(
-    $deploymentPath,
-    ($deployment | ConvertTo-Json -Depth 5) + [Environment]::NewLine,
-    [Text.UTF8Encoding]::new($false))
-
+Write-Host ''
 Write-Host "Automatically installed candidate: $packageId"
 Write-Host "Installed source:   $($manifest.source_commit)"
-Write-Host "Installed DLL:      $installedDllHash"
-Write-Host "Installed launcher: $installedLauncherHash"
-Write-Host "Preserved previous: $backupDir"
-Write-Host 'MCC was not launched and halomccvr.cfg was not changed.'
+Write-Host "Candidate DLL:      $dllHash"
+Write-Host "Candidate launcher: $launcherHash"
+foreach ($result in $results) {
+    Write-Host ("  [{0,-6}] {1,-22} {2}" -f $result.Edition, $result.Action, $result.GameDir)
+}
+Write-Host 'MCC was not launched and no existing halomccvr.cfg was changed.'

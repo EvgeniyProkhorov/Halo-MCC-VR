@@ -51,25 +51,37 @@ The exact accepted source and artifact hashes are in
 
 ## Install
 
-There is no installer script.
+There is no installer script. Both the Steam copy of MCC and the Microsoft Store
+/ Xbox app (Game Pass) copy are supported by the same download, and neither
+needs any game file renamed.
 
 1. Download the binary asset
    `MCC_VR_ALPHA_0.3.0.zip` from the official `0.3.0` release page.
-2. In Steam, open MCC's **Manage > Browse local files** folder.
-3. Create a folder named exactly `Halo_MCC_VR` in the main MCC folder.
+2. Open MCC's main game folder — the one that contains the `MCC` folder.
+   - **Steam:** **Manage > Browse local files**.
+   - **Microsoft Store / Game Pass:** in the Xbox app, **... > Manage > Files >
+     Browse**, then open the `Content` folder inside it (the one next to
+     `MicrosoftGame.config`).
+3. Create a folder named exactly `Halo_MCC_VR` in that folder.
 4. Copy `halo3xr.dll`, `halo3xr_launcher.exe` and `halomccvr.cfg` into that
    folder.
-5. Make SteamVR the default OpenXR runtime, start Steam and SteamVR, then run
-   `halo3xr_launcher.exe`.
+5. Make SteamVR the default OpenXR runtime and start SteamVR, then run
+   `halo3xr_launcher.exe`. On Steam, start Steam as well; the Microsoft Store
+   edition does not need Steam running for the game itself.
 
-The final path must end in:
+The final path must end in one of:
 
 ```text
 Halo The Master Chief Collection\Halo_MCC_VR\halo3xr_launcher.exe
+Halo- The Master Chief Collection\Content\Halo_MCC_VR\halo3xr_launcher.exe
 ```
 
 Do not place the files loose in the MCC root. To uninstall, close MCC and delete
 only the dedicated `Halo_MCC_VR` folder.
+
+If you previously renamed `MCCWinStore-Win64-Shipping.exe` to the Steam name to
+force an older build to launch, rename it back. The launcher records the edition
+it detected in `halo3xr_launcher.log`.
 
 ### Updating from 0.2.2 — replace your config
 

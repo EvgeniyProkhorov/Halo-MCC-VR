@@ -10,18 +10,55 @@
 // not link config.cpp; it reads the one line it needs itself.
 #include "../common/config.h"
 
-// Starts MCC-Win64-Shipping.exe directly — which is exactly what Steam's
-// official "Play without anti-cheat" option runs, so EAC is never started —
-// and loads halo3xr.dll into it before the game's first instruction runs.
+// Starts the MCC shipping executable directly — which is exactly what Steam's
+// official "Play without anti-cheat" option runs, and what the Microsoft Store
+// package's own "Halo: MCC Anti-Cheat Disabled (Mods and Limited Services)"
+// entry runs, so EAC is never started — and loads halo3xr.dll into it before
+// the game's first instruction runs.
 //
 // Injection method: classic CreateRemoteThread + LoadLibraryW. The process is
 // created suspended, a remote thread loads our DLL, then the game resumes.
 //
-// The game is launched with the SteamAppId environment variable set so that
-// Steamworks does not bounce it ("relaunch me through Steam"), which would
-// kill the process we just injected into and start a fresh, unmodded one.
+// Two editions ship the same game with different shipping executables:
+//
+//   Steam                MCC\Binaries\Win64\MCC-Win64-Shipping.exe
+//   Microsoft Store      MCC\Binaries\Win64\MCCWinStore-Win64-Shipping.exe
+//   (Xbox app/Game Pass)
+//
+// The per-game modules the DLL actually hooks (halo3.dll, halo3odst.dll,
+// haloreach.dll) are byte-identical between the two editions apart from their
+// Authenticode signature and PE checksum, so one build serves both and no
+// signature, offset or struct layout changes. Only the launch differs:
+//
+//   * Only the Steam edition needs Steam. The Store edition is licensed by the
+//     Xbox app, so requiring steam.exe there would block a valid install.
+//   * The SteamAppId environment variables exist purely so Steamworks does not
+//     bounce the process ("relaunch me through Steam"), which would kill the
+//     process we just injected into and start a fresh, unmodded one. The Store
+//     build does not use Steamworks, so it is not given them.
+//
+// Edition is decided by the install layout, not just the executable name: the
+// Store package roots the game at ...\Content\ next to MicrosoftGame.config,
+// which no Steam install has. That way a Store install whose executable was
+// renamed to the Steam name — the old community workaround this replaces — is
+// still recognised as a Store install and is not asked to start Steam.
 
 static const wchar_t* kSteamAppId = L"976730"; // Halo: The Master Chief Collection
+
+static const wchar_t* kSteamExeName = L"MCC-Win64-Shipping.exe";
+static const wchar_t* kStoreExeName = L"MCCWinStore-Win64-Shipping.exe";
+
+enum class Edition
+{
+    Steam,
+    Store,
+};
+
+static const wchar_t* EditionName(Edition edition)
+{
+    return edition == Edition::Store ? L"Microsoft Store / Xbox app (Game Pass)"
+                                     : L"Steam";
+}
 
 static std::wstring g_logPath;
 
@@ -149,15 +186,31 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
 
     // The launcher lives in <game>\Halo_MCC_VR\, so the game exe is found by
     // walking up from here. A few levels are tried so a dev copy placed
-    // elsewhere inside the game folder also works.
-    std::wstring gameExe, gameDir, probe = dir;
+    // elsewhere inside the game folder also works. Both editions' executable
+    // names are tried at every level, so one launcher serves either install.
+    std::wstring gameExe, gameDir, gameRoot;
+    std::wstring probe = dir;
+    bool foundStoreExeName = false;
     for (int i = 0; i < 6 && !probe.empty(); i++)
     {
-        const std::wstring cand = probe + L"\\MCC\\Binaries\\Win64\\MCC-Win64-Shipping.exe";
-        if (FileExists(cand))
+        const std::wstring binDir = probe + L"\\MCC\\Binaries\\Win64";
+        // The Store name is tried first: a genuine Steam install never ships
+        // it, so finding it is unambiguous.
+        const std::wstring storeCand = binDir + L"\\" + kStoreExeName;
+        const std::wstring steamCand = binDir + L"\\" + kSteamExeName;
+        if (FileExists(storeCand))
         {
-            gameExe = cand;
-            gameDir = probe + L"\\MCC\\Binaries\\Win64";
+            gameExe = storeCand;
+            foundStoreExeName = true;
+        }
+        else if (FileExists(steamCand))
+        {
+            gameExe = steamCand;
+        }
+        if (!gameExe.empty())
+        {
+            gameDir = binDir;
+            gameRoot = probe;
             break;
         }
         const size_t slash = probe.find_last_of(L'\\');
@@ -167,33 +220,60 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
     }
     if (gameExe.empty())
     {
-        ErrorBox(L"Could not find MCC-Win64-Shipping.exe near:\n" + dir +
-                 L"\n\nThe Halo_MCC_VR folder must sit inside the game's install\n"
-                 L"folder - the one that contains the MCC folder.");
+        ErrorBox(L"Could not find the Halo: MCC program near:\n" + dir +
+                 L"\n\nLooked for both editions' executables:\n"
+                 L"  MCC\\Binaries\\Win64\\" + kSteamExeName + L"   (Steam)\n"
+                 L"  MCC\\Binaries\\Win64\\" + kStoreExeName + L"   (Microsoft Store)\n\n"
+                 L"The Halo_MCC_VR folder must sit inside the game's install\n"
+                 L"folder - the one that contains the MCC folder. For the\n"
+                 L"Microsoft Store / Xbox app edition that is the Content folder.");
         return 1;
     }
-    LauncherLog("game exe = %ls", gameExe.c_str());
 
-    if (!ProcessRunning(L"steam.exe"))
+    // MicrosoftGame.config sits beside the MCC folder in the Store package and
+    // in no Steam install, so it identifies the edition even when the
+    // executable was renamed to the Steam name by hand.
+    const bool storeLayout = FileExists(gameRoot + L"\\MicrosoftGame.config");
+    const Edition edition =
+        (foundStoreExeName || storeLayout) ? Edition::Store : Edition::Steam;
+    LauncherLog("game exe = %ls", gameExe.c_str());
+    LauncherLog("detected edition: %ls (store exe name=%d, MicrosoftGame.config=%d)",
+                EditionName(edition), foundStoreExeName ? 1 : 0, storeLayout ? 1 : 0);
+
+    // Steam only owns the Steam edition's licensing. The Store edition is
+    // licensed by the Xbox app, so demanding Steam there would reject a
+    // perfectly valid install.
+    if (edition == Edition::Steam && !ProcessRunning(L"steam.exe"))
     {
         ErrorBox(L"Steam is not running.\n\nStart Steam first, then run this launcher again.\n"
-                 L"(The game needs Steam to verify ownership.)");
+                 L"(This Steam copy of the game needs Steam to verify ownership.)");
         return 1;
     }
-    if (ProcessRunning(L"MCC-Win64-Shipping.exe"))
+    // Either edition's process blocks the other: MCC allows one instance, and
+    // an already-running copy is not the one we injected into.
+    if (ProcessRunning(kSteamExeName) || ProcessRunning(kStoreExeName))
     {
         ErrorBox(L"Halo: The Master Chief Collection is already running.\n\n"
                  L"Close it first, then run this launcher again.");
         return 1;
     }
 
-    // Make Steamworks believe the game was launched correctly, so it does not
-    // ask Steam to relaunch it (which would drop the process we inject into).
-    // The child process inherits these environment variables.
-    SetEnvironmentVariableW(L"SteamAppId", kSteamAppId);
-    SetEnvironmentVariableW(L"SteamGameId", kSteamAppId);
-    SetEnvironmentVariableW(L"SteamOverlayGameId", kSteamAppId);
-    LauncherLog("set SteamAppId=%ls; creating game process (suspended)", kSteamAppId);
+    if (edition == Edition::Steam)
+    {
+        // Make Steamworks believe the game was launched correctly, so it does
+        // not ask Steam to relaunch it (which would drop the process we inject
+        // into). The child process inherits these environment variables.
+        SetEnvironmentVariableW(L"SteamAppId", kSteamAppId);
+        SetEnvironmentVariableW(L"SteamGameId", kSteamAppId);
+        SetEnvironmentVariableW(L"SteamOverlayGameId", kSteamAppId);
+        LauncherLog("set SteamAppId=%ls; creating game process (suspended)", kSteamAppId);
+    }
+    else
+    {
+        // The Store build does not link Steamworks, so it is launched clean.
+        LauncherLog("Store edition: no Steam requirement, no SteamAppId set; "
+                    "creating game process (suspended)");
+    }
 
     STARTUPINFOW si{sizeof(si)};
     PROCESS_INFORMATION pi{};
@@ -303,8 +383,9 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
     CloseHandle(pi.hThread);
 
     // Watch the game for a short while. If it exits almost immediately, it
-    // bounced through Steam or crashed on startup — capture the exit code so
-    // we can see what happened instead of the process silently vanishing.
+    // bounced through Steam, failed the Store licence check, or crashed on
+    // startup — capture the exit code so we can see what happened instead of
+    // the process silently vanishing.
     const DWORD watchMs = 12000;
     const DWORD waitRes = WaitForSingleObject(pi.hProcess, watchMs);
     if (waitRes == WAIT_OBJECT_0)
@@ -313,10 +394,16 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
         GetExitCodeProcess(pi.hProcess, &code);
         LauncherLog("game process EXITED within %lus, exit code %lu (0x%08X)", watchMs / 1000, code, code);
         CloseHandle(pi.hProcess);
+        const std::wstring why =
+            edition == Edition::Store
+                ? L"This usually means the Xbox app could not confirm your licence for the\n"
+                  L"game. Open the Xbox app and start Halo: MCC once so it signs in, close\n"
+                  L"it, then run this launcher again."
+                : L"This usually means it relaunched through Steam or the anti-cheat-off\n"
+                  L"mode refused this launch.";
         ErrorBox(L"The game closed itself right after starting (exit code " +
-                 std::to_wstring(code) +
-                 L").\n\nThis usually means it relaunched through Steam or the anti-cheat-off\n"
-                 L"mode refused this launch. Details are in halo3xr_launcher.log.");
+                 std::to_wstring(code) + L").\n\n" + why +
+                 L"\n\nDetails are in halo3xr_launcher.log.");
         return 1;
     }
     LauncherLog("game still running after %lus - launch looks good", watchMs / 1000);

@@ -128,9 +128,13 @@ four identical crashes.
 
 - `tools/package-candidate.ps1` builds, tests, packages into ignored `out/`, and
   automatically installs that exact manifest-verified candidate into
-  `Halo_MCC_VR`. Do not ask for a separate install confirmation.
+  `Halo_MCC_VR` for every MCC edition present (Steam and Microsoft Store). Do
+  not ask for a separate install confirmation.
 - It requires MCC closed, preserves the prior files under `out/deploy-backups`,
-  and never launches MCC or changes `halomccvr.cfg`.
+  and never launches MCC or changes an existing `halomccvr.cfg`.
+- One build serves both editions: the per-game modules are byte-identical apart
+  from their Authenticode signature (`docs/MCC-EDITIONS-EVIDENCE.md`). Only the
+  launcher is edition-aware.
 - `tools/install-candidate.ps1` requires git `HEAD` to equal the package's
   `source_commit`. To reinstall an older candidate, check out that commit first.
 - Verify the installed DLL's SHA-256 separately; the log does not contain it.
