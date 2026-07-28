@@ -38,8 +38,12 @@ INSTALL
 4. Make SteamVR the default OpenXR runtime, then run halo3xr_launcher.exe.
 
    Steam:            start Steam and SteamVR first.
-   Microsoft Store:  Steam does not have to be running for the game, but
-                     SteamVR does have to be running for the headset.
+   Microsoft Store:  start SteamVR, and be signed in to the Xbox app. Steam
+                     itself does not have to be running.
+
+   On the Microsoft Store the launcher starts the game for you through the
+   Xbox app - do NOT start Halo: MCC first. The game takes a few seconds
+   longer to appear than on Steam; that is normal, just wait.
 
 The final path must be one of:
 

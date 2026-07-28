@@ -62,16 +62,60 @@ two applications, both entry point `Windows.FullTrustApplication`:
   Services)"*
 
 `MicrosoftGame.config` maps `HaloMCCShippingNoEAC` to
-`MCC\Binaries\Win64\MCCWinStore-Win64-Shipping.exe`. **Starting that executable
-directly is the Store edition's own anti-cheat-off path**, exactly as starting
-`MCC-Win64-Shipping.exe` directly is Steam's. The launcher therefore uses the
-same suspended-create + `CreateRemoteThread`/`LoadLibraryW` injection for both,
-and EAC is never started on either.
+`MCC\Binaries\Win64\MCCWinStore-Win64-Shipping.exe`.
 
-`PROC_THREAD_ATTRIBUTE_PACKAGE_FULL_NAME` does **not** exist in the Windows SDK
-(checked `10.0.26100.0`, `processthreadsapi.h` and `WinBase.h`), so there is no
-supported `CreateProcess` attribute for granting package identity. Nothing in
-the mod needs it.
+**`CreateProcess` on that executable can never work.** Measured 2026-07-28 with
+no mod involved at all:
+
+```
+bare exe, no args, no injection   -> EXITED after 211 ms, exit code 0
+our exact render args, no mod     -> EXITED after 223 ms, exit code 0
+```
+
+Exit code 0, no `Application Error` event, and MCC writes no log of its own: a
+deliberate early self-exit, not a crash. The process has no package identity and
+therefore no licence. There is **no** `CreateProcess` attribute that grants
+identity — the full `PROC_THREAD_ATTRIBUTE_*` list in the Windows SDK
+(`10.0.26100.0`, `WinBase.h`) contains nothing package-related, and
+`PROC_THREAD_ATTRIBUTE_PACKAGE_FULL_NAME` does not exist. **Renaming the
+executable to the Steam name therefore cannot fix this**, because the name was
+never what failed.
+
+The supported route is packaged activation, and it is what the launcher now
+uses. Verified end to end on the installed candidate:
+
+```
+activation OK (helper pid 3692)          <- ActivateApplication returns S_OK
+game process appeared, pid 31528         <- 4.2 s later
+game loader ready; injecting             <- kernel32 present in module list
+DLL injected OK into the running game    <- 22 ms after the readiness gate
+game still running after 12s
+```
+
+Facts that follow, all measured:
+
+- `IApplicationActivationManager::ActivateApplication` returns the pid of
+  **`GameLaunchHelper.exe`**, not the game. The game process appears roughly
+  4 seconds later and must be found by name.
+- **Activation arguments are forwarded to the game verbatim.** The live process
+  command line was
+  `"...\MCCWinStore-Win64-Shipping.exe" -WINDOWED -ResX=3262 -ResY=2352`, so the
+  Store edition gets the same VR render surface as Steam. (The Xbox app's own
+  Play button passes **no** arguments — that command line is bare.)
+- `OpenProcess(PROCESS_ALL_ACCESS)` on the packaged, full-trust game process
+  succeeds from an ordinary medium-integrity process, so remote injection works.
+- The process cannot be created suspended, so the launcher polls at 5 ms and
+  gates injection on `kernel32.dll` appearing in the module list rather than
+  injecting into the uninitialised-loader window.
+
+Activating `HaloMCCShippingNoEAC` is the Store equivalent of running
+`MCC-Win64-Shipping.exe` directly on Steam, so EasyAntiCheat is still never
+started on either edition.
+
+The running executable's real path is
+`C:\Program Files\WindowsApps\Microsoft.Chelan_1.3528.0.0_x64__8wekyb3d8bbwe\MCC\Binaries\Win64\`,
+**not** the `N:\XBOX\...\Content` path the launcher discovers. The content folder
+is only a view; discovery and injection are independent, so this does not matter.
 
 ### Filesystem facts that matter for deployment
 

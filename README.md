@@ -67,7 +67,12 @@ needs any game file renamed.
    folder.
 5. Make SteamVR the default OpenXR runtime and start SteamVR, then run
    `halo3xr_launcher.exe`. On Steam, start Steam as well; the Microsoft Store
-   edition does not need Steam running for the game itself.
+   edition does not need Steam running for the game itself, but you must be
+   signed in to the Xbox app.
+
+On the Microsoft Store edition the launcher starts the game for you through the
+Xbox app, so do **not** start Halo: MCC yourself first. The game takes a few
+seconds longer to appear than on Steam — that is expected.
 
 The final path must end in one of:
 
