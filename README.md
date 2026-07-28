@@ -4,25 +4,21 @@
 ### ALVR Support and default Steam VR branch is being looked into
 
 
-## 🚧 Features in Development
+## 🚧 What I'm working on RN
 | Feature                                            | Status         |
 | -------------------------------------------------- | -------------- |
-| ALVR Support                                       | 🟡 In Progress |
+| ALVR Support (double vision fix)                   | 🟡 In Progress |
 | Halo: Reach Visual/UI Fixes                        | 🟡 In Progress |
 | Space-Sky Bloom Bug Fix (Halo Reach)               | 🟡 In Progress |
 | Xbox App / Game Pass Support                       | 🟡 In Progress |
 | SMAA T2X Support                                   | 🟡 In Progress |
 | Optional 2D Theater Mode for Cutscenes             | 🟡 In Progress |
-| Controller Mode                                    | 🟡 In Progress |
-| Head-Aiming Mode                                   | 🟡 In Progress |
+| Gamepad support/Head-Aiming Mode                   | 🟡 In Progress |
+|                                                    | 🟡 In Progress |
 | Complete F1 Menu UI Restructure and Reorganization | 🟡 In Progress |
 
 > **Note:** The optional 2D theater mode will be enabled by default for cutscenes, but players will be able to disable it.
 
-
-
-### HALO 4 WILL BEGIN SOON
-> Halo 3 and ODST work best, reach has some visual bugs atm 
 > **DO NOT ACCEPT FIXES FOR THIS MOD FROM OUTSIDE SOURCES. WE DON'T KNOW WHAT'S
 > IN THEM.**
 >
