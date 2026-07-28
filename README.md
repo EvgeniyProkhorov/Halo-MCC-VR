@@ -8,14 +8,14 @@
 ## 🚧 What I'm working on RN
 | Feature                                            | Status         |
 | -------------------------------------------------- | -------------- |
-| ALVR Support (double vision fix)                   | 🟡 In Progress |
+| ALVR Support (double vision fix)                   | in next update |
 | Halo: Reach Visual/UI Fixes                        | 🟡 In Progress |
 | Space-Sky Bloom Bug Fix (Halo Reach)               | 🟡 In Progress |
-| Xbox App / Game Pass Support                       | 🟡 In Progress |
-| SMAA T2X Support                                   | 🟡 In Progress |
+| Xbox App / Game Pass Support                       | in next update  |
+| Pause menu chords                                  |  In progress    |
 | Optional 2D Theater Mode for Cutscenes             | 🟡 In Progress |
 | Gamepad support/Head-Aiming Mode                   | 🟡 In Progress |
-|  Scopes and weapon zoom fixes                                                  | 🟡 In Progress |
+|  Scopes and weapon zoom fixes                      | 🟡 In Progress |
 | Complete F1 Menu UI Restructure and Reorganization | 🟡 In Progress |
 
 > **Note:** The optional 2D theater mode will be enabled by default for cutscenes, but players will be able to disable it.
