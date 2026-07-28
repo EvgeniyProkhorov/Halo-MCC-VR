@@ -1,4 +1,5 @@
 GAMEPASS IS NOT SUPPORTED ATM HOTFIX IS OTW FOR THAT
+ALVR Support and non steam be beta branch is being looked into
 
 > ### HALO 4 WILL BEGIN SOON
 > Halo 3 and ODST work best, reach has some visual bugs atm 
