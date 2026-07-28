@@ -4446,6 +4446,28 @@ float4 ps_scope_linearize(VSOut i):SV_Target { return paint(i.uv,true); }
             Fail(msg, r);
             return false;
         }
+        // Record WHICH headset this is, not just which runtime. SteamVR fronts
+        // PSVR2, Index, Vive, Virtual Desktop, Steam Link and ALVR alike, so
+        // "OpenXR runtime: SteamVR/OpenXR" identifies almost nothing. On
+        // 2026-07-28 that cost hours: preserved logs were attributed to a
+        // headset from a code comment rather than evidence, and two theories
+        // were built on the wrong attribution before the user caught it. A log
+        // that cannot tell its own sessions apart cannot settle an argument.
+        XrSystemProperties systemProperties{XR_TYPE_SYSTEM_PROPERTIES};
+        if (XR_SUCCEEDED(
+                xrGetSystemProperties(g_instance, g_systemId, &systemProperties)))
+        {
+            LOG("headset: '%s' (vendor 0x%04X) on runtime %s",
+                systemProperties.systemName, systemProperties.vendorId,
+                g_status.runtime);
+        }
+        else
+        {
+            // Not fatal and not silent: every session must still say something
+            // about which headset produced it.
+            LOG("headset: model NOT reported by runtime %s; identify this "
+                "session by its per-eye FOV instead", g_status.runtime);
+        }
         LOG("OpenXR instance ready; headset found on runtime %s", g_status.runtime);
         return true;
     }

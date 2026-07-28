@@ -36,6 +36,75 @@ milestone, not a public release or tag. The public known-good product remains
 | Reach milestone | Shared virtual-controller transport only; Reach runtime hooks remain OFF |
 | Preserved test evidence | `out/test-runs/a5524d3-reach-h3-odst-headset-pass-20260724-023358Z` |
 
+### ACCEPTED: native per-eye FOV submission (ALVR double vision) - 2026-07-28
+
+Headset confirmed by the user across a couple of runs covering **all three
+titles** (Halo 3, ODST, Reach), so the Halo 3 regression for this shared-path
+change is covered. Fixes double vision on ALVR without regressing the PSVR2
+baseline.
+
+| Identity | Value |
+| --- | --- |
+| Source | `73dfe323b2e5f87d2111f8594fb82c6d35897992` (`fix/native-fov-projection`, off `4b85134`) |
+| Build | Release x64, preset `release`, ODST ON, Reach ON, ReachRender ON |
+| Candidate package | `out/candidates/73dfe32-reach-fp-parity-20260728-141241183Z` |
+| `halo3xr.dll` SHA-256 | `233B45DD9761EFCC2B7B366A5CE91B799EECD235B06068E7216AA73D82DEF014` |
+| `halo3xr_launcher.exe` SHA-256 | `EAF6D3E622D04A9A2FDEBD1F7B10ECAE20FA3A5A40DC2289BE86445485AFE9B1` |
+
+**Symptom.** Warped, stretched, doubled image in gameplay only - never in menus,
+which are one flat quad identical in both eyes. Reported by testers on wired
+Quest connections and reproduced by the user on ALVR.
+
+**Root cause.** Halo can only raster a symmetric frustum, so `RenderViewHook`
+renders a symmetric *cover* wide enough to contain the headset's asymmetric
+per-eye angles, and `SubmitPreparedFrame` submitted that cover as the projection
+layer's FOV across the whole slice. That is legal OpenXR and SteamVR's
+compositor resolves it, but ALVR lens-corrects and reprojects from its own view
+parameters rather than the layer's, so a layer whose FOV is not the native view
+FOV is sampled with the wrong frustum. Upstream `alvr-org/ALVR#1306`, open since
+2022: "ALVR does not account for the missing space in the frame when the FOV is
+any lower than 100%".
+
+**Fix.** Submit the runtime's own per-eye FOV and let `subImage.imageRect`
+select the sub-rectangle of the cover corresponding to it, deriving the
+submitted FOV back from the rounded integer rect so the pair describes one
+frustum exactly. No resolution is lost - the compositor was already cropping to
+that region. **No per-headset constants**: everything derives from what the
+runtime reports, so this generalises to any headset and any compositor.
+
+**The A/B that found it.** One Quest 3, one build (`2458ed8`), identical
+reported optics (`L-54.0 R40.0 U44.0 D-55.0`, IPD 69.3 mm): clean through
+Virtual Desktop and Steam Link, doubled through ALVR at both 120 Hz and 90 Hz.
+The user's decisive observation was that the image snaps correct the instant the
+SteamVR dashboard composites it, which is ALVR drawing at its own native FOV.
+
+Accepted-run evidence, same DLL, zero `M2 WARNING` lines:
+
+| Headset | Submitted layer |
+| --- | --- |
+| Quest 3 / ALVR | `cover 54.0/55.0 deg -> rect (512,444)+2112x2296 of 2624x2740, fov L-40.0 R54.0 U44.0 D-55.0` |
+| PSVR2 (regression) | `cover 61.5/53.0 deg -> rect (897,0)+2795x3764 of 3692x3764, fov L-43.4 R61.5 U53.0 D-53.0` |
+
+The submitted FOV equals the runtime's native per-eye FOV exactly in both. The
+PSVR2 rect is full height because that headset's vertical FOV is symmetric, so
+only the horizontal over-render is cropped.
+
+**Two theories refuted on the way - do not resurrect.** (1) `xrLocateViews`
+running twice per frame (`2458ed8`, parked on `fix/stereo-single-locate-per-frame`):
+a real defect and a correct-by-spec fix, but not this bug - the symptom was
+unchanged. (2) Quest 3's vertically asymmetric FOV versus PSVR2's symmetric FOV,
+built on the hardcoded `kNativeRenderWidth/Height = 2912x2100` whose launcher
+comment cites "PSVR2's symmetric coverage ... aspect near 1.386:1" - killed by
+VD and Steam Link being clean on the same Quest 3 optics. Refresh rate was also
+ruled out: ALVR missed ~17x more frame deadlines than VD, yet the 90 Hz ALVR run
+still doubled.
+
+**Process note.** Preserved logs were labelled by headset from a *code comment*
+rather than evidence, and two theories were built on that wrong attribution
+before the user caught it. The mod did not call `xrGetSystemProperties`, so no
+log recorded which headset ran - SteamVR fronts PSVR2, Index, Virtual Desktop,
+Steam Link and ALVR alike. Fixed separately.
+
 ### ACCEPTED: Reach VR crosshair + left hand + no-unhook - 2026-07-26
 
 Headset confirmed by the user in one session. Reach is still experimental; the
