@@ -2,6 +2,8 @@ HALO MCC VR - MANUAL SETUP
 ===========================
 
 Supports Halo 3, Halo 3: ODST and Halo: Reach. Reach is new in 0.3.0.
+Microsoft Store / Xbox app (Game Pass) support is new in 0.3.1, along with a
+fix for double vision on ALVR.
 
 On Reach the left trigger and X are swapped compared to Halo 3 and ODST, so
 grenades sit on X.
@@ -56,6 +58,27 @@ included launcher and never use the mod in anti-cheat-enabled matchmaking.
 The launcher writes the edition it detected into halo3xr_launcher.log, so if it
 ever picks the wrong one that line tells you.
 
+GAME PASS: THE 9-SECOND FREEZE ON THE FIRST LOADING SCREEN
+----------------------------------------------------------
+On the Microsoft Store / Xbox app edition only, MCC's loading screen locks up
+for about nine seconds shortly after launch. In the headset it looks like a
+crash: the picture freezes, and since your headset keeps re-projecting the last
+frame it was handed, you can still look around a completely still image.
+
+It is NOT a crash and it is NOT the mod - it is MCC's own game loop stopping.
+Measured back to back on one PC: the Store edition stalls 9.0 seconds every
+launch, the Steam edition stalls zero times. Anti-cheat and encrypted game
+content were both tested and ruled out.
+
+Just wait. It clears by itself and the game runs normally afterwards.
+halo3xr.log records it as a STALL line naming how long the game was gone.
+
+Frame rate on Game Pass is NOT worse than Steam - both settle at the same
+ceiling. If yours feels halved, that is your VR runtime's motion smoothing /
+ASW pacing the game at half your headset's refresh because it cannot hold the
+full rate. The log prints "app cadence" next to "panel" so you can see it.
+Turn motion smoothing off, or lower resolution_scale.
+
 UPDATE - REPLACE YOUR CONFIG
 ----------------------------
 Close MCC completely, then replace ALL THREE files: halo3xr.dll,
@@ -64,8 +87,8 @@ halo3xr_launcher.exe AND halomccvr.cfg.
 Replace the config. Do not keep your old one. This is different from previous
 updates, which told you to keep it.
 
-0.3.0 adds settings that older config files do not contain, and there is no
-migration step: any setting your old file is missing silently falls back to a
+0.3.0 and later add settings that older config files do not contain, and there
+is no migration step: any setting your old file is missing silently falls back to a
 built-in default instead of the shipped value. The most visible casualty is
 fit_desktop_window, whose built-in default is off while the shipped config turns
 it on - keeping an old config can therefore cap your headset frame rate.
