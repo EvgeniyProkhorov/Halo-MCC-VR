@@ -4,8 +4,9 @@ Authoritative as of 2026-07-27. This file is the only active accepted-build
 pointer. Detailed pre-cleanup experiments remain available in Git history; they
 are evidence, not instructions.
 
-> **Start here: "BASELINE: authored crosshairs on all three titles - 2026-07-27"
-> below is the current working state.** Everything dated earlier is history.
+> **Start here: "PUBLIC RELEASE: MCC VR Alpha 0.3.0 - 2026-07-27" below is the
+> current accepted state**, and the first public release containing Halo: Reach.
+> Everything dated earlier is history.
 > Several older sections describe Reach features as impossible, mandatory, or
 > not yet built that have since been built and headset-confirmed - in
 > particular the authored crosshair, which older text calls unimplementable in
@@ -18,13 +19,67 @@ are evidence, not instructions.
 > instead of checked. If a comment or doc says a title cannot do something,
 > verify it against the code before building on it.
 
-## Newest headset-accepted private cumulative source
+## PUBLIC RELEASE: MCC VR Alpha 0.3.0 - 2026-07-27
 
-The current development pointer is commit
+**The public known-good product is now `MCC_VR_ALPHA_0.3.0`, the first release
+to include Halo: Reach.** It supersedes `MCC_VR_ALPHA_0.2.2` (Halo 3 + ODST).
+Everything below this section is development history.
+
+| Identity | Value |
+| --- | --- |
+| Runtime source | `4b85134bdef1cd5785a4e9246bd5c92191fe6647` |
+| Build | Release x64, preset `release`, ODST ON, Reach ON |
+| Candidate package | `out/candidates/4b85134-reach-fp-parity-20260727-145719316Z` |
+| `halo3xr.dll` SHA-256 | `CE43FC67A72D14B6D1D9508C4BB6D8461A7733A303CC94B5784BA0274CE64E9F` |
+| `halo3xr_launcher.exe` SHA-256 | `0433A47883AAA9516C25F1830F8DC33EB15098CABDC04EDC223250B1EFBF25F0` |
+| `halomccvr.cfg` SHA-256 | `D4D4AA1A687174EB5A01859353AE67B987F636013132FF711EADC4C3157A8317` |
+| ZIP SHA-256 | `BE1C084F3F2D40CA95A22B66DF4644DF4A3576F7D2D70E001FB11B50AB4C6922` |
+| Title coverage | Halo 3, Halo 3: ODST, Halo: Reach |
+| Headset result | Accepted. Halo 3 + ODST regression passed, clearing the debt owed for `5cd1181` and `32d92a7`. The exact published ZIP was additionally validated on a second machine (laptop) before release. |
+
+Two things about this release are deliberate and must not be silently reverted.
+
+**The ZIP ships `halomccvr.cfg`, and users are told to REPLACE their old one.**
+This reverses the advice given through 0.2.2. `src/common/config.cpp` parses
+`config_version` but performs no migration, so any key an older config lacks
+silently falls back to its built-in default instead of the shipped value.
+`fit_desktop_window` defaults to `false` while the shipped config sets it to
+`1`, so a retained old config can reintroduce the desktop-window frame-rate cap.
+The shipped file is the maintainer's live, headset-tuned config, copied verbatim
+at packaging time - not generated defaults.
+
+**Release rebuilds are not byte-identical** (the DLL embeds compile date/time).
+The published ZIP is the exact artifact that passed the second-machine test.
+Do not rebuild and republish without repeating that validation.
+
+### ACCEPTED: Reach muzzle height - 2026-07-27
+
+`muzzle_height_m` raises the re-parented muzzle effect origin - the flash and
+the point rounds appear to leave - along the gun's own up axis. Headset-accepted
+at **0.21**, which is the value in the shipped config.
+
+The defect it fixes: `ReachReparentEffectMatrix` transfers Reach's effect
+markers off the stock head-anchored weapon onto the controller-driven gun, and
+that transfer is deliberately translation-only. Preserving the authored marker
+offset exactly is what puts the origin on the barrel line, but it also carries
+the authored *height* straight over, which read in-headset as several inches
+low. The lift is applied after the projectile's origin and direction resolve, so
+where rounds land is untouched - the user confirmed impact was already correct
+before the fix and unchanged after. `Game_ComputeAimStick` was not modified.
+
+This is NOT the rejected 2026-07-25 projectile-origin lineage. That work tried
+to relocate the projectile spawn itself and failed on coordinate-space errors
+("too high/left", then "too far right and rearward"), which is why the docs
+reject centimetre offsets. This is a visual-origin calibration on an already
+correct barrel alignment, and the exclusion of offset-based fixes in
+`docs/REACH-SIGNATURE-EVIDENCE.md` refers to that different problem.
+
+## Previous private cumulative source (superseded by 0.3.0)
+
+The prior development pointer was commit
 `a5524d3fe58e4ed5507c27429ccca52a3d4fdf7d` on `reach/campaign-parity`.
-It descends from the accepted 0.2.2 runtime source and is an accepted private
-milestone, not a public release or tag. The public known-good product remains
-`MCC_VR_ALPHA_0.2.2`.
+It descends from the accepted 0.2.2 runtime source and was an accepted private
+milestone, not a public release or tag.
 
 | Identity | Value |
 | --- | --- |

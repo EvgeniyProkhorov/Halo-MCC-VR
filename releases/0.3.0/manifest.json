@@ -1,0 +1,73 @@
+{
+  "schema_version": 1,
+  "release": "MCC_VR_ALPHA_0.3.0",
+  "release_url": "https://github.com/pancreations/Halo-MCC-VR/releases/tag/MCC_VR_ALPHA_0.3.0",
+  "supersedes": "MCC_VR_ALPHA_0.2.2",
+  "tag_commit": "85b37bf4b6a60f54934c32ceac6d8e518dbc80b1",
+  "runtime_source_commit": "4b85134bdef1cd5785a4e9246bd5c92191fe6647",
+  "build": {
+    "architecture": "x64",
+    "configuration": "Release",
+    "HALOMCCVR_EXPERIMENTAL_ODST_BRINGUP": true,
+    "HALOMCCVR_EXPERIMENTAL_REACH_BRINGUP": true,
+    "HALOMCCVR_EXPERIMENTAL_REACH_RENDER_CANDIDATE": true
+  },
+  "titles": [
+    "Halo 3",
+    "Halo 3: ODST",
+    "Halo: Reach"
+  ],
+  "published_artifacts": {
+    "zip": {
+      "name": "MCC_VR_ALPHA_0.3.0.zip",
+      "download_url": "https://github.com/pancreations/Halo-MCC-VR/releases/download/MCC_VR_ALPHA_0.3.0/MCC_VR_ALPHA_0.3.0.zip",
+      "sha256": "BE1C084F3F2D40CA95A22B66DF4644DF4A3576F7D2D70E001FB11B50AB4C6922",
+      "contents": [
+        "halo3xr.dll",
+        "halo3xr_launcher.exe",
+        "halomccvr.cfg",
+        "LICENSE",
+        "MANUAL-README.txt"
+      ]
+    },
+    "halo3xr.dll": {
+      "sha256": "CE43FC67A72D14B6D1D9508C4BB6D8461A7733A303CC94B5784BA0274CE64E9F"
+    },
+    "halo3xr_launcher.exe": {
+      "sha256": "0433A47883AAA9516C25F1830F8DC33EB15098CABDC04EDC223250B1EFBF25F0"
+    },
+    "halomccvr.cfg": {
+      "sha256": "D4D4AA1A687174EB5A01859353AE67B987F636013132FF711EADC4C3157A8317"
+    }
+  },
+  "changes": [
+    "Halo: Reach is now supported in VR alongside Halo 3 and Halo 3: ODST, with per-eye stereo, 6DOF head tracking, motion-controller aim, hands and weapon, HUD, cutscenes and vibration. New title; announced rather than itemised, since no prior release shipped it.",
+    "Reach control layout: the left trigger and X are swapped relative to Halo 3 and ODST, so grenades sit on X.",
+    "ODST: VR recovers after opening a menu instead of staying disengaged until the title exits.",
+    "ODST: VR engages reliably at level start instead of depending on a gap in the camera tail.",
+    "ODST: left stick click opens the map screen while the D-pad gesture is held.",
+    "Halo 3 and ODST: the desktop window fits the monitor while the headset keeps full render resolution, and fitted menus remain clickable.",
+    "Halo 3 and ODST: the controller is retained across title transitions within one session.",
+    "Halo 3 and ODST: resolution slider raised to 8K-class with rescaled F1 tiers.",
+    "Halo 3 and ODST: mod-owned resolve, sharpening and SMAA 1x / FXAA in the eye blit."
+  ],
+  "config_policy": {
+    "ships_config": true,
+    "instruction": "Replace halomccvr.cfg; do not keep the previous file.",
+    "reason": "config.cpp parses config_version but performs no migration, so any key an older config lacks silently falls back to a built-in default instead of the shipped value. fit_desktop_window in particular defaults to false while the shipped config sets it to 1, which can reintroduce the desktop-window frame-rate cap.",
+    "shipped_config_source": "The maintainer's live, headset-tuned halomccvr.cfg, copied verbatim at packaging time."
+  },
+  "known_issues": [
+    "Reach: character tags and navpoints are misplaced in 3D.",
+    "Reach: hud_curvature and hud_vertical_offset have no effect.",
+    "ODST: the first captioned opening cutscene can be black; skip that scene once.",
+    "MCC can retain multiple title modules after switching games; fully restart MCC if a level returns to the menu.",
+    "ODST brightness stays at the game default."
+  ],
+  "dependencies": {
+    "OpenXR-SDK": "5267613edf3d937e3d77556a106a65c2f82b25c6",
+    "MinHook": "c3fcafdc10146beb5919319d0683e44e3c30d537",
+    "Dear ImGui": "8936b58fe26e8c3da834b8f60b06511d537b4c63"
+  },
+  "rebuild_note": "Source rebuilds are not byte-identical because the DLL embeds compile date/time and toolchain output can differ. The published ZIP is the exact artifact validated on a second machine before release; do not rebuild and republish without repeating that validation."
+}

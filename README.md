@@ -1,3 +1,46 @@
+### REACH/3/ODST Now Playable in VR 
+### Work on HALO 4 will begin SOON after these hotfixes release. Yes Halo 1/2 will be in the collection eventually!
+### GAMEPASS IS NOT SUPPORTED ATM, A HOTFIX IS OTW FOR THAT! 
+### ALVR Support and default Steam VR branch is being looked into
+### HALO REACH HOTFIX OTW 
+
+
+## 🚧 What I'm working on RN
+| Feature                                            | Status         |
+| -------------------------------------------------- | -------------- |
+| ALVR Support (double vision fix)                   | 🟡 In Progress |
+| Halo: Reach Visual/UI Fixes                        | 🟡 In Progress |
+| Space-Sky Bloom Bug Fix (Halo Reach)               | 🟡 In Progress |
+| Xbox App / Game Pass Support                       | 🟡 In Progress |
+| SMAA T2X Support                                   | 🟡 In Progress |
+| Optional 2D Theater Mode for Cutscenes             | 🟡 In Progress |
+| Gamepad support/Head-Aiming Mode                   | 🟡 In Progress |
+|  Scopes and weapon zoom fixes                                                  | 🟡 In Progress |
+| Complete F1 Menu UI Restructure and Reorganization | 🟡 In Progress |
+
+> **Note:** The optional 2D theater mode will be enabled by default for cutscenes, but players will be able to disable it.
+
+> **DO NOT ACCEPT FIXES FOR THIS MOD FROM OUTSIDE SOURCES. WE DON'T KNOW WHAT'S
+> IN THEM.**
+>
+> **Two things are required:**
+>
+> 1. **The SteamVR Beta.** A user reported that it fixes the double vision.
+> 2. **SteamVR set as your default OpenXR runtime.**
+>
+> Compatibility across headsets may vary. If it doesn't work, try a different
+> way to connect if you can — but follow the two requirements above and you
+> should be good.
+>
+> **Let me know in the [issues](https://github.com/pancreations/Halo-MCC-VR/issues)
+> if your headset is not working** and someone or I can help you.
+>
+> For a GPU performance boost, try
+> [Quad-Views-Foveated](https://github.com/mbucchia/Quad-Views-Foveated).
+>
+> **Please list your specs if you're having issues.** It's a guessing game over
+> here.
+
 # Halo MCC VR
 
 > **Hi, I'm [pancreations](https://www.instagram.com/pancreations/)** — a 3D
@@ -112,9 +155,9 @@ build folder as an installation source.
 Release `0.3.0` hashes:
 
 ```text
-ZIP      __ZIP_SHA256__
-DLL      __DLL_SHA256__
-Launcher __LAUNCHER_SHA256__
+ZIP      BE1C084F3F2D40CA95A22B66DF4644DF4A3576F7D2D70E001FB11B50AB4C6922
+DLL      CE43FC67A72D14B6D1D9508C4BB6D8461A7733A303CC94B5784BA0274CE64E9F
+Launcher 0433A47883AAA9516C25F1830F8DC33EB15098CABDC04EDC223250B1EFBF25F0
 ```
 
 Windows security software may flag or quarantine unsigned injection-based VR
