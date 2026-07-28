@@ -922,6 +922,12 @@ namespace
     std::atomic<bool> g_waitedStateFailed{false};
     std::atomic<XrResult> g_waitedStateResult{XR_SUCCESS};
     std::atomic<uint64_t> g_waitPacketMisses{0};
+    // A parked wait worker means the game has not reached Present yet. Normal
+    // parks are one frame period; this is the threshold above which the player
+    // is looking at a frozen reprojected image and thinks the game crashed.
+    constexpr uint64_t kFrameStallNoticeMs = 1000;
+    std::atomic<uint64_t> g_frameStalls{0};
+    std::atomic<uint64_t> g_frameStallWorstMs{0};
     std::atomic<uint64_t> g_waitFailuresObserved{0};
     std::atomic<uint64_t> g_waitEventSignalFailures{0};
     std::atomic<uint64_t> g_waitCallSequence{0};
@@ -5578,6 +5584,18 @@ float4 ps_scope_linearize(VSOut i):SV_Target { return paint(i.uv,true); }
             // The event is only a wakeup; the exact sequence acknowledgement is
             // the permit. A timeout or stale event must never authorize another
             // xrWaitFrame, because concurrent waits are undefined by OpenXR.
+            //
+            // Parking here means the render thread has not claimed this packet,
+            // which means the game has not reached its Present. A park of a few
+            // milliseconds is the normal cadence; seconds of it is the freeze
+            // that reads as a crash to the player. Time it and name it, because
+            // nothing else in the log can: `status:` is emitted on the game's
+            // render thread and the XInput diagnostic is driven by the game's
+            // own polling, so both simply stop and leave an unexplained gap.
+            // This is observation only - it never claims the packet, and no
+            // frame submission behaviour changes.
+            const uint64_t parkStartMs = GetTickCount64();
+            bool parkStallReported = false;
             for (;;)
             {
                 if (g_waitThreadStop.load(std::memory_order_acquire))
@@ -5600,6 +5618,24 @@ float4 ps_scope_linearize(VSOut i):SV_Target { return paint(i.uv,true); }
                     SetEvent(g_waitReadyEvent);
                     return 0;
                 }
+                if (!parkStallReported &&
+                    GetTickCount64() - parkStartMs >= kFrameStallNoticeMs)
+                {
+                    parkStallReported = true;
+                    g_frameStalls.fetch_add(1, std::memory_order_relaxed);
+                    LOG("STALL: the game has not presented for %llums - the "
+                        "headset is showing a reprojected frame and the player "
+                        "sees a freeze (this is the game, not the VR runtime)",
+                        static_cast<unsigned long long>(kFrameStallNoticeMs));
+                }
+            }
+            if (parkStallReported)
+            {
+                const uint64_t stalledMs = GetTickCount64() - parkStartMs;
+                if (stalledMs > g_frameStallWorstMs.load(std::memory_order_relaxed))
+                    g_frameStallWorstMs.store(stalledMs, std::memory_order_relaxed);
+                LOG("STALL ENDED: the game resumed presenting after %llums",
+                    static_cast<unsigned long long>(stalledMs));
             }
         }
         return 0;
@@ -7196,7 +7232,7 @@ void VR_BeforePresent(IDXGISwapChain* sc)
             "renderWindow p95 %.2fms; xrEndFrame p95 %.2fms; "
             "DXGI Present p95 %.2fms; wait handoff p95 %.2fms; "
             "prediction error p95 %.3fms; missed=%llu duplicate=%llu "
-            "orderFailures=%llu firstCamera=%.3fms",
+            "orderFailures=%llu firstCamera=%.3fms stalls=%llu worstStall=%llums",
             TimingPercentile(g_presentIntervalsMs, 0.95),
             TimingPercentile(g_presentIntervalsMs, 0.99),
             TimingPercentile(g_renderWindowMs, 0.95),
@@ -7207,7 +7243,11 @@ void VR_BeforePresent(IDXGISwapChain* sc)
             static_cast<unsigned long long>(g_missedPredictions),
             static_cast<unsigned long long>(g_duplicatePredictions),
             static_cast<unsigned long long>(g_frameOrderFailures),
-            g_firstCameraDelayUs.load(std::memory_order_relaxed) / 1000.0);
+            g_firstCameraDelayUs.load(std::memory_order_relaxed) / 1000.0,
+            static_cast<unsigned long long>(
+                g_frameStalls.load(std::memory_order_relaxed)),
+            static_cast<unsigned long long>(
+                g_frameStallWorstMs.load(std::memory_order_relaxed)));
         g_timingLogStartMs = timingNowMs;
     }
 
