@@ -99,12 +99,17 @@ void ReachRenderCandidate_ColdPoll(
     }
     else
     {
+        // Name the digest that was rejected. "backing-file-identity" alone does
+        // not say whether the file was unreadable or simply a build this table
+        // does not describe, and that ambiguity cost real diagnosis time.
+        const char* observed = ReachRender_LastBackingFileSha256();
         LOG("Reach render cold preflight FAIL (%s): main=%u inner=%u "
-            "frustum=%u; stock Reach remains active",
+            "frustum=%u; module sha256 %s; stock Reach remains active",
             ReachRender_LoadedImageFailureName(result.failure),
             result.proof.mainRenderViewMatchCount,
             result.proof.playerViewRenderMatchCount,
-            result.proof.frustumHelperMatchCount);
+            result.proof.frustumHelperMatchCount,
+            (observed && observed[0]) ? observed : "(not read)");
     }
 }
 

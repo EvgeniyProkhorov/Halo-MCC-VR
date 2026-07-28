@@ -139,9 +139,48 @@ executable name is present **or** that marker file is, so a Store install whose
 executable was renamed to the Steam name — the community workaround this
 replaces — is still detected as Store and is not asked to start Steam.
 
-## Open
+## Why Reach stayed stock on the Store edition — solved
 
-Halo: Reach was reported not to hook, and to have no controls, on the Store
-edition under the rename workaround. Because the modules are byte-identical,
-that cannot be a code, signature or offset difference. It is unexplained and is
-the next thing to investigate; do not attribute it to the edition's binaries.
+Two logs from the **same DLL build** (`fdf6d6b`), one per edition:
+
+```
+Steam       Reach render cold preflight PASS: exact retail image, ...
+Game Pass   Reach render cold preflight FAIL (backing-file-identity):
+            main=0 inner=0 frustum=0; stock Reach remains active
+```
+
+Reach was detected fine on both (`detected supported title Halo: Reach
+(haloreach.dll)`). What rejected it was `HashBackingFile()` in
+`reach_render_preflight.cpp`: it SHA-256s the **whole file on disk** backing the
+loaded module and compared it against a single pinned digest, the Steam one.
+
+The Store copy the game actually loads is
+`C:\Program Files\WindowsApps\Microsoft.Chelan_1.3528.0.0_x64__8wekyb3d8bbwe\haloreach\haloreach.dll`
+— readable (only the launchable *executables* are read-blocked) and byte-diffed
+against the Steam copy with the same result as every other module: **2109
+differing bytes, all of them the PE checksum at `0x1C0` or inside the
+certificate table at `0x00C99E00`. Zero code bytes.**
+
+```
+Steam           len=13229016  sha=738DD2D24EA3AEA1...  <- the pinned digest
+Store (C: pkg)  len=13229016  sha=F9F39CF058FF28C2...  <- what the game loads
+Store (N: view) len=13229016  sha=F9F39CF058FF28C2...  <- identical to it
+```
+
+So a whole-file hash is a hash of the *signature* as much as of the code, and it
+rejected identical code purely for being signed by a different storefront.
+`kReachRetailModuleSha256` is now the list of both signings of this one build.
+That is not a loosening: image size, PE timestamp and every RVA in
+`reach_render_logic.h` were already specific to this single MCC build, so an MCC
+update invalidates the table either way.
+
+Two diagnosis lessons are now built into the code:
+
+- `BackingFileIdentity` used to mean both "file unreadable" and "wrong build".
+  It is now split, with `BackingFileUnreadable` for the former.
+- The failure log names the digest it actually read, so a rejected build
+  identifies itself instead of only saying it did not match.
+
+The reported "no controls" on Reach is consistent with this: the Store log shows
+XInput hooked normally, so controls were not separately broken — Reach simply
+stayed stock, which is what a failed render preflight does by design.

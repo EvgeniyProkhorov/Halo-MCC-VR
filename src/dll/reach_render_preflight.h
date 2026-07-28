@@ -11,6 +11,7 @@ enum class ReachLoadedImageFailure : uint8_t
     InvalidInput,
     ModuleReference,
     BackingFileIdentity,
+    BackingFileUnreadable,
     PeIdentity,
     ExecutableSections,
     SignatureIdentity,
@@ -61,3 +62,8 @@ bool ReachRender_RunLoadedImagePreflight(
 
 const char* ReachRender_LoadedImageFailureName(
     ReachLoadedImageFailure failure) noexcept;
+
+// SHA-256 the last preflight actually read off disk, so a rejected build names
+// itself in the log instead of only saying that it did not match. Empty when
+// the file could not be read at all. Worker-thread-only, like the preflight.
+const char* ReachRender_LastBackingFileSha256() noexcept;

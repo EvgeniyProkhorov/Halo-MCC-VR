@@ -353,19 +353,33 @@ namespace
             hash.Finish(digest) && Hex(digest) == expected;
     }
 
-    bool HashBackingFile(HMODULE module)
+    // Remembering the digest costs nothing on this cold path and makes a
+    // mismatch name what it actually saw. The previous single bool could not
+    // tell "file unreadable" from "wrong build", and that ambiguity cost real
+    // time diagnosing why Reach stayed stock on the Game Pass edition.
+    char g_lastBackingFileSha256[65] = "";
+
+    enum class BackingFileCheck
     {
+        Match,
+        Mismatch,
+        Unreadable,
+    };
+
+    BackingFileCheck CheckBackingFile(HMODULE module)
+    {
+        g_lastBackingFileSha256[0] = '\0';
         std::array<wchar_t, 32768> path{};
         const DWORD length = GetModuleFileNameW(
             module, path.data(), static_cast<DWORD>(path.size()));
         if (!length || length >= path.size())
-            return false;
+            return BackingFileCheck::Unreadable;
         HANDLE file = CreateFileW(
             path.data(), GENERIC_READ,
             FILE_SHARE_READ | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
             FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
         if (file == INVALID_HANDLE_VALUE)
-            return false;
+            return BackingFileCheck::Unreadable;
 
         Sha256 hash;
         bool ok = hash.Initialize();
@@ -386,8 +400,18 @@ namespace
         }
         CloseHandle(file);
         std::array<uint8_t, 32> digest{};
-        return ok && hash.Finish(digest) &&
-            Hex(digest) == kReachRetailModuleSha256;
+        if (!ok || !hash.Finish(digest))
+            return BackingFileCheck::Unreadable;
+
+        const std::string hex = Hex(digest);
+        if (hex.size() == sizeof(g_lastBackingFileSha256) - 1)
+            std::memcpy(g_lastBackingFileSha256, hex.data(), hex.size() + 1);
+        for (const char* accepted : kReachRetailModuleSha256)
+        {
+            if (hex == accepted)
+                return BackingFileCheck::Match;
+        }
+        return BackingFileCheck::Mismatch;
     }
 
     bool CheckRel32(
@@ -526,6 +550,7 @@ const char* ReachRender_LoadedImageFailureName(
     case ReachLoadedImageFailure::InvalidInput: return "invalid-input";
     case ReachLoadedImageFailure::ModuleReference: return "module-reference";
     case ReachLoadedImageFailure::BackingFileIdentity: return "backing-file-identity";
+    case ReachLoadedImageFailure::BackingFileUnreadable: return "backing-file-unreadable";
     case ReachLoadedImageFailure::PeIdentity: return "pe-identity";
     case ReachLoadedImageFailure::ExecutableSections: return "executable-sections";
     case ReachLoadedImageFailure::SignatureIdentity: return "signature-identity";
@@ -536,6 +561,11 @@ const char* ReachRender_LoadedImageFailureName(
     case ReachLoadedImageFailure::Publication: return "publication";
     default: return "unknown";
     }
+}
+
+const char* ReachRender_LastBackingFileSha256() noexcept
+{
+    return g_lastBackingFileSha256;
 }
 
 bool ReachRender_RunLoadedImagePreflight(
@@ -554,8 +584,14 @@ bool ReachRender_RunLoadedImagePreflight(
         result.failure = ReachLoadedImageFailure::ModuleReference;
         return false;
     }
-    if (!HashBackingFile(reinterpret_cast<HMODULE>(pin.m_module)))
+    switch (CheckBackingFile(reinterpret_cast<HMODULE>(pin.m_module)))
     {
+    case BackingFileCheck::Match:
+        break;
+    case BackingFileCheck::Unreadable:
+        result.failure = ReachLoadedImageFailure::BackingFileUnreadable;
+        return false;
+    case BackingFileCheck::Mismatch:
         result.failure = ReachLoadedImageFailure::BackingFileIdentity;
         return false;
     }

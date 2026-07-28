@@ -14,8 +14,25 @@
 
 inline constexpr size_t kReachRetailImageSize = 0x04EDA000;
 inline constexpr uint32_t kReachRetailPeTimestamp = 0x68A0EFE1;
-inline constexpr char kReachRetailModuleSha256[] =
-    "738DD2D24EA3AEA12E1EE9AA4A61094BF116027D42004C35A19E5048608B0894";
+// One retail Reach build, signed once per storefront. A full byte diff of the
+// Steam and Microsoft Store copies (docs/MCC-EDITIONS-EVIDENCE.md) differs only
+// in the PE checksum field at 0x1C0 and inside the Authenticode certificate
+// table at 0x00C99E00: zero code bytes, identical length, identical PE
+// timestamp, identical RVAs. Both digests therefore describe exactly the code
+// this file pins, and the Store copy the game loads out of WindowsApps hashes
+// to the second one.
+//
+// This is not a loosening of the gate. Every other constant here - image size,
+// PE timestamp, and every RVA below - is already specific to this single MCC
+// build, so an MCC update invalidates the whole table either way. Listing the
+// two signings of one build keeps the gate exactly as tight as it was while
+// letting it recognise the edition it was always describing.
+inline constexpr const char* kReachRetailModuleSha256[] = {
+    // Steam
+    "738DD2D24EA3AEA12E1EE9AA4A61094BF116027D42004C35A19E5048608B0894",
+    // Microsoft Store / Xbox app (Game Pass)
+    "F9F39CF058FF28C298CC05964BC40898A57C30D33848FA54D950D8D6C2697E20",
+};
 inline constexpr uintptr_t kReachMainRenderViewRva = 0x000C31F4;
 inline constexpr uintptr_t kReachNormalSetupCallRva = 0x000C36D6;
 inline constexpr uintptr_t kReachNormalSetupTargetRva = 0x0026C204;
