@@ -935,10 +935,9 @@ namespace
     // synchronized (app not visible, shouldRender=0, zero layers submitted) is
     // not what any player saw, and reading one as if it were cost real time on
     // 2026-07-28. The old wording asserted the player was staring at a frozen
-    // frame; these three let the line state what was true instead.
+    // frame; these two let the line state what was true instead.
     std::atomic<int> g_sessionStateShared{XR_SESSION_STATE_UNKNOWN};
     std::atomic<int> g_lastShouldRenderShared{-1};
-    std::atomic<bool> g_stallNoticeOnScreen{false};
     std::atomic<uint64_t> g_waitFailuresObserved{0};
     std::atomic<uint64_t> g_waitEventSignalFailures{0};
     std::atomic<uint64_t> g_waitCallSequence{0};
@@ -1001,115 +1000,6 @@ namespace
     }
 
     const char* SessionStateName(XrSessionState s); // defined below
-
-    // ------------------------------------------------- frozen-game notice
-    //
-    // When MCC's own loop stops, the compositor keeps reprojecting the last
-    // frame we submitted: the picture stays smooth and head tracking still
-    // works, it just never changes, and the player reads that as a crash.
-    //
-    // This is raised on the render thread, in the ordinary frame path: no
-    // watchdog, no second submission route, no change to how any title's frames
-    // are built. Cost when the game is healthy is one subtraction and one
-    // comparison.
-    //
-    // KNOWN LIMIT, measured, not assumed. Everything we draw happens inside the
-    // game's own Present, so a game that stops presenting ENTIRELY takes this
-    // with it: the panel can only be raised on a frame the game actually gives
-    // us. It therefore covers a game that is crawling, and cannot cover a game
-    // that is hard-blocked. The 2026-07-28 Store capture was the hard-blocked
-    // kind -- nine seconds, zero Presents -- so a notice would not have appeared
-    // in it. Covering that case needs the wait worker to submit a pre-rendered
-    // panel itself, which is a real change to the frame path and is NOT built
-    // here; it should not be built until one stall has been captured with the
-    // headset actually showing the game (every stall measured so far happened
-    // while the runtime had us not visible, see the STALL logging below).
-    //
-    // So the log below records, for every stall, whether the notice was up. A
-    // headset session is a measurement either way.
-
-    // How long the game must go dark before we say anything. Under this is an
-    // ordinary hitch, and a panel flashing on every hitch would be worse than
-    // saying nothing at all.
-    constexpr double kStallNoticeArmMs = 1000.0;
-    // How long it must draw normally again before the notice goes away, so a
-    // freeze that limps out one frame at a time cannot strobe the panel.
-    constexpr double kStallNoticeClearMs = 400.0;
-
-    void UpdateStallNotice(double gapMs, LONGLONG nowQpc)
-    {
-        static bool showing = false;
-        static LONGLONG stallStartQpc = 0;
-        static LONGLONG healthySinceQpc = 0;
-        static int lastReportedSeconds = -1;
-
-        if (!g_config.stall_notice)
-        {
-            if (showing)
-            {
-                Menu_ClearNotice();
-                showing = false;
-                g_stallNoticeOnScreen.store(false, std::memory_order_relaxed);
-            }
-            return;
-        }
-
-        if (gapMs >= kStallNoticeArmMs)
-        {
-            if (!showing)
-            {
-                showing = true;
-                g_stallNoticeOnScreen.store(true, std::memory_order_relaxed);
-                lastReportedSeconds = -1;
-                if (!g_qpcFrequency.QuadPart)
-                    QueryPerformanceFrequency(&g_qpcFrequency);
-                // The freeze started one gap ago, not at this Present.
-                stallStartQpc = nowQpc - static_cast<LONGLONG>(
-                    gapMs * static_cast<double>(g_qpcFrequency.QuadPart) / 1000.0);
-                LOG("stall notice: shown after %.0fms without a game frame "
-                    "(session %s, shouldRender=%d)", gapMs,
-                    SessionStateName(static_cast<XrSessionState>(
-                        g_sessionStateShared.load(std::memory_order_relaxed))),
-                    g_lastShouldRenderShared.load(std::memory_order_relaxed));
-            }
-            healthySinceQpc = 0;
-        }
-        else if (showing)
-        {
-            if (!healthySinceQpc)
-                healthySinceQpc = nowQpc;
-            else if (QpcMs(nowQpc - healthySinceQpc) >= kStallNoticeClearMs)
-            {
-                Menu_ClearNotice();
-                showing = false;
-                g_stallNoticeOnScreen.store(false, std::memory_order_relaxed);
-                healthySinceQpc = 0;
-                LOG("stall notice: cleared; the game is drawing again after "
-                    "%.1fs", QpcMs(nowQpc - stallStartQpc) / 1000.0);
-                return;
-            }
-        }
-        if (!showing)
-            return;
-
-        // Retext once a second, not once a frame: the counter is the only part
-        // that changes and nothing here should add per-frame work.
-        const int seconds =
-            static_cast<int>(QpcMs(nowQpc - stallStartQpc) / 1000.0);
-        if (seconds == lastReportedSeconds)
-            return;
-        lastReportedSeconds = seconds;
-
-        char detail[320];
-        sprintf_s(detail,
-                  "The game has not drawn a new frame for %d second%s.\n\n"
-                  "This is the game loading, not the mod and not your headset -- "
-                  "what you are looking at is the last frame VR was given, held "
-                  "still. It usually clears in about ten seconds. You can keep "
-                  "the headset on.",
-                  seconds, seconds == 1 ? "" : "s");
-        Menu_SetNotice("Still loading - please wait", detail);
-    }
 
     template <size_t N>
     double TimingPercentile(const TimingRing<N>& ring, double percentile)
@@ -5826,13 +5716,10 @@ float4 ps_scope_linearize(VSOut i):SV_Target { return paint(i.uv,true); }
                     if (shouldRender == 1)
                         LOG("STALL: the game has not presented for %llums while "
                             "VISIBLE (session %s) - the headset is holding the "
-                            "last frame we submitted and the player is seeing a "
-                            "freeze; the notice was %s",
+                            "last frame we submitted and the player IS seeing a "
+                            "freeze (this is the game, not the VR runtime)",
                             static_cast<unsigned long long>(kFrameStallNoticeMs),
-                            state,
-                            g_stallNoticeOnScreen.load(std::memory_order_relaxed)
-                                ? "on screen" : "NOT on screen (the game stopped "
-                                  "presenting before it could be drawn)");
+                            state);
                     else
                         LOG("STALL: the game has not presented for %llums while "
                             "NOT VISIBLE (session %s, shouldRender=%d) - we were "
@@ -7086,23 +6973,12 @@ float4 ps_scope_linearize(VSOut i):SV_Target { return paint(i.uv,true); }
                 // The menu is submitted in BOTH modes (it used to live only in
                 // the mono-screen branch, which made F1 invisible in stereo).
                 // In stereo it head-locks so it is always in front of you.
-                //
-                // The frozen-game notice rides the same texture and the same
-                // quad. That is the whole point of putting it here: the frame
-                // the compositor holds up through a freeze is the last one this
-                // path submitted, so the explanation is already in it. On its
-                // own it is always head-locked and never takes the pointer.
-                const bool menuOpen = Menu_IsOpen();
-                const bool noticeUp = Menu_HasNotice();
-                if (menuOpen || noticeUp)
+                if (Menu_IsOpen())
                 {
                     const bool menuHeadLocked =
-                        !menuOpen || pausedPresentation || stereo ||
+                        pausedPresentation || stereo ||
                         (g_screenFollow.load() && Game_IsHeadTracking());
-                    if (menuOpen)
-                        UpdateMenuPointer(menuHeadLocked);
-                    else
-                        Menu_ClearVrPointer();
+                    UpdateMenuPointer(menuHeadLocked);
                     if (ID3D11Texture2D* menuTex = Menu_Render())
                     {
                         uint32_t idx = 0;
@@ -7424,14 +7300,8 @@ void VR_BeforePresent(IDXGISwapChain* sc)
     QueryPerformanceCounter(&now);
     QueryPerformanceFrequency(&freq);
     if (g_lastBeforePresentQpc.QuadPart)
-    {
-        const double gapMs = QpcMs(now.QuadPart - g_lastBeforePresentQpc.QuadPart);
-        g_presentIntervalsMs.Add(gapMs);
-        // Second reader of the same measurement. Note this only ever sees gaps
-        // the game survived to present after; a gap it never returns from is
-        // reported by the wait worker instead.
-        UpdateStallNotice(gapMs, now.QuadPart);
-    }
+        g_presentIntervalsMs.Add(
+            QpcMs(now.QuadPart - g_lastBeforePresentQpc.QuadPart));
     g_lastBeforePresentQpc = now;
     g_fpsFrames++;
     if (g_fpsTimer.QuadPart == 0)
