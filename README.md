@@ -1,24 +1,25 @@
-GAMEPASS IS NOT SUPPORTED ATM HOTFIX IS OTW FOR THAT
-ALVR Support and non steam be beta branch is being looked into
-<html>
-<body>
-<!--StartFragment--><html><head></head><body><h2>🚧 Features in Development</h2>
-Feature | Status
--- | --
-ALVR Support | 🟡 In Progress
-Halo: Reach Visual/UI Fixes | 🟡 In Progress
-Space-Sky Bloom Bug Fix on REACH | 🟡 In Progress
-Xbox App / Game Pass Support | 🟡 In Progress
-SMAA T2X Support | 🟡 In Progress
-Optional 2D Theater Mode for Cutscenes | 🟡 In Progress
-Controller Mode | 🟡 In Progress
-Head-Aiming Mode | 🟡 In Progress
-Complete F1 Menu UI Restructure and Reorganization | 🟡 In Progress
+> GAMEPASS IS NOT SUPPORTED ATM HOTFIX IS OTW FOR THAT
+> ALVR Support and non steam be beta branch is being looked into
+### Work on HALO 4 WILL BEGIN SOON along with the entire collection
 
-<blockquote><p><strong>Note:</strong> The optional 2D theater mode will be enabled by default for cutscenes, but players will be able to disable it.</p></blockquote></body></html><!--EndFragment-->
-</body>
-</html>
-> ### HALO 4 WILL BEGIN SOON
+## 🚧 Features in Development
+| Feature                                            | Status         |
+| -------------------------------------------------- | -------------- |
+| ALVR Support                                       | 🟡 In Progress |
+| Halo: Reach Visual/UI Fixes                        | 🟡 In Progress |
+| Space-Sky Bloom Bug Fix                            | 🟡 In Progress |
+| Xbox App / Game Pass Support                       | 🟡 In Progress |
+| SMAA T2X Support                                   | 🟡 In Progress |
+| Optional 2D Theater Mode for Cutscenes             | 🟡 In Progress |
+| Controller Mode                                    | 🟡 In Progress |
+| Head-Aiming Mode                                   | 🟡 In Progress |
+| Complete F1 Menu UI Restructure and Reorganization | 🟡 In Progress |
+
+> **Note:** The optional 2D theater mode will be enabled by default for cutscenes, but players will be able to disable it.
+
+
+
+### HALO 4 WILL BEGIN SOON
 > Halo 3 and ODST work best, reach has some visual bugs atm 
 > **DO NOT ACCEPT FIXES FOR THIS MOD FROM OUTSIDE SOURCES. WE DON'T KNOW WHAT'S
 > IN THEM.**
