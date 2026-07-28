@@ -1,6 +1,8 @@
+### REACH/3/ODST Now Playable in VR
+### Work on HALO 4 WILL BEGIN SOON along after these hotfixes release. Yes Halo 1/2 will be in the collection eventually!
 ### GAMEPASS IS NOT SUPPORTED ATM, A HOTFIX IS OTW FOR THAT! 
 ### ALVR Support and default Steam VR branch is being looked into
-### Work on HALO 4 WILL BEGIN SOON along with the entire collection after these hotfixes release
+
 
 ## 🚧 Features in Development
 | Feature                                            | Status         |
