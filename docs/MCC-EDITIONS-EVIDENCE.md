@@ -184,3 +184,56 @@ Two diagnosis lessons are now built into the code:
 The reported "no controls" on Reach is consistent with this: the Store log shows
 XInput hooked normally, so controls were not separately broken — Reach simply
 stayed stock, which is what a failed render preflight does by design.
+
+## Store loading stall and "half performance" — measured 2026-07-28
+
+After Reach began hooking on Game Pass, the edition was reported to hang on a
+loading screen and to feel roughly half as fast. Two logs, same DLL build
+(`aa2f12a`), same titles in both sessions (Reach + ODST):
+
+| | Game Pass | Steam |
+| --- | --- | --- |
+| `renderWindow p95` | **14.17 ms** | 14.51 ms |
+| `frame interval p95` | 17.15 ms | 16.60 ms |
+| fps peaks observed | 119, 120, 117 | 113, 120 |
+| missed frames (cumulative) | 1565 | 386 |
+| session length | 311 s | 147 s |
+
+**Steady-state cost is the same or slightly better on Game Pass.** The frame
+timings do not show halved performance. What Game Pass did show is one large
+stall, which accounts for 1178 of its 1565 missed frames:
+
+```
+11:06:31  renderWindow p95 15.21ms  missed=84    HMD pose samples 56.9/sec
+          (9.1 s with nothing logged)
+11:06:40  fps 1 (stereo off)
+11:06:41  renderWindow p95 15.24ms  missed=1178  HMD pose samples 6.1/sec
+          xinput reads in the preceding 10 s window: 3
+```
+
+`renderWindow p95` is **unchanged across the stall** while HMD sampling and
+XInput reads collapse. The VR render path was not the bottleneck: the game's own
+main loop stalled for about nine seconds and then recovered.
+
+### Ruled out by measurement
+
+- **EasyAntiCheat.** Activating `HaloMCCShippingNoEAC` and listing the running
+  game's 213 modules finds no EasyAntiCheat module and no anti-cheat process.
+  (Careless regexes match `Oleacc.dll` and `halo**reach**.dll` — check the
+  actual name.) EAC is not involved.
+- **Encrypted / streamed Game Pass content.** Both editions' `haloreach\maps`
+  hold the same 44 plain files totalling 10,518 MB, all directly readable, and
+  the Store package path under `C:\Program Files\WindowsApps` is a mount-point
+  junction to the same `N:` NVMe SSD that hosts the Steam copy. Same files, same
+  disk. Do not resurrect the container-decryption theory.
+
+### Difference that remains
+
+Game Pass loads `xgameruntime.dll` and `gamingservicesproxy_13.dll`, which the
+Steam build does not. That is the only platform-layer difference found so far.
+
+**OPEN, and not yet attributable to the mod.** The decisive test has not been
+run: load the same level on Game Pass *without* the mod and see whether the same
+loading stall occurs. Until that control group exists, do not build a fix for
+this — the stall's signature (game loop frozen, VR render unaffected) is equally
+consistent with normal Game Pass behaviour.
