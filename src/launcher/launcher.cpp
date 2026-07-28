@@ -1,5 +1,7 @@
 #include <windows.h>
 #include <tlhelp32.h>
+#include <objbase.h>
+#include <shobjidl_core.h>
 #include <string>
 #include <cstdio>
 #include <cstdarg>
@@ -106,26 +108,146 @@ static bool FileExists(const std::wstring& path)
     return attr != INVALID_FILE_ATTRIBUTES && !(attr & FILE_ATTRIBUTE_DIRECTORY);
 }
 
-static bool ProcessRunning(const wchar_t* exeName)
+static DWORD FindProcessId(const wchar_t* exeName)
 {
     HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     if (snap == INVALID_HANDLE_VALUE)
-        return false;
+        return 0;
     PROCESSENTRY32W pe{sizeof(pe)};
-    bool found = false;
+    DWORD pid = 0;
     if (Process32FirstW(snap, &pe))
     {
         do
         {
             if (_wcsicmp(pe.szExeFile, exeName) == 0)
             {
-                found = true;
+                pid = pe.th32ProcessID;
                 break;
             }
         } while (Process32NextW(snap, &pe));
     }
     CloseHandle(snap);
+    return pid;
+}
+
+static bool ProcessRunning(const wchar_t* exeName)
+{
+    return FindProcessId(exeName) != 0;
+}
+
+// Poll for a process by name. Used only on the Store path, where the game is
+// started by Windows rather than by us, so we cannot create it suspended and
+// must instead claim it as soon as it exists. The poll is deliberately tight:
+// the DLL has to be in before the game creates its D3D11 device, which is
+// several seconds of module loading away.
+static DWORD WaitForProcess(const wchar_t* exeName, DWORD timeoutMs)
+{
+    const ULONGLONG deadline = GetTickCount64() + timeoutMs;
+    for (;;)
+    {
+        const DWORD pid = FindProcessId(exeName);
+        if (pid)
+            return pid;
+        if (GetTickCount64() >= deadline)
+            return 0;
+        Sleep(5);
+    }
+}
+
+static bool ModuleLoadedIn(DWORD pid, const wchar_t* moduleName)
+{
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, pid);
+    if (snap == INVALID_HANDLE_VALUE)
+        return false;
+    MODULEENTRY32W me{sizeof(me)};
+    bool found = false;
+    if (Module32FirstW(snap, &me))
+    {
+        do
+        {
+            if (_wcsicmp(me.szModule, moduleName) == 0)
+            {
+                found = true;
+                break;
+            }
+        } while (Module32NextW(snap, &me));
+    }
+    CloseHandle(snap);
     return found;
+}
+
+// Write the DLL path into the game process and make it call LoadLibraryW on it.
+// LoadLibraryW lives at the same address in every 64-bit process.
+static bool InjectDll(HANDLE process, const std::wstring& dllPath, std::wstring& failWhy)
+{
+    const SIZE_T bytes = (dllPath.size() + 1) * sizeof(wchar_t);
+    void* remoteMem = VirtualAllocEx(process, nullptr, bytes,
+                                     MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if (!remoteMem)
+    {
+        failWhy = L"VirtualAllocEx: " + WinErr(GetLastError());
+        return false;
+    }
+    bool injected = false;
+    if (!WriteProcessMemory(process, remoteMem, dllPath.c_str(), bytes, nullptr))
+        failWhy = L"WriteProcessMemory: " + WinErr(GetLastError());
+    else
+    {
+        auto loadLibrary = reinterpret_cast<LPTHREAD_START_ROUTINE>(
+            GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "LoadLibraryW"));
+        HANDLE thread = CreateRemoteThread(process, nullptr, 0, loadLibrary,
+                                           remoteMem, 0, nullptr);
+        if (!thread)
+            failWhy = L"CreateRemoteThread: " + WinErr(GetLastError());
+        else
+        {
+            if (WaitForSingleObject(thread, 15000) == WAIT_OBJECT_0)
+            {
+                DWORD exitCode = 0;
+                GetExitCodeThread(thread, &exitCode);
+                if (exitCode != 0) // LoadLibrary returns the module handle; 0 means it failed
+                    injected = true;
+                else
+                    failWhy = L"LoadLibraryW returned NULL inside the game "
+                              L"(missing dependency or blocked DLL?)";
+            }
+            else
+                failWhy = L"the injection thread timed out";
+            CloseHandle(thread);
+        }
+    }
+    VirtualFreeEx(process, remoteMem, 0, MEM_RELEASE);
+    return injected;
+}
+
+// A packaged app cannot be started with CreateProcess: the process would have
+// no package identity and therefore no licence. Measured on this build,
+// 2026-07-28: running MCCWinStore-Win64-Shipping.exe directly exits with code 0
+// after about 210 ms, with and without the mod and with and without the render
+// arguments, writing no log of its own. The Windows SDK has no CreateProcess
+// attribute that grants package identity - there is no
+// PROC_THREAD_ATTRIBUTE_PACKAGE_* of any kind - so packaged activation is the
+// only supported route.
+//
+// The application id used is the package's own "Anti-Cheat Disabled (Mods and
+// Limited Services)" entry, declared in its MicrosoftGame.config. Activating it
+// is the Store equivalent of running MCC-Win64-Shipping.exe directly on Steam,
+// so EasyAntiCheat is still never started.
+static const wchar_t* kStoreAumid =
+    L"Microsoft.Chelan_8wekyb3d8bbwe!HaloMCCShippingNoEAC";
+
+static HRESULT ActivateStoreApp(const wchar_t* aumid, const wchar_t* arguments,
+                                DWORD* pidOut)
+{
+    *pidOut = 0;
+    IApplicationActivationManager* manager = nullptr;
+    HRESULT hr = CoCreateInstance(CLSID_ApplicationActivationManager, nullptr,
+                                  CLSCTX_LOCAL_SERVER, IID_PPV_ARGS(&manager));
+    if (FAILED(hr))
+        return hr;
+    hr = manager->ActivateApplication(aumid, arguments, AO_NOERRORUI, pidOut);
+    manager->Release();
+    return hr;
 }
 
 static float ReadResolutionScale(const std::wstring& path)
@@ -258,23 +380,6 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
         return 1;
     }
 
-    if (edition == Edition::Steam)
-    {
-        // Make Steamworks believe the game was launched correctly, so it does
-        // not ask Steam to relaunch it (which would drop the process we inject
-        // into). The child process inherits these environment variables.
-        SetEnvironmentVariableW(L"SteamAppId", kSteamAppId);
-        SetEnvironmentVariableW(L"SteamGameId", kSteamAppId);
-        SetEnvironmentVariableW(L"SteamOverlayGameId", kSteamAppId);
-        LauncherLog("set SteamAppId=%ls; creating game process (suspended)", kSteamAppId);
-    }
-    else
-    {
-        // The Store build does not link Steamworks, so it is launched clean.
-        LauncherLog("Store edition: no Steam requirement, no SteamAppId set; "
-                    "creating game process (suspended)");
-    }
-
     STARTUPINFOW si{sizeof(si)};
     PROCESS_INFORMATION pi{};
     // M2 stereo: render the game into a wide surface matching Halo's VR
@@ -310,82 +415,173 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
     swprintf_s(envBuf, L"%d", renderHeight);
     SetEnvironmentVariableW(L"HALO3XR_RENDER_H", envBuf);
     wchar_t renderArgs[96];
-    swprintf_s(renderArgs, L" -WINDOWED -ResX=%d -ResY=%d",
+    swprintf_s(renderArgs, L"-WINDOWED -ResX=%d -ResY=%d",
                renderWidth, renderHeight);
     const wchar_t quote = 34;
     std::wstring cmdline(1, quote);
     cmdline += gameExe;
     cmdline += quote;
+    cmdline += L' ';
     cmdline += renderArgs;
-    LauncherLog("VR render command line: -WINDOWED -ResX=%d -ResY=%d "
-                "(resolution_scale %.2f; native %dx%d)",
+    LauncherLog("VR render surface: %dx%d (resolution_scale %.2f; native %dx%d)",
                 renderWidth, renderHeight, resolutionScale,
                 kNativeRenderWidth, kNativeRenderHeight);
-    if (!CreateProcessW(gameExe.c_str(), cmdline.data(), nullptr, nullptr, FALSE, CREATE_SUSPENDED,
-                        nullptr, gameDir.c_str(), &si, &pi))
-    {
-        const DWORD e = GetLastError();
-        LauncherLog("CreateProcessW failed: %lu", e);
-        ErrorBox(L"Could not start the game:\n" + WinErr(e));
-        return 1;
-    }
-    LauncherLog("game process created, pid %lu", pi.dwProcessId);
 
-    // Write the DLL path into the game process and make it call LoadLibraryW
-    // on it. LoadLibraryW lives at the same address in every 64-bit process.
     bool injected = false;
     std::wstring failWhy;
-    const SIZE_T bytes = (dllPath.size() + 1) * sizeof(wchar_t);
-    void* remoteMem = VirtualAllocEx(pi.hProcess, nullptr, bytes, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-    if (!remoteMem)
-        failWhy = L"VirtualAllocEx: " + WinErr(GetLastError());
-    else if (!WriteProcessMemory(pi.hProcess, remoteMem, dllPath.c_str(), bytes, nullptr))
-        failWhy = L"WriteProcessMemory: " + WinErr(GetLastError());
+
+    if (edition == Edition::Steam)
+    {
+        // Make Steamworks believe the game was launched correctly, so it does
+        // not ask Steam to relaunch it (which would drop the process we inject
+        // into). The child process inherits these environment variables.
+        SetEnvironmentVariableW(L"SteamAppId", kSteamAppId);
+        SetEnvironmentVariableW(L"SteamGameId", kSteamAppId);
+        SetEnvironmentVariableW(L"SteamOverlayGameId", kSteamAppId);
+        LauncherLog("set SteamAppId=%ls; creating game process (suspended) with"
+                    " -WINDOWED -ResX=%d -ResY=%d",
+                    kSteamAppId, renderWidth, renderHeight);
+
+        if (!CreateProcessW(gameExe.c_str(), cmdline.data(), nullptr, nullptr, FALSE,
+                            CREATE_SUSPENDED, nullptr, gameDir.c_str(), &si, &pi))
+        {
+            const DWORD e = GetLastError();
+            LauncherLog("CreateProcessW failed: %lu", e);
+            ErrorBox(L"Could not start the game:\n" + WinErr(e));
+            return 1;
+        }
+        LauncherLog("game process created, pid %lu", pi.dwProcessId);
+
+        injected = InjectDll(pi.hProcess, dllPath, failWhy);
+        if (!injected)
+        {
+            LauncherLog("injection FAILED: %ls", failWhy.c_str());
+            TerminateProcess(pi.hProcess, 1);
+            CloseHandle(pi.hThread);
+            CloseHandle(pi.hProcess);
+            ErrorBox(L"Could not load the VR mod into the game, so the game was closed.\n\n"
+                     L"Reason: " + failWhy);
+            return 1;
+        }
+        LauncherLog("DLL injected OK; resuming game");
+        ResumeThread(pi.hThread);
+        CloseHandle(pi.hThread);
+    }
     else
     {
-        auto loadLibrary = reinterpret_cast<LPTHREAD_START_ROUTINE>(
-            GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "LoadLibraryW"));
-        HANDLE thread = CreateRemoteThread(pi.hProcess, nullptr, 0, loadLibrary, remoteMem, 0, nullptr);
-        if (!thread)
-            failWhy = L"CreateRemoteThread: " + WinErr(GetLastError());
+        // Store edition: ask Windows to activate the package, then claim the
+        // game process the moment it is ready. We cannot create it suspended, so
+        // the poll is tight; MCC spends seconds loading modules before it
+        // creates its D3D11 device, which is the deadline that actually matters.
+        //
+        // Measured 2026-07-28: activation returns the pid of GameLaunchHelper,
+        // the game process itself appears about 4 s later, and the activation
+        // arguments ARE forwarded to it verbatim - so the Store edition gets the
+        // same VR render surface as Steam. Windows starts the game, so it does
+        // not inherit our environment; that costs nothing, because the DLL
+        // derives the identical render size from resolution_scale in
+        // halomccvr.cfg when HALO3XR_RENDER_W/H are absent.
+        LauncherLog("Store edition: activating %ls with %ls",
+                    kStoreAumid, renderArgs);
+        HRESULT coHr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+        const bool coOwned = SUCCEEDED(coHr);
+        DWORD activatedPid = 0;
+        const HRESULT hr = ActivateStoreApp(kStoreAumid, renderArgs, &activatedPid);
+        if (SUCCEEDED(hr))
+        {
+            LauncherLog("activation OK (helper pid %lu); waiting for %ls",
+                        activatedPid, kStoreExeName);
+        }
         else
         {
-            if (WaitForSingleObject(thread, 15000) == WAIT_OBJECT_0)
-            {
-                DWORD exitCode = 0;
-                GetExitCodeThread(thread, &exitCode);
-                if (exitCode != 0) // LoadLibrary returns the module handle; 0 means it failed
-                    injected = true;
-                else
-                    failWhy = L"LoadLibraryW returned NULL inside the game "
-                              L"(missing dependency or blocked DLL?)";
-            }
-            else
-                failWhy = L"the injection thread timed out";
-            CloseHandle(thread);
+            // Loud, never silent: say exactly what failed and hand the user a
+            // route that still works, rather than pretending the launch is fine.
+            LauncherLog("activation FAILED: hr=0x%08X; falling back to attaching "
+                        "to a manually started game", static_cast<unsigned>(hr));
+            MessageBoxW(nullptr,
+                        L"Windows would not start the Microsoft Store copy of the game "
+                        L"for this launcher.\n\n"
+                        L"Start Halo: MCC yourself from the Xbox app now - use the\n"
+                        L"\"Halo: MCC Anti-Cheat Disabled (Mods and Limited Services)\"\n"
+                        L"entry - and leave this window alone. The mod will attach to the\n"
+                        L"game automatically as soon as it appears.\n\n"
+                        L"Details are in halo3xr_launcher.log.",
+                        L"Halo MCC VR launcher", MB_OK | MB_ICONINFORMATION | MB_TOPMOST);
         }
-        VirtualFreeEx(pi.hProcess, remoteMem, 0, MEM_RELEASE);
-    }
 
-    if (!injected)
-    {
-        LauncherLog("injection FAILED: %ls", failWhy.c_str());
-        TerminateProcess(pi.hProcess, 1);
-        CloseHandle(pi.hThread);
-        CloseHandle(pi.hProcess);
-        ErrorBox(L"Could not load the VR mod into the game, so the game was closed.\n\n"
-                 L"Reason: " + failWhy);
-        return 1;
-    }
-    LauncherLog("DLL injected OK; resuming game");
+        // Generous: a first Store launch can sit on a licence or EAC-choice
+        // prompt, and the fallback above needs time for the user to click Play.
+        const DWORD waitMs = SUCCEEDED(hr) ? 120000 : 300000;
+        const DWORD gamePid = WaitForProcess(kStoreExeName, waitMs);
+        if (!gamePid)
+        {
+            if (coOwned)
+                CoUninitialize();
+            LauncherLog("the game process never appeared within %lu ms", waitMs);
+            ErrorBox(L"The game never started, so the VR mod was not loaded.\n\n"
+                     L"Start Halo: MCC once from the Xbox app to check it runs on its\n"
+                     L"own, then try this launcher again.\n\n"
+                     L"Details are in halo3xr_launcher.log.");
+            return 1;
+        }
+        LauncherLog("game process appeared, pid %lu", gamePid);
 
-    ResumeThread(pi.hThread);
-    CloseHandle(pi.hThread);
+        // The process exists but its loader may not have populated the module
+        // list yet. Injecting into that window is what makes CreateRemoteThread
+        // injection flaky, so wait for proof the loader is up before touching
+        // it. kernel32 is present as soon as it is.
+        const ULONGLONG readyDeadline = GetTickCount64() + 15000;
+        while (!ModuleLoadedIn(gamePid, L"kernel32.dll") &&
+               GetTickCount64() < readyDeadline)
+            Sleep(5);
+        LauncherLog("game loader ready; injecting");
+
+        if (ModuleLoadedIn(gamePid, L"halo3xr.dll"))
+        {
+            if (coOwned)
+                CoUninitialize();
+            LauncherLog("halo3xr.dll is already loaded in pid %lu; refusing to inject twice",
+                        gamePid);
+            ErrorBox(L"The VR mod is already loaded into the running game.\n\n"
+                     L"Close Halo: MCC completely, then run this launcher again.");
+            return 1;
+        }
+
+        pi.hProcess = OpenProcess(PROCESS_CREATE_THREAD | PROCESS_QUERY_INFORMATION |
+                                      PROCESS_VM_OPERATION | PROCESS_VM_WRITE |
+                                      PROCESS_VM_READ | SYNCHRONIZE,
+                                  FALSE, gamePid);
+        if (!pi.hProcess)
+        {
+            const DWORD e = GetLastError();
+            if (coOwned)
+                CoUninitialize();
+            LauncherLog("OpenProcess(%lu) failed: %lu", gamePid, e);
+            ErrorBox(L"Could not attach to the running game:\n" + WinErr(e));
+            return 1;
+        }
+        pi.dwProcessId = gamePid;
+
+        injected = InjectDll(pi.hProcess, dllPath, failWhy);
+        if (coOwned)
+            CoUninitialize();
+        if (!injected)
+        {
+            // The game is the user's own licensed session here - we did not
+            // create it, so we do not kill it.
+            LauncherLog("injection FAILED: %ls", failWhy.c_str());
+            CloseHandle(pi.hProcess);
+            ErrorBox(L"The game started, but the VR mod could not be loaded into it.\n\n"
+                     L"The game was left running.\n\nReason: " + failWhy);
+            return 1;
+        }
+        LauncherLog("DLL injected OK into the running game");
+    }
 
     // Watch the game for a short while. If it exits almost immediately, it
-    // bounced through Steam, failed the Store licence check, or crashed on
-    // startup — capture the exit code so we can see what happened instead of
-    // the process silently vanishing.
+    // bounced through Steam, failed a licence check, or crashed on startup —
+    // capture the exit code so we can see what happened instead of the process
+    // silently vanishing.
     const DWORD watchMs = 12000;
     const DWORD waitRes = WaitForSingleObject(pi.hProcess, watchMs);
     if (waitRes == WAIT_OBJECT_0)
@@ -396,9 +592,9 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
         CloseHandle(pi.hProcess);
         const std::wstring why =
             edition == Edition::Store
-                ? L"This usually means the Xbox app could not confirm your licence for the\n"
-                  L"game. Open the Xbox app and start Halo: MCC once so it signs in, close\n"
-                  L"it, then run this launcher again."
+                ? L"The game was started through the Xbox app but quit on its own. Start\n"
+                  L"Halo: MCC once from the Xbox app without this launcher to check it\n"
+                  L"runs, and that you are signed in, then try again."
                 : L"This usually means it relaunched through Steam or the anti-cheat-off\n"
                   L"mode refused this launch.";
         ErrorBox(L"The game closed itself right after starting (exit code " +

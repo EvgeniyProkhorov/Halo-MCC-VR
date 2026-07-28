@@ -214,6 +214,9 @@ endif()
 add_executable(halo3xr_launcher WIN32 src/launcher/launcher.cpp)
 target_compile_definitions(halo3xr_launcher PRIVATE
     UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+# IApplicationActivationManager: the Microsoft Store edition is a packaged app
+# and can only be started through packaged activation.
+target_link_libraries(halo3xr_launcher PRIVATE ole32)
 
 # Opt-in reverse-engineering helper; never shipped or built by the default
 # preset. Some diagnostic modes write to a running game process.
