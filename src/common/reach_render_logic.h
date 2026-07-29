@@ -965,6 +965,28 @@ inline constexpr uint8_t ReachPatchyFogRestoredFlags(
         (current & static_cast<uint8_t>(~kReachPatchyFogSkipMask)) |
         (original & kReachPatchyFogSkipMask));
 }
+
+// Official HREK model_definitions.cpp exposes the engine-wide
+// "If sky attaches to camera" model flag (bit 6) and "Sky parallax percent".
+// Its model-to-object-property conversion is uniquely homologous in the pinned
+// retail image: it reads model +0x15C, quantizes model +0x1B4, then stores the
+// result in the generic object property byte at +0x0B. This headset candidate
+// tests whether that non-zero, mono-camera-authored parallax is the source of
+// the reported binocular conflict. Neutralizing only the quantization result
+// preserves the semantic camera-attachment class while requesting its documented
+// zero-parallax endpoint; ordinary world skies and all non-attached models never
+// take this path.
+inline constexpr uintptr_t kReachSkyParallaxSignatureRva = 0x0024B5C4;
+inline constexpr uintptr_t kReachSkyParallaxQuantizeRva = 0x0024B5DB;
+inline constexpr uintptr_t kReachModelFlagsOffset = 0x015C;
+inline constexpr uintptr_t kReachModelSkyParallaxOffset = 0x01B4;
+inline constexpr uintptr_t kReachObjectSkyParallaxByteOffset = 0x000B;
+inline constexpr uint32_t kReachModelAttachToCameraMask = 0x00000040u;
+inline constexpr std::array<uint8_t, 4> kReachSkyParallaxQuantizeOriginal{
+    0xF3, 0x0F, 0x2C, 0xC0}; // cvttss2si eax,xmm0
+inline constexpr std::array<uint8_t, 4> kReachSkyParallaxQuantizeNeutral{
+    0x31, 0xC0, 0x90, 0x90}; // xor eax,eax; nop; nop
+
 // Halo's authored physical scale is one world unit per ten feet. Reach must use
 // the same exact conversion for every tracked position so room-scale motion and
 // runtime IPD cannot disagree. This is title-local: accepted Halo 3 calibration

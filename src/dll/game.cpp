@@ -10095,6 +10095,7 @@ namespace
     bool RestoreReachNativeWeaponIkBypass();
     bool RestoreReachLightmapShadowsControl();
     bool RestoreReachThirdPersonEffectSuppression();
+    bool RestoreReachSkyParallaxNeutralization();
     void ReachMuzzleRetargetRestore();
     static_assert(std::atomic<int>::is_always_lock_free);
     static_assert(std::atomic<bool>::is_always_lock_free);
@@ -14779,6 +14780,14 @@ namespace
             LOG("Reach muzzle: third-person effect branch could not be restored");
         ReachMuzzleRetargetRestore();
 
+        if (!RestoreReachSkyParallaxNeutralization())
+        {
+            LOG("Reach camera-attached sky cleanup: generic parallax quantizer "
+                "could not be restored; retaining the exact title module for "
+                "retry");
+            return false;
+        }
+
         if (!RestoreReachNativeWeaponIkBypass())
         {
             LOG("Reach camera cleanup: native weapon-IK disable could not be "
@@ -15321,6 +15330,8 @@ namespace
         "45 85 F6 75 05 45 85 C0 74 0D 45 32 D2";
     uintptr_t g_reachThirdPersonEffectPatchSite = 0;
     bool g_reachThirdPersonEffectPatched = false;
+    uintptr_t g_reachSkyParallaxPatchSite = 0;
+    bool g_reachSkyParallaxPatched = false;
 
     bool ReachWriteCode(uintptr_t address, const unsigned char* bytes,
                         size_t count)
@@ -15346,6 +15357,74 @@ namespace
         if (ok)
             FlushInstructionCache(GetCurrentProcess(),
                                   reinterpret_cast<void*>(address), count);
+        return ok;
+    }
+
+    bool ApplyReachSkyParallaxNeutralization(uintptr_t base, size_t size)
+    {
+        static constexpr char kSkyParallaxConversionAob[] =
+            "A8 40 74 24 66 83 4B 04 40 F3 41 0F 10 84 90 B4 01 00 00 "
+            "F3 0F 59 C6 F3 0F 2C C0 88 43 0B 41";
+        g_reachSkyParallaxPatchSite = 0;
+        g_reachSkyParallaxPatched = false;
+        if (!ReachColdExactSignatureAt(
+                base, size, kReachSkyParallaxSignatureRva,
+                kSkyParallaxConversionAob))
+        {
+            LOG("Reach camera-attached sky: exact generic model-to-object "
+                "parallax conversion proof failed; authored stock parallax "
+                "remains active, nothing else affected");
+            return false;
+        }
+
+        const uintptr_t site = base + kReachSkyParallaxQuantizeRva;
+        if (kReachSkyParallaxQuantizeRva >= size ||
+            kReachSkyParallaxQuantizeOriginal.size() >
+                size - kReachSkyParallaxQuantizeRva ||
+            memcmp(
+                reinterpret_cast<const void*>(site),
+                kReachSkyParallaxQuantizeOriginal.data(),
+                kReachSkyParallaxQuantizeOriginal.size()) != 0)
+        {
+            LOG("Reach camera-attached sky: quantizer does not hold the exact "
+                "HREK-homologous bytes; authored stock parallax remains active");
+            return false;
+        }
+        if (!ReachWriteCode(
+                site, kReachSkyParallaxQuantizeNeutral.data(),
+                kReachSkyParallaxQuantizeNeutral.size()))
+        {
+            LOG("Reach camera-attached sky: could not neutralize the generic "
+                "parallax quantizer; authored stock parallax remains active");
+            return false;
+        }
+
+        g_reachSkyParallaxPatchSite = site;
+        g_reachSkyParallaxPatched = true;
+        LOG("Reach camera-attached sky: generic model flag 0x%X at +0x%llX "
+            "kept, authored parallax +0x%llX neutralized at "
+            "haloreach.dll+0x%llX for zero binocular disparity; ordinary "
+            "world skies are untouched",
+            static_cast<unsigned>(kReachModelAttachToCameraMask),
+            static_cast<unsigned long long>(kReachModelFlagsOffset),
+            static_cast<unsigned long long>(kReachModelSkyParallaxOffset),
+            static_cast<unsigned long long>(kReachSkyParallaxQuantizeRva));
+        return true;
+    }
+
+    bool RestoreReachSkyParallaxNeutralization()
+    {
+        if (!g_reachSkyParallaxPatched || !g_reachSkyParallaxPatchSite)
+            return true;
+        const bool ok = ReachWriteCode(
+            g_reachSkyParallaxPatchSite,
+            kReachSkyParallaxQuantizeOriginal.data(),
+            kReachSkyParallaxQuantizeOriginal.size());
+        if (ok)
+        {
+            g_reachSkyParallaxPatched = false;
+            g_reachSkyParallaxPatchSite = 0;
+        }
         return ok;
     }
 
@@ -16241,6 +16320,7 @@ namespace
         // "restore the muzzle flashes". The selective fix must retarget the
         // stuck system's spawn transform instead of gating emission.
         // ApplyReachThirdPersonEffectSuppression(base, size);
+        ApplyReachSkyParallaxNeutralization(base, size);
         if (!ApplyReachNativeWeaponIkBypass())
         {
             LOG("Reach camera install: native weapon-IK bypass failed; "

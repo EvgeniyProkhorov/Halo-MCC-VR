@@ -919,6 +919,18 @@ int main()
               kReachPatchyFogSkipMask == 0x08,
             "Reach VR patchy-fog policy sets and restores only the exact proven skip bit");
 
+        Check(kReachSkyParallaxSignatureRva == 0x0024B5C4 &&
+              kReachSkyParallaxQuantizeRva == 0x0024B5DB &&
+              kReachModelFlagsOffset == 0x015C &&
+              kReachModelSkyParallaxOffset == 0x01B4 &&
+              kReachObjectSkyParallaxByteOffset == 0x000B &&
+              kReachModelAttachToCameraMask == 0x40 &&
+              kReachSkyParallaxQuantizeOriginal ==
+                  std::array<uint8_t, 4>{0xF3, 0x0F, 0x2C, 0xC0} &&
+              kReachSkyParallaxQuantizeNeutral ==
+                  std::array<uint8_t, 4>{0x31, 0xC0, 0x90, 0x90},
+            "Reach camera-attached sky neutralization pins the generic model flag, parallax field, object property, and exact reversible quantizer");
+
         Check(kReachFpWeaponIkDecisionPreludeRva == 0x002B506E &&
               kReachFpWeaponIkDisableCompareRva == 0x002B507F &&
               kReachFpWeaponIkDisableBranchRva == 0x002B5085 &&

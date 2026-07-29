@@ -2184,6 +2184,61 @@ Constants: `kReachNativePauseOwnerRva`, `kReachNativePauseFlagRva`,
 `kReachNativePauseOwnerSigLength`, `kReachNativePauseStoreOffset` in
 `src/common/reach_render_logic.h`.
 
+## Camera-attached model parallax (HREK-derived headset candidate, 2026-07-29)
+
+Status: **headset-untested candidate**, not an accepted finding.
+
+The reported boundary is not a general reversed skybox. In Night of Solace,
+the `space_veins_ring` and `space_veins_ring_close` layers remain positioned in
+the scene but create a binocular conflict, while ordinary skies in other levels
+have appeared correct. Official HREK tags put both layers in ordinary transparent
+render-model parts; neither has a special runtime shader class that justifies a
+name-specific fix.
+
+The enclosing official models do identify the larger semantic class:
+`sky_wafer.model` and `sky_corvette.model` set the model flag documented as
+`If sky attaches to camera#parallax % between sky pos and camera pos below` and
+set `Sky parallax percent` to `0.6`. Checked ordinary mission, crater, cloud, and
+orbit sky models leave that flag clear and the percentage at zero. HREK's model
+tag-definition metadata gives `s_model_definition` size `0x220`, flags at
+`+0x15C`, and sky parallax at `+0x1B4`; the named camera-attachment flag is bit
+6 (`0x40`).
+
+HREK function `0x1406EDF90..0x1406EE525` supplies the consumer, rather than an
+inference from retail. At `0x1406EE28E` it obtains the model tag, reads flags at
+`+0x15C`, tests `0x40`, sets the corresponding generic object-property flag,
+loads the float at `+0x1B4`, multiplies it by 255, converts it to an integer, and
+stores the byte at object property `+0x0B`. Thus this is a generic
+model-to-object camera-attachment/parallax path, not a Night of Solace texture
+or material path.
+
+Only after deriving that behavior from HREK, the exact homolog was matched in
+the pinned retail module at RVA `0x0024B5C4`. This sequence is unique in the raw
+image:
+
+```
+A8 40 74 24 66 83 4B 04 40 F3 41 0F 10 84 90 B4 01 00 00
+F3 0F 59 C6 F3 0F 2C C0 88 43 0B 41
+```
+
+The candidate changes only the four-byte conversion at RVA `0x0024B5DB` from
+`F3 0F 2C C0` (`cvttss2si eax,xmm0`) to `31 C0 90 90`
+(`xor eax,eax; nop; nop`). The existing store then writes the documented zero
+parallax endpoint while leaving the generic camera-attachment flag and the rest
+of object construction intact. Installation requires the exact-RVA signature,
+uniqueness, and exact original bytes. Failure is loud and fail-open to authored
+stock behavior; teardown restores the original bytes. No tag, mission, shader,
+or texture name participates, and models outside this semantic class do not use
+the modified result.
+
+The remaining hypothesis is deliberately narrow: Reach's non-zero authored
+camera-attached parallax conflicts with sequential stereo eyes, and its zero
+endpoint resolves the reported cross-eyed layer without destabilizing its world
+placement. That is not established until the user checks the same Night of
+Solace scene. Acceptance additionally needs a normal Reach sky comparison and a
+Halo 3 regression result; until then `docs/CURRENT-STATE.md` must remain on the
+accepted build.
+
 ## Evidence still required
 
 The unaccepted camera candidate now implements the exact outer-owner token,
