@@ -413,6 +413,24 @@ pass as the cause; the implementation is retained but no longer armed. Evidence:
 (log SHA-256
 `40923EF9CDD1BEBECB6D8660CAB98E9385AB5BF81FB1C48986731930051B4A96`).
 
+## Static-world black geometry: stale DrawIndexed diagnostic isolation
+
+The exact E490 baseline and failed `839aed7` log both contain the July 26
+`REACHDRAW`/`REACHVTX` HUD-discovery probe. It installs a process-wide
+`ID3D11DeviceContext::DrawIndexed` detour, although the probe body acts only
+while Reach is active. For each matching draw it creates a staging buffer,
+copies the bound vertex buffer, blocks on a CPU read map, formats five log lines,
+and flushes them before forwarding the original draw. Until its 200-sample
+budget is exhausted, every small indexed Reach draw also performs viewport and
+vertex-buffer queries. Neither preserved run exhausted the budget.
+
+The captured stride-24, six-index data is identical in both logs and belongs to
+a fullscreen transition quad; it is not world-geometry or eye-differential
+evidence. Removing only this optional detour is therefore an A/B of a proven
+render-hook contaminant, not a shader/depth diagnosis. The diagnostic code stays
+dormant, and the mandatory Present/ResizeBuffers/OMSetRenderTargets hooks remain
+unchanged. Headset result is pending.
+
 The same `0x121083` caller, entry
 `haloreach.dll+0x120FDC` through `+0x1210D3`. Its exact entry signature is:
 

@@ -96,6 +96,29 @@ visual defect was unchanged, so Reach's object lightmap-shadow pass is rejected
 as the black-world cause. The implementation remains dormant as evidence; the
 following revert commit prevents it from arming before another candidate.
 
+### HEADSET-PENDING: remove stale Reach DrawIndexed diagnostic - 2026-07-29
+
+This candidate does not advance the accepted pointer above. Its only behavioral
+change is to stop installing the optional global `ID3D11DeviceContext::DrawIndexed`
+detour added for Reach HUD discovery on July 26. The probe code remains dormant;
+Present, ResizeBuffers, render-target redirection, all Reach camera/FP hooks,
+and every player-visible feature remain unchanged. This is not a stock or 2D
+fallback.
+
+The failed `839aed7` run and the exact E490 baseline both prove the obsolete
+probe was still active. Before selected draws it allocated a staging GPU buffer,
+issued `CopyResource`, blocked in `Map(D3D11_MAP_READ)`, and synchronously logged
+five lines before calling the real draw. Even outside matching samples, its
+detour queried viewport and vertex-buffer state for every small indexed Reach
+draw. The captured shape was a fullscreen transition quad, not world geometry,
+so this is a direct hook-isolation test rather than a claim that the probe is
+already the proven root cause.
+
+The candidate log must contain `DrawIndexed diagnostic hook intentionally
+disabled` and no `REACHDRAW`/`REACHVTX` samples. Headset acceptance requires the
+long-weapon and nearby Ghost/Revenant triggers in Reach, followed by a Halo 3
+stereo regression check because the removed D3D method detour was process-wide.
+
 ### ACCEPTED: Reach muzzle height - 2026-07-27
 
 `muzzle_height_m` raises the re-parented muzzle effect origin - the flash and

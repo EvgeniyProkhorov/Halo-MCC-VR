@@ -44,6 +44,11 @@ static ResizeBuffersFn g_origResizeBuffers = nullptr;
 static OMSetRenderTargetsFn g_origOMSetRenderTargets = nullptr;
 #if HALOMCCVR_EXPERIMENTAL_REACH_RENDER_CANDIDATE
 static DrawIndexedFn g_origDrawIndexed = nullptr;
+// The July 26 HUD-discovery detour performed synchronous GPU readback and
+// logging before DrawIndexed. It produced no HUD/world evidence and remained
+// active in every later Reach build. The next candidate leaves that diagnostic
+// code dormant and tests the render path with no DrawIndexed detour at all.
+constexpr bool kEnableReachDrawIndexedDiagnostic = false;
 #endif
 #if HALOMCCVR_EXPERIMENTAL_ODST_BRINGUP
 static CopyResourceFn g_origCopyResource = nullptr;
@@ -998,13 +1003,21 @@ bool InstallD3D11Hooks()
                              (void**)&g_origCopyResource) == MH_OK;
 #endif
 #if HALOMCCVR_EXPERIMENTAL_REACH_RENDER_CANDIDATE
-    // ID3D11DeviceContext::DrawIndexed is vtable slot 12. Diagnostic-only
-    // (see LogReachHudDrawIfSmall); a failed hook here degrades to no draw
-    // sampling, never blocks any title's rendering. Hard-capped sample budget,
-    // not installed as a required hook, so `ok` does not depend on it.
-    if (MH_CreateHook(contextVtbl[12], (void*)&DrawIndexedHook,
-                      (void**)&g_origDrawIndexed) != MH_OK)
-        LOG("REACHDRAW: DrawIndexed hook failed; draw sampling disabled");
+    // ID3D11DeviceContext::DrawIndexed is vtable slot 12. The old HUD probe is
+    // preserved above as evidence, but it must not intercept production draws.
+    // This optional hook was never part of `ok`, so disabling it cannot gate
+    // Present, render-target redirection, or any title camera core.
+    if constexpr (kEnableReachDrawIndexedDiagnostic)
+    {
+        if (MH_CreateHook(contextVtbl[12], (void*)&DrawIndexedHook,
+                          (void**)&g_origDrawIndexed) != MH_OK)
+            LOG("REACHDRAW: DrawIndexed hook failed; draw sampling disabled");
+    }
+    else
+    {
+        LOG("REACHDRAW: DrawIndexed diagnostic hook intentionally disabled; "
+            "no draw calls are intercepted");
+    }
 #endif
 
     IDXGISwapChain1* sc1 = nullptr;
