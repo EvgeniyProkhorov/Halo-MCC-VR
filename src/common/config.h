@@ -74,6 +74,14 @@ struct Config
     float menu_height_m = -0.08f;   // vertical offset, negative = below eye line
     float menu_side_m = 0.0f;       // sideways offset, positive = to your right
 
+    // Show the welcome page automatically, once, at the start of each launch.
+    // The mod has no other way to tell a player anything before they play: the
+    // README is outside the game and this file's comments are only read by
+    // people who open it. Ticking "Don't show this again" on that page clears
+    // this. It suppresses only the AUTOMATIC appearance -- the Welcome page
+    // stays in the F1 menu so the message can be read again at any time.
+    bool show_welcome = true;
+
     // M3 VR controller turning (right Sense stick).
     bool turn_smooth = true;           // false = snap turn, true = smooth turn
     float turn_snap_deg = 30.0f;       // degrees per snap

@@ -24,3 +24,9 @@ ID3D11Texture2D* Menu_Render(); // draws the current frame of UI; nullptr on fai
 // the composition quad and the pointer raycast.
 bool Menu_PointerOverGrabHandle();
 void Menu_SetPanelDragging(bool dragging);
+
+// Force the panel open on the welcome page. Called once per process from the
+// frame loop on the first focused frame, when show_welcome is set. The page is
+// an ordinary browsable category, not a gate -- show_welcome only controls this
+// automatic appearance.
+bool Menu_OpenWelcome();

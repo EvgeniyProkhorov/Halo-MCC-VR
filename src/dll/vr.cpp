@@ -7052,6 +7052,28 @@ float4 ps_scope_linearize(VSOut i):SV_Target { return paint(i.uv,true); }
                     return;
                 }
 
+                // One-shot welcome page for this launch. The latch is a
+                // process-lifetime static that is never cleared, so quitting a
+                // level or returning to MCC's menu can never bring the page
+                // back -- that is the entire "startup only" mechanism, and it
+                // needs no level-load detection.
+                //
+                // The first focused frame is MCC's own shell menu on any real
+                // launch, because the session is created during MCC's startup
+                // Present. Deliberately NOT also gated on RuntimeMode or head
+                // tracking: a title that failed to publish a lifecycle would
+                // then silently never show the message, and a predictable rule
+                // beats a "sometimes it doesn't appear" mode.
+                static bool welcomeConsidered = false;
+                if (!welcomeConsidered && g_sessionState == XR_SESSION_STATE_FOCUSED)
+                {
+                    welcomeConsidered = true;
+                    if (g_config.show_welcome)
+                        Menu_OpenWelcome();
+                    else
+                        LOG("menu: welcome page suppressed by show_welcome=0");
+                }
+
                 // The menu is submitted in BOTH modes (it used to live only in
                 // the mono-screen branch, which made F1 invisible in stereo).
                 // In stereo it head-locks so it is always in front of you.

@@ -136,9 +136,38 @@ namespace
     // tabs: the tab strip had already run out of room, and the two big tabs were
     // long enough to need scrolling. A category is a plain row in a list, so
     // adding a settings area later costs one enum entry and one row.
+    // ===================================================================
+    //  THE WELCOME MESSAGE. Edit the text below; it is the whole message.
+    //  Blank lines separate paragraphs. Do NOT hand-wrap the lines -- the
+    //  page wraps them to the panel width, so a manual line break here
+    //  would fight that and leave short ragged lines.
+    // ===================================================================
+    constexpr const char* kWelcomeMessage =
+        "This is an alpha. It is a fan project, it is not made by or endorsed by "
+        "Microsoft or 343 Industries, and it will have rough edges.\n"
+        "\n"
+        "Before you play:\n"
+        "\n"
+        "Set MCC's frame rate limit to 120 and turn V-Sync OFF, and set Halo 3's "
+        "field of view to 120. Do not use MCC's own FSR setting -- this mod does "
+        "its own upscaling and the two fight each other.\n"
+        "\n"
+        "Anti-cheat must be disabled. Launch through the Halo MCC VR launcher and "
+        "pick the \"Anti-Cheat Disabled\" option when Steam or the Xbox app asks. "
+        "Matchmaking is unavailable in that mode; campaign and custom games work.\n"
+        "\n"
+        "Everything in this menu saves to halomccvr.cfg next to the mod, and you "
+        "can edit that file in Notepad with the game closed. If you ever get lost, "
+        "delete it and a fresh one with all the defaults is written for you.\n"
+        "\n"
+        "Press F1 or click both stick buttons together to open and close this menu "
+        "at any time. Grab the bar at the top of this panel with your right trigger "
+        "to move it somewhere more comfortable.";
+
     enum MenuCategory
     {
-        Cat_Status = 0,
+        Cat_Welcome = 0,
+        Cat_Status,
         Cat_Comfort,
         Cat_Controls,
         Cat_WeaponAim,
@@ -161,6 +190,7 @@ namespace
     // Kept in the same order as MenuCategory; a static assert below stops the
     // two from drifting apart.
     constexpr CategoryRow kCategories[Cat_Count] = {
+        {"Welcome",       "Read me first."},
         {"Status",        "What the mod is doing right now, and the switches you reach for mid-game."},
         {"Comfort",       "The flat screen you see in menus, and how head motion feels."},
         {"Controls",      "Turning, gestures, and controller vibration."},
@@ -489,6 +519,31 @@ namespace
         ImGui::TextDisabled("%s", kCategories[g_activeCategory].blurb);
         ImGui::Separator();
         ImGui::Spacing();
+
+        if (g_activeCategory == Cat_Welcome)
+        {
+        ImGui::TextDisabled("Build %s", HALOMCCVR_BUILD_COMMIT);
+        ImGui::Spacing();
+        // Wrapped to the pane instead of hand-broken with \n, so the message
+        // reflows when the grab handle resizes the panel.
+        ImGui::PushTextWrapPos(0.0f);
+        ImGui::TextUnformatted(kWelcomeMessage);
+        ImGui::PopTextWrapPos();
+        ImGui::Spacing();
+        ImGui::Separator();
+        bool dontShow = !g_config.show_welcome;
+        if (ImGui::Checkbox("Don't show this again on launch", &dontShow))
+        {
+            g_config.show_welcome = !dontShow;
+            changed = true;
+        }
+        ImGui::TextDisabled("This page stays in the list either way, so you can read it again.");
+        ImGui::Spacing();
+        if (ImGui::Button("Accept and close"))
+            Menu_Toggle();
+        ImGui::SameLine();
+        ImGui::TextDisabled("Or pick any category on the left.");
+        }
 
         if (g_activeCategory == Cat_Status)
         {
@@ -1079,6 +1134,26 @@ bool Menu_Toggle()
     g_panelDragging.store(false, std::memory_order_release);
     LOG("menu %s", open ? "opened" : "closed");
     return open;
+}
+
+// Force the panel open on the welcome page. vr.cpp calls this exactly once per
+// process, on the first focused frame, when show_welcome is set. Unconditional
+// rather than "only if closed": if the player somehow already has the menu up
+// this early, showing them the page is still the intended startup behavior, and
+// a special case here would mean the message can silently never appear.
+bool Menu_OpenWelcome()
+{
+    if (!g_ready)
+        return false;
+    EnterCriticalSection(&g_cs);
+    g_activeCategory = Cat_Welcome;
+    LeaveCriticalSection(&g_cs);
+    g_resetArmed = false;
+    g_pointerOverGrabHandle.store(false, std::memory_order_release);
+    g_panelDragging.store(false, std::memory_order_release);
+    g_open.store(true, std::memory_order_release);
+    LOG("menu: opened on the welcome page for this launch");
+    return true;
 }
 
 bool Menu_PointerOverGrabHandle()

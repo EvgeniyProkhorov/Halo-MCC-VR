@@ -160,6 +160,8 @@ void ConfigLoad(const wchar_t* path)
             ParseFloatSetting(key, val, g_config.menu_height_m);
         else if (!strcmp(key, "menu_side_m"))
             ParseFloatSetting(key, val, g_config.menu_side_m);
+        else if (!strcmp(key, "show_welcome"))
+            g_config.show_welcome = atoi(val) != 0;
         else if (!strcmp(key, "turn_smooth"))
             g_config.turn_smooth = atoi(val) != 0;
         else if (!strcmp(key, "turn_snap_deg"))
@@ -423,6 +425,11 @@ void ConfigSave()
     fprintf(f, "# Sideways offset in meters, positive = to your right. (range -%.2f to %.2f)\n",
              kMenuOffsetLimit, kMenuOffsetLimit);
     fprintf(f, "menu_side_m = %.2f\n\n", g_config.menu_side_m);
+    fprintf(f, "# Show the welcome page by itself once at the start of each launch.\n");
+    fprintf(f, "# Tick \"Don't show this again\" on that page to clear this. The page\n");
+    fprintf(f, "# itself always stays in the F1 menu, so you can read it again later.\n");
+    fprintf(f, "# (default %d)\n", d.show_welcome ? 1 : 0);
+    fprintf(f, "show_welcome = %d\n\n", g_config.show_welcome ? 1 : 0);
     fprintf(f, "# -------------------------------------------------------------------\n");
     fprintf(f, "#  CONTROLS & TURNING\n");
     fprintf(f, "#  Universal controller choices used in every supported title.\n");
