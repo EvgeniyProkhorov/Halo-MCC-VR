@@ -138,31 +138,23 @@ namespace
     // adding a settings area later costs one enum entry and one row.
     // ===================================================================
     //  THE WELCOME MESSAGE. Edit the text below; it is the whole message.
-    //  Blank lines separate paragraphs. Do NOT hand-wrap the lines -- the
-    //  page wraps them to the panel width, so a manual line break here
-    //  would fight that and leave short ragged lines.
+    //  Keep it SHORT -- this page is the first thing a player sees and a
+    //  wall of text does not get read. Blank lines separate paragraphs.
+    //  Do NOT hand-wrap prose: the page wraps to the panel width, so a
+    //  manual break would fight that and leave ragged short lines. The
+    //  indented setting lines below are deliberately short enough not to
+    //  wrap, which is what keeps them looking like a list.
     // ===================================================================
     constexpr const char* kWelcomeMessage =
-        "This is an alpha. It is a fan project, it is not made by or endorsed by "
-        "Microsoft or 343 Industries, and it will have rough edges.\n"
+        "An alpha fan project. Not made by or endorsed by Microsoft or 343.\n"
         "\n"
-        "Before you play:\n"
+        "Set these in MCC's own settings first:\n"
+        "    Frame rate 120, V-Sync off\n"
+        "    Halo 3 field of view 120\n"
+        "    MCC's FSR off - this mod does its own upscaling\n"
         "\n"
-        "Set MCC's frame rate limit to 120 and turn V-Sync OFF, and set Halo 3's "
-        "field of view to 120. Do not use MCC's own FSR setting -- this mod does "
-        "its own upscaling and the two fight each other.\n"
-        "\n"
-        "Anti-cheat must be disabled. Launch through the Halo MCC VR launcher and "
-        "pick the \"Anti-Cheat Disabled\" option when Steam or the Xbox app asks. "
-        "Matchmaking is unavailable in that mode; campaign and custom games work.\n"
-        "\n"
-        "Everything in this menu saves to halomccvr.cfg next to the mod, and you "
-        "can edit that file in Notepad with the game closed. If you ever get lost, "
-        "delete it and a fresh one with all the defaults is written for you.\n"
-        "\n"
-        "Press F1 or click both stick buttons together to open and close this menu "
-        "at any time. Grab the bar at the top of this panel with your right trigger "
-        "to move it somewhere more comfortable.";
+        "Launch from the Halo MCC VR launcher and choose the anti-cheat disabled "
+        "option. Campaign and custom games work; matchmaking does not.";
 
     enum MenuCategory
     {
@@ -522,8 +514,6 @@ namespace
 
         if (g_activeCategory == Cat_Welcome)
         {
-        ImGui::TextDisabled("Build %s", HALOMCCVR_BUILD_COMMIT);
-        ImGui::Spacing();
         // Wrapped to the pane instead of hand-broken with \n, so the message
         // reflows when the grab handle resizes the panel.
         ImGui::PushTextWrapPos(0.0f);
@@ -531,18 +521,19 @@ namespace
         ImGui::PopTextWrapPos();
         ImGui::Spacing();
         ImGui::Separator();
+        // Short commit, not the full 40-char SHA: enough to identify a build in
+        // a report without reading as noise on the first page a player sees.
+        ImGui::TextDisabled("Build %.7s", HALOMCCVR_BUILD_COMMIT);
+        ImGui::Spacing();
         bool dontShow = !g_config.show_welcome;
-        if (ImGui::Checkbox("Don't show this again on launch", &dontShow))
+        if (ImGui::Checkbox("Don't show this again", &dontShow))
         {
             g_config.show_welcome = !dontShow;
             changed = true;
         }
-        ImGui::TextDisabled("This page stays in the list either way, so you can read it again.");
         ImGui::Spacing();
-        if (ImGui::Button("Accept and close"))
+        if (ImGui::Button("Accept"))
             Menu_Toggle();
-        ImGui::SameLine();
-        ImGui::TextDisabled("Or pick any category on the left.");
         }
 
         if (g_activeCategory == Cat_Status)
