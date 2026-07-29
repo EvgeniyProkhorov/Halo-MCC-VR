@@ -15,6 +15,7 @@
 #include "config.h"
 #include "cutscene_theater_logic.h"
 #include "frame_pacing_logic.h"
+#include "halo3_theater_logic.h"
 #include "hud_layout_logic.h"
 #include "input_logic.h"
 #include "odst_bringup_logic.h"
@@ -2395,6 +2396,33 @@ int main()
                   !UseAuthoredCutsceneProjection(false, 4.0f / 3.0f) &&
                   !UseAuthoredCutsceneProjection(true, 0.0f),
             "authored projection replacement is isolated to active theatre with proven metadata");
+        const Halo3CutsceneTheaterFrustum immersiveHalo3 =
+            SelectHalo3CutsceneTheaterFrustum(
+                false, 1.20f, 0.90f, 1.84f, 1.33f);
+        Check(immersiveHalo3.valid &&
+                  immersiveHalo3.projectionTangentX == 1.84f &&
+                  immersiveHalo3.projectionTangentY == 1.33f &&
+                  immersiveHalo3.cullingTangentX == 1.84f &&
+                  immersiveHalo3.cullingTangentY == 1.33f,
+            "Halo 3 immersive projection and culling remain byte-for-byte on the existing OpenXR cover");
+        const Halo3CutsceneTheaterFrustum theaterHalo3 =
+            SelectHalo3CutsceneTheaterFrustum(
+                true, 1.20f, 0.90f, 1.84f, 1.33f);
+        Check(theaterHalo3.valid &&
+                  std::fabs(theaterHalo3.projectionTangentX - 1.14f) < 0.00001f &&
+                  std::fabs(theaterHalo3.projectionTangentY - 0.855f) < 0.00001f &&
+                  theaterHalo3.cullingTangentX == 1.84f &&
+                  theaterHalo3.cullingTangentY == 1.33f &&
+                  std::fabs(
+                      theaterHalo3.projectionTangentX /
+                          theaterHalo3.projectionTangentY -
+                      4.0f / 3.0f) < 0.00001f,
+            "Halo 3 theatre tightens framing without changing aspect and retains the wider visibility cover");
+        Check(!SelectHalo3CutsceneTheaterFrustum(
+                   true, 0.0f, 0.90f, 1.84f, 1.33f).valid &&
+                  !SelectHalo3CutsceneTheaterFrustum(
+                      false, 1.20f, 0.90f, 0.0f, 1.33f).valid,
+            "Halo 3 theatre rejects invalid authored or immersive frustum evidence");
         const float tangentAspect =
             CutsceneTheaterAspectFromTangents(4.0f / 3.0f, 1.0f);
         const float projectionAspect =

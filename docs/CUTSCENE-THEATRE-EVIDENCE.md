@@ -57,6 +57,23 @@ matrix scales instead of substituting OpenXR eye FOV. The engine debug variable
 value only while theatre is active; immersive VR keeps the existing widening
 policy unchanged.
 
+The first Halo 3 headset pass of the authored-projection candidate reported
+that theatre framing remained slightly too wide and that geometry culled at the
+camera edge, while Reach was correct. The Halo 3 follow-up is deliberately
+title-local. The signature-located compact-to-derived builder at
+`halo3+0x2A6980` derives the complete camera block from the compact camera; its
+projection matrix begins at the already validated derived offset `+0x78`.
+The prepared-view path at `halo3+0x1854C8` then uploads that compact/derived
+pair before the inner render at `halo3+0x286A14`. The candidate therefore
+builds Halo 3's visibility data from a compact frustum at least as wide as both
+the authored camera and the existing OpenXR cover, then changes only the
+derived projection's X/Y scales to a 0.95 tangent-space copy of the authored
+framing. Applying the same scale to both axes preserves the authored aspect.
+When theatre is inactive, projection and visibility both receive the exact
+existing OpenXR tangents. ODST and Reach do not call this Halo 3 policy. This
+follow-up remains headset-pending; the static boundary and isolation are
+evidence, not a claim that the visible culling result has passed.
+
 ## Reach
 
 The accepted Winter Contingency probe identified the low byte of Reach's

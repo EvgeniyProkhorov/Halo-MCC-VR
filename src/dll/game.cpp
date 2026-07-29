@@ -25,6 +25,7 @@
 #include "../common/log.h"
 #include "../common/config.h"
 #include "../common/cutscene_theater_logic.h"
+#include "../common/halo3_theater_logic.h"
 #include "../common/hud_layout_logic.h"
 #include "../common/input_logic.h"
 #include "../common/odst_bringup_logic.h"
@@ -5337,34 +5338,54 @@ namespace
             if (g_buildViewport && g_buildMatrices)
             {
                 float eyeFov[4];
-                float tangentX = tanf(1.07338f);
-                float tangentY = tanf(0.92502f);
-                if (UseAuthoredCutsceneProjection(
-                        cutsceneTheater, authoredAspect) &&
-                    CinematicFovPolicyStockReady())
+                float immersiveTangentX = tanf(1.07338f);
+                float immersiveTangentY = tanf(0.92502f);
+                if (VR_GetEyeFov(eye, eyeFov))
                 {
-                    tangentX = authoredTangents[0];
-                    tangentY = authoredTangents[1];
+                    immersiveTangentX =
+                        tanf(fmaxf(-eyeFov[0], eyeFov[1]));
+                    immersiveTangentY =
+                        tanf(fmaxf(eyeFov[2], -eyeFov[3]));
                 }
-                else if(VR_GetEyeFov(eye,eyeFov))
+                const bool preserveAuthoredProjection =
+                    UseAuthoredCutsceneProjection(
+                        cutsceneTheater, authoredAspect) &&
+                    CinematicFovPolicyStockReady();
+                Halo3CutsceneTheaterFrustum theaterFrustum =
+                    SelectHalo3CutsceneTheaterFrustum(
+                        preserveAuthoredProjection,
+                        authoredTangents[0], authoredTangents[1],
+                        immersiveTangentX, immersiveTangentY);
+                if (!theaterFrustum.valid)
                 {
-                    tangentX=tanf(fmaxf(-eyeFov[0],eyeFov[1]));
-                    tangentY=tanf(fmaxf(eyeFov[2],-eyeFov[3]));
+                    // Invalid authored metadata rejects only the theatre FOV
+                    // override. The proven immersive projection/culling path
+                    // still completes both eye renders and the VR session.
+                    theaterFrustum = SelectHalo3CutsceneTheaterFrustum(
+                        false, 0.0f, 0.0f,
+                        immersiveTangentX, immersiveTangentY);
                 }
                 // Native R3 may narrow Halo's compact camera. Keep the headset
-                // view and its culling volume at the normal OpenXR FOV; only
-                // the separate scope pass consumes the weapon zoom.
-                float* cameraTangents=reinterpret_cast<float*>(camera+0x28);
-                cameraTangents[0]=tangentX;
-                cameraTangents[1]=tangentY;
+                // view and its culling volume at the normal OpenXR FOV in
+                // immersive VR; only the separate scope pass consumes the
+                // weapon zoom. Theatre deliberately separates the compact
+                // visibility tangents from the derived raster projection:
+                // authored framing stays slightly tighter while visibility
+                // retains the proven immersive cover.
+                float* cameraTangents =
+                    reinterpret_cast<float*>(camera + 0x28);
+                cameraTangents[0] = theaterFrustum.cullingTangentX;
+                cameraTangents[1] = theaterFrustum.cullingTangentY;
                 g_buildViewport(camera, temporary);
                 g_buildMatrices(camera, temporary, reinterpret_cast<char*>(view) + 0x98, 0.0f);
                 const float* finalProjection = reinterpret_cast<const float*>(
                     reinterpret_cast<const char*>(view) + 0x98 + 0x78);
                 float* vrProjection = reinterpret_cast<float*>(
                     reinterpret_cast<char*>(view) + 0x98 + 0x78);
-                vrProjection[0]=1.0f/tangentX;
-                vrProjection[5]=1.0f/tangentY;
+                vrProjection[0] =
+                    1.0f / theaterFrustum.projectionTangentX;
+                vrProjection[5] =
+                    1.0f / theaterFrustum.projectionTangentY;
                 finalProjection = vrProjection;
                 if (fabsf(finalProjection[0]) > 0.01f && fabsf(finalProjection[5]) > 0.01f)
                 {
