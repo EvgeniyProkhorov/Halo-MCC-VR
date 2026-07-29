@@ -31,6 +31,16 @@ namespace
     std::array<CinematicControlSlot, kTitleRuntimeSlotCount>
         g_cinematicControlSlots{};
 
+    struct CutsceneTheaterProjectionSlot
+    {
+        std::atomic<uint64_t> sequence{0};
+        std::atomic<uint32_t> generation{0};
+        std::atomic<uint32_t> authoredAspectBits{0};
+        std::atomic<uint64_t> heartbeatMs{0};
+    };
+    std::array<CutsceneTheaterProjectionSlot, kTitleRuntimeSlotCount>
+        g_cutsceneTheaterProjectionSlots{};
+
     GameTitle UniqueAvailableTitle(uint32_t availabilityMask)
     {
         const uint32_t known =
@@ -258,17 +268,19 @@ void TitleAdapter_ClearCinematicControl(
         return;
     CinematicControlSlot& publication = g_cinematicControlSlots[slot];
     const uint64_t stamp = publication.stamp.load(std::memory_order_acquire);
-    if (generation && static_cast<uint32_t>(stamp >> 32) != generation)
-        return;
-    uint64_t sequence = publication.sequence.load(std::memory_order_acquire);
-    if ((sequence & 1u) || !publication.sequence.compare_exchange_strong(
-            sequence, sequence + 1, std::memory_order_acq_rel))
+    if (!generation || static_cast<uint32_t>(stamp >> 32) == generation)
     {
-        return;
+        uint64_t sequence = publication.sequence.load(std::memory_order_acquire);
+        if (!(sequence & 1u) && publication.sequence.compare_exchange_strong(
+                sequence, sequence + 1, std::memory_order_acq_rel))
+        {
+            publication.stamp.store(0, std::memory_order_relaxed);
+            publication.heartbeatMs.store(0, std::memory_order_relaxed);
+            publication.sequence.store(sequence + 2, std::memory_order_release);
+        }
     }
-    publication.stamp.store(0, std::memory_order_relaxed);
-    publication.heartbeatMs.store(0, std::memory_order_relaxed);
-    publication.sequence.store(sequence + 2, std::memory_order_release);
+
+    TitleAdapter_ClearCutsceneTheaterProjection(title, generation);
 }
 
 CinematicControlPublication TitleAdapter_GetCinematicControlPublication(
@@ -302,6 +314,97 @@ CinematicControlPublication TitleAdapter_GetCinematicControlPublication(
         }
         result.generation = static_cast<uint32_t>(stamp >> 32);
         result.state = static_cast<CinematicControlState>(rawState);
+        result.heartbeatMs = heartbeat;
+        return result;
+    }
+    return result;
+}
+
+bool TitleAdapter_PublishCutsceneTheaterProjection(
+    GameTitle title, uint32_t generation,
+    float authoredAspect, uint64_t heartbeatMs)
+{
+    const size_t slot = TitleRuntimeSlotIndex(title);
+    if (slot >= kTitleRuntimeSlotCount || !generation || !heartbeatMs ||
+        !std::isfinite(authoredAspect) || authoredAspect < 0.25f ||
+        authoredAspect > 4.0f ||
+        g_titleRuntime.Generation(title) != generation)
+    {
+        return false;
+    }
+    CutsceneTheaterProjectionSlot& publication =
+        g_cutsceneTheaterProjectionSlots[slot];
+    uint64_t sequence = publication.sequence.load(std::memory_order_acquire);
+    if ((sequence & 1u) || !publication.sequence.compare_exchange_strong(
+            sequence, sequence + 1, std::memory_order_acq_rel))
+    {
+        return false;
+    }
+    uint32_t aspectBits = 0;
+    static_assert(sizeof(aspectBits) == sizeof(authoredAspect));
+    memcpy(&aspectBits, &authoredAspect, sizeof(aspectBits));
+    publication.generation.store(generation, std::memory_order_relaxed);
+    publication.authoredAspectBits.store(aspectBits, std::memory_order_relaxed);
+    publication.heartbeatMs.store(heartbeatMs, std::memory_order_relaxed);
+    publication.sequence.store(sequence + 2, std::memory_order_release);
+    return true;
+}
+
+void TitleAdapter_ClearCutsceneTheaterProjection(
+    GameTitle title, uint32_t generation)
+{
+    const size_t slot = TitleRuntimeSlotIndex(title);
+    if (slot >= kTitleRuntimeSlotCount)
+        return;
+    CutsceneTheaterProjectionSlot& publication =
+        g_cutsceneTheaterProjectionSlots[slot];
+    uint64_t sequence = publication.sequence.load(std::memory_order_acquire);
+    if ((sequence & 1u) || !publication.sequence.compare_exchange_strong(
+            sequence, sequence + 1, std::memory_order_acq_rel))
+    {
+        return;
+    }
+    const uint32_t publishedGeneration = publication.generation.load(
+        std::memory_order_relaxed);
+    if (!generation || publishedGeneration == generation)
+    {
+        publication.generation.store(0, std::memory_order_relaxed);
+        publication.authoredAspectBits.store(0, std::memory_order_relaxed);
+        publication.heartbeatMs.store(0, std::memory_order_relaxed);
+    }
+    publication.sequence.store(sequence + 2, std::memory_order_release);
+}
+
+CutsceneTheaterProjectionPublication
+TitleAdapter_GetCutsceneTheaterProjectionPublication(GameTitle title)
+{
+    CutsceneTheaterProjectionPublication result{};
+    result.title = title;
+    const size_t slot = TitleRuntimeSlotIndex(title);
+    if (slot >= kTitleRuntimeSlotCount)
+        return result;
+    const CutsceneTheaterProjectionSlot& publication =
+        g_cutsceneTheaterProjectionSlots[slot];
+    for (uint32_t attempt = 0; attempt < kAdapterSnapshotReadAttempts; ++attempt)
+    {
+        const uint64_t before = publication.sequence.load(
+            std::memory_order_acquire);
+        if (before & 1u)
+            continue;
+        const uint32_t generation = publication.generation.load(
+            std::memory_order_relaxed);
+        const uint32_t aspectBits = publication.authoredAspectBits.load(
+            std::memory_order_relaxed);
+        const uint64_t heartbeat = publication.heartbeatMs.load(
+            std::memory_order_relaxed);
+        const uint64_t after = publication.sequence.load(
+            std::memory_order_acquire);
+        if (before != after)
+            continue;
+        float authoredAspect = 0.0f;
+        memcpy(&authoredAspect, &aspectBits, sizeof(authoredAspect));
+        result.generation = generation;
+        result.authoredAspect = authoredAspect;
         result.heartbeatMs = heartbeat;
         return result;
     }

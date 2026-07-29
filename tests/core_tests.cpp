@@ -2386,6 +2386,54 @@ int main()
               ClassifyReachCinematicControl(false, 1) ==
                   CinematicControlState::Unknown,
             "Reach qualifies only its proven cinematic-globals +0x24 state");
+        Check(ShouldDisableWidescreenCinematicFov(true, true, false) &&
+                  !ShouldDisableWidescreenCinematicFov(true, true, true) &&
+                  !ShouldDisableWidescreenCinematicFov(true, false, false) &&
+                  !ShouldDisableWidescreenCinematicFov(false, true, false),
+            "the stock cinematic FOV is restored only in theatre while immersive VR keeps its existing widening policy");
+        Check(UseAuthoredCutsceneProjection(true, 4.0f / 3.0f) &&
+                  !UseAuthoredCutsceneProjection(false, 4.0f / 3.0f) &&
+                  !UseAuthoredCutsceneProjection(true, 0.0f),
+            "authored projection replacement is isolated to active theatre with proven metadata");
+        const float tangentAspect =
+            CutsceneTheaterAspectFromTangents(4.0f / 3.0f, 1.0f);
+        const float projectionAspect =
+            CutsceneTheaterAspectFromProjectionScales(0.75f, 1.0f);
+        const float dimensionAspect =
+            CutsceneTheaterAspectFromDimensions(2912, 2100);
+        Check(std::fabs(tangentAspect - 4.0f / 3.0f) < 0.00001f &&
+                  std::fabs(projectionAspect - 4.0f / 3.0f) < 0.00001f &&
+                  std::fabs(dimensionAspect - 2912.0f / 2100.0f) < 0.00001f &&
+                  CutsceneTheaterAspectFromTangents(1.0f, 0.0f) == 0.0f &&
+                  CutsceneTheaterAspectFromProjectionScales(0.0f, 1.0f) == 0.0f &&
+                  CutsceneTheaterAspectFromDimensions(0, 2100) == 0.0f,
+            "authored aspect decodes safely from camera tangents, projection scales, and image dimensions");
+        Check(CutsceneTheaterProjectionMatchesAspect(
+                  4.0f / 3.0f, 0.75f, 1.0f) &&
+              !CutsceneTheaterProjectionMatchesAspect(
+                  16.0f / 9.0f, 0.75f, 1.0f),
+            "a rebuilt theatre projection must still match the pristine authored aspect");
+        const CutsceneTheaterProjectionPublication authoredProjection{
+            GameTitle::Halo4, 77, 4.0f / 3.0f, 1000};
+        float resolvedAspect = 0.0f;
+        Check(ResolveCutsceneTheaterProjection(
+                  authoredProjection, GameTitle::Halo4, 77,
+                  capability, 1100, resolvedAspect) &&
+                  std::fabs(resolvedAspect - 4.0f / 3.0f) < 0.00001f,
+            "a future title's fresh generation-tagged authored aspect resolves generically");
+        Check(!ResolveCutsceneTheaterProjection(
+                  authoredProjection, GameTitle::Halo4, 78,
+                  capability, 1100, resolvedAspect) &&
+              !ResolveCutsceneTheaterProjection(
+                  authoredProjection, GameTitle::Halo3, 77,
+                  capability, 1100, resolvedAspect) &&
+              !ResolveCutsceneTheaterProjection(
+                  authoredProjection, GameTitle::Halo4, 77,
+                  TitleCapability_None, 1100, resolvedAspect) &&
+              !ResolveCutsceneTheaterProjection(
+                  authoredProjection, GameTitle::Halo4, 77,
+                  capability, 1501, resolvedAspect),
+            "authored aspect rejects title, generation, capability, and freshness mismatches");
         CinematicControlPublication publication = locked;
         publication.state = CinematicControlState::PlayerControlled;
         Check(ResolveCinematicControl(
@@ -2442,6 +2490,10 @@ int main()
                     6.0f * 2100.0f / 2912.0f) < 0.00001f &&
                   CutsceneTheaterHeight(6.0f, 0, 2100) == 0.0f,
             "theatre height preserves the native render-image aspect ratio");
+        Check(std::fabs(CutsceneTheaterHeightFromAspect(
+                    6.0f, 4.0f / 3.0f) - 4.5f) < 0.00001f &&
+                  CutsceneTheaterHeightFromAspect(6.0f, 0.0f) == 0.0f,
+            "theatre quad height follows the authored cinematic projection aspect");
 
         CutsceneTheaterTransition transition;
         Check(!transition.Update(1000, true).active,

@@ -654,8 +654,8 @@ namespace
             "Screen distance (m)##theatre",
             &g_config.cutscene_theater_distance_m, 0.3f, 20.0f, "%.1f");
         ImGui::TextDisabled(
-            "Defaults: 6.0 m wide at 4.0 m away. Height follows the game's\n"
-            "native image shape; the picture is never stretched or cropped to 16:9.");
+            "Defaults: 6.0 m wide at 4.0 m away. Height follows the authored\n"
+            "cinematic projection; the picture is never forced to 16:9.");
         }
 
         if (g_activeCategory == Cat_Controls)

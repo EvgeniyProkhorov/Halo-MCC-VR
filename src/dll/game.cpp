@@ -1004,8 +1004,9 @@ namespace
     // also narrows the visibility projection, so geometry is rejected inside
     // the OpenXR eye frustum during cutscenes. This engine boolean is exposed
     // through the debug-var table; resolve it by name and disable only the
-    // cinematic reduction while stereo VR is active. Halo's ordinary gameplay
-    // projection and the authored cinematic camera pose remain untouched.
+    // cinematic reduction while immersive stereo VR is active. Theatre restores
+    // the captured stock value so its image retains the authored composition.
+    // Halo's ordinary gameplay projection remains untouched.
     std::atomic<uint8_t*> g_reduceCinematicFov{nullptr};
     std::atomic<uint8_t> g_reduceCinematicFovOriginal{1};
     std::atomic<bool> g_reduceCinematicFovApplied{false};
@@ -1132,9 +1133,10 @@ namespace
         if (!slot)
             return;
 
-        const bool vrActive = g_enabled.load(std::memory_order_relaxed) &&
-            VR_IsStereoEnabled();
-        if (vrActive)
+        const bool immersiveVrActive = ShouldDisableWidescreenCinematicFov(
+            g_enabled.load(std::memory_order_relaxed),
+            VR_IsStereoEnabled(), VR_IsCutsceneTheaterActive());
+        if (immersiveVrActive)
         {
             if (!g_reduceCinematicFovApplied.exchange(true))
             {
@@ -4773,6 +4775,12 @@ namespace
         }
     }
 
+    bool CinematicFovPolicyStockReady()
+    {
+        return g_reduceCinematicFov.load(std::memory_order_acquire) != nullptr &&
+            !g_reduceCinematicFovApplied.load(std::memory_order_acquire);
+    }
+
     void ApplyHeadLook(void* src)
     {
         if (!src)
@@ -5204,6 +5212,19 @@ namespace
         memcpy(savedDerived, reinterpret_cast<char*>(view) + 0x98, sizeof(savedDerived));
         memcpy(savedCameraCopy, reinterpret_cast<char*>(view) + 0x158, sizeof(savedCameraCopy));
         memcpy(savedDerivedCopy, reinterpret_cast<char*>(view) + 0x1E8, sizeof(savedDerivedCopy));
+        const bool cutsceneTheater = VR_IsCutsceneTheaterActive();
+        const float* authoredTangents = reinterpret_cast<const float*>(saved + 0x28);
+        const float authoredAspect = CutsceneTheaterAspectFromTangents(
+            authoredTangents[0], authoredTangents[1]);
+        const uint32_t theaterGeneration =
+            g_halo3RuntimeGeneration.load(std::memory_order_relaxed);
+        if (theaterGeneration && authoredAspect > 0.0f &&
+            (!cutsceneTheater || CinematicFovPolicyStockReady()))
+        {
+            TitleAdapter_PublishCutsceneTheaterProjection(
+                GameTitle::Halo3, theaterGeneration,
+                authoredAspect, GetTickCount64());
+        }
         const float* fwd = reinterpret_cast<const float*>(saved + 0x0C);
         const float* up = reinterpret_cast<const float*>(saved + 0x18);
         float right[3] = {
@@ -5269,7 +5290,7 @@ namespace
             const bool haveEyeView =
                 VR_GetEyeViewOffset(eye,eyePosition,eyeOrientation);
             ApplyCutsceneTheaterEyeTransform(
-                VR_IsCutsceneTheaterActive(),
+                cutsceneTheater,
                 g_config.cutscene_theater_depth,
                 eyePosition, eyeOrientation);
             const float eyeScale=g_worldScale.load();
@@ -5316,26 +5337,34 @@ namespace
             if (g_buildViewport && g_buildMatrices)
             {
                 float eyeFov[4];
-                float halfX=1.07338f,halfY=0.92502f;
-                if(VR_GetEyeFov(eye,eyeFov))
+                float tangentX = tanf(1.07338f);
+                float tangentY = tanf(0.92502f);
+                if (UseAuthoredCutsceneProjection(
+                        cutsceneTheater, authoredAspect) &&
+                    CinematicFovPolicyStockReady())
                 {
-                    halfX=fmaxf(-eyeFov[0],eyeFov[1]);
-                    halfY=fmaxf(eyeFov[2],-eyeFov[3]);
+                    tangentX = authoredTangents[0];
+                    tangentY = authoredTangents[1];
+                }
+                else if(VR_GetEyeFov(eye,eyeFov))
+                {
+                    tangentX=tanf(fmaxf(-eyeFov[0],eyeFov[1]));
+                    tangentY=tanf(fmaxf(eyeFov[2],-eyeFov[3]));
                 }
                 // Native R3 may narrow Halo's compact camera. Keep the headset
                 // view and its culling volume at the normal OpenXR FOV; only
                 // the separate scope pass consumes the weapon zoom.
                 float* cameraTangents=reinterpret_cast<float*>(camera+0x28);
-                cameraTangents[0]=tanf(halfX);
-                cameraTangents[1]=tanf(halfY);
+                cameraTangents[0]=tangentX;
+                cameraTangents[1]=tangentY;
                 g_buildViewport(camera, temporary);
                 g_buildMatrices(camera, temporary, reinterpret_cast<char*>(view) + 0x98, 0.0f);
                 const float* finalProjection = reinterpret_cast<const float*>(
                     reinterpret_cast<const char*>(view) + 0x98 + 0x78);
                 float* vrProjection = reinterpret_cast<float*>(
                     reinterpret_cast<char*>(view) + 0x98 + 0x78);
-                vrProjection[0]=1.0f/tanf(halfX);
-                vrProjection[5]=1.0f/tanf(halfY);
+                vrProjection[0]=1.0f/tangentX;
+                vrProjection[5]=1.0f/tangentY;
                 finalProjection = vrProjection;
                 if (fabsf(finalProjection[0]) > 0.01f && fabsf(finalProjection[5]) > 0.01f)
                 {
@@ -6948,6 +6977,7 @@ namespace
             float halfY = 0.0f;
             OdstHalo3FovMatch fovMatch{};
         } eyeInputs[2];
+        const bool cutsceneTheater = VR_IsCutsceneTheaterActive();
         bool eyeInputsValid = true;
         for (int eye = 0; eye < 2; ++eye)
         {
@@ -6956,7 +6986,7 @@ namespace
                 eye, eyeInputs[eye].position, eyeInputs[eye].orientation) &&
                 VR_GetEyeFov(eye, fov) && eyeInputsValid;
             ApplyCutsceneTheaterEyeTransform(
-                VR_IsCutsceneTheaterActive(),
+                cutsceneTheater,
                 g_config.cutscene_theater_depth,
                 eyeInputs[eye].position, eyeInputs[eye].orientation);
             for (float component : eyeInputs[eye].position)
@@ -7016,6 +7046,25 @@ namespace
                bytes + layout.nestedSecondaryCompact, layout.compactSize);
         memcpy(savedNestedSecondaryDerived,
                bytes + layout.nestedSecondaryDerived, layout.derivedSize);
+
+        const float* authoredProjection = reinterpret_cast<const float*>(
+            savedDerived + layout.projectionMatrix);
+        const float authoredAspect =
+            CutsceneTheaterAspectFromProjectionScales(
+                authoredProjection[0], authoredProjection[5]);
+        const uint32_t theaterGeneration =
+            g_odstRuntimeGeneration.load(std::memory_order_relaxed);
+        if (theaterGeneration && authoredAspect > 0.0f &&
+            (!cutsceneTheater || CinematicFovPolicyStockReady()))
+        {
+            TitleAdapter_PublishCutsceneTheaterProjection(
+                GameTitle::Halo3ODST, theaterGeneration,
+                authoredAspect, GetTickCount64());
+        }
+        const bool preserveAuthoredProjection =
+            UseAuthoredCutsceneProjection(
+                cutsceneTheater, authoredAspect) &&
+            CinematicFovPolicyStockReady();
 
         const float* savedForward = reinterpret_cast<const float*>(
             savedCompact + layout.compactForward);
@@ -7094,13 +7143,16 @@ namespace
                                 axis, cosAngle, sinAngle);
             }
 
-            const float halfX = eyeInputs[eye].halfX;
-            const float halfY = eyeInputs[eye].halfY;
+            float halfX = eyeInputs[eye].halfX;
+            float halfY = eyeInputs[eye].halfY;
             const OdstHalo3FovMatch& fovMatch = eyeInputs[eye].fovMatch;
-            *reinterpret_cast<float*>(camera + layout.verticalFov) =
-                fovMatch.compactVerticalInput;
-            *reinterpret_cast<float*>(camera + layout.referenceFov) =
-                fovMatch.compactReferenceInput;
+            if (!preserveAuthoredProjection)
+            {
+                *reinterpret_cast<float*>(camera + layout.verticalFov) =
+                    fovMatch.compactVerticalInput;
+                *reinterpret_cast<float*>(camera + layout.referenceFov) =
+                    fovMatch.compactReferenceInput;
+            }
 
             alignas(16) unsigned char temporary[0x40]{};
             g_odstCamera.buildViewport(camera, temporary);
@@ -7108,8 +7160,21 @@ namespace
                 camera, temporary, bytes + layout.rootCurrentDerived, 0.0f);
             float* projection = reinterpret_cast<float*>(
                 bytes + layout.rootCurrentDerived + layout.projectionMatrix);
-            projection[0] = fovMatch.projectionX;
-            projection[5] = fovMatch.projectionY;
+            if (preserveAuthoredProjection)
+            {
+                const ReachProjectionHalfFovs authoredFov =
+                    DecodeReachProjectionHalfFovs(projection[0], projection[5]);
+                if (authoredFov.valid)
+                {
+                    halfX = authoredFov.horizontal;
+                    halfY = authoredFov.vertical;
+                }
+            }
+            else
+            {
+                projection[0] = fovMatch.projectionX;
+                projection[5] = fovMatch.projectionY;
+            }
             static std::atomic<unsigned> loggedFovEyes{0};
             const unsigned eyeBit = 1u << eye;
             if (!(loggedFovEyes.fetch_or(
@@ -9740,7 +9805,8 @@ namespace
         // FOV reduction while a cinematic is in progress, which also narrows the
         // visibility projection and pulls the view in during ODST cutscenes.
         // Halo 3 name-resolves this engine debug var in InstallHook and holds it
-        // at 0 while stereo is active; ODST installs through this separate core,
+        // at 0 while immersive stereo is active, but theatre restores the stock
+        // value. ODST installs through this separate core,
         // so resolve it here against halo3odst.dll's own table using the same
         // proven FindDebugVarFloat path already used for the motion-blur vars.
         // UpdateCinematicFovPolicy() enforces it from the ODST present tick, and
@@ -10053,6 +10119,8 @@ namespace
         uintptr_t playerView = 0;
         int32_t cameraStackDepthBefore = -1;
         uint64_t preparedSerial = 0;
+        bool cutsceneTheater = false;
+        float cutsceneTheaterAspect = 0.0f;
         ReachVrRenderAccess* renderAccess = nullptr;
         float gameplayBasePosition[3]{};
         FpExplicitPoseTargets fpTargets{};
@@ -12311,7 +12379,8 @@ namespace
     // validated symmetric raster FOV. Missing or non-finite input fails the
     // whole transaction; there is no fixed-IPD or stale-view fallback.
     bool ReachApplyEyeOffset(
-        unsigned char* cam, const ReachEyeRenderInput& input)
+        unsigned char* cam, const ReachEyeRenderInput& input,
+        bool preserveAuthoredFov)
     {
         if (!cam || !input.rasterCover.valid)
             return false;
@@ -12367,8 +12436,11 @@ namespace
             RotateAboutAxis(fwd, axisVec, cosA, sinA);
             RotateAboutAxis(up, axisVec, cosA, sinA);
         }
-        *reinterpret_cast<float*>(cam + 0x28) =
-            input.rasterCover.verticalFov;
+        if (!preserveAuthoredFov)
+        {
+            *reinterpret_cast<float*>(cam + 0x28) =
+                input.rasterCover.verticalFov;
+        }
         return true;
     }
 
@@ -12383,8 +12455,11 @@ namespace
         const ReachSymmetricFovCover& cullCover,
         const ReachVrRenderSnapshot& tracking,
         unsigned char* headCenter,
-        unsigned char* headDerived)
+        unsigned char* headDerived,
+        float authoredAspect,
+        bool& authoredTheater)
     {
+        authoredTheater = false;
         // Log-only cinematic-state sample on the engine thread that owns the
         // per-frame camera work. If cutscenes stop this path from running, the
         // worker-side stall report is itself the finding.
@@ -12528,7 +12603,7 @@ namespace
                 reachCinematicControl, GetTickCount64());
         }
         memcpy(headCenter, stockCompact, kReachCompactCameraBytes);
-        const bool authoredTheater =
+        authoredTheater =
             reachCinematicControl == CinematicControlState::AuthoredLocked &&
             VR_IsCutsceneTheaterActive();
         if (!authoredTheater)
@@ -12537,7 +12612,8 @@ namespace
             if (!ReachApplyHeadLook(headCenter, tracking))
                 return false;
         }
-        *reinterpret_cast<float*>(headCenter + 0x28) = cullCover.verticalFov;
+        if (!authoredTheater)
+            *reinterpret_cast<float*>(headCenter + 0x28) = cullCover.verticalFov;
 
         ReachCompactCameraObservation transformed{};
         if (!ValidateReachCompactCamera(
@@ -12558,7 +12634,10 @@ namespace
         const ReachProjectionHalfFovs rasterFov =
             DecodeReachProjectionHalfFovs(
                 projectionMatrix[0], projectionMatrix[5]);
-        return ReachProjectionCoversOpenXr(rasterFov, cullCover);
+        return authoredTheater
+            ? rasterFov.valid && CutsceneTheaterProjectionMatchesAspect(
+                  authoredAspect, projectionMatrix[0], projectionMatrix[5])
+            : ReachProjectionCoversOpenXr(rasterFov, cullCover);
     }
 
     // Byte-exact rollback of everything the per-eye transaction can touch,
@@ -12875,7 +12954,9 @@ namespace
                     g_reachOwnerScope.eyes[policy.eye];
                 const ReachSymmetricFovCover& requestedFov =
                     eyeInput.rasterCover;
-                if (!ReachApplyEyeOffset(compact, eyeInput))
+                if (!ReachApplyEyeOffset(
+                        compact, eyeInput,
+                        g_reachOwnerScope.cutsceneTheater))
                 {
                     transactionValid = false;
                     break;
@@ -12914,7 +12995,12 @@ namespace
                 const ReachProjectionHalfFovs rasterFov =
                     DecodeReachProjectionHalfFovs(
                         projectionMatrix[0], projectionMatrix[5]);
-                if (!ReachProjectionCoversOpenXr(rasterFov, requestedFov))
+                if (!(g_reachOwnerScope.cutsceneTheater
+                        ? rasterFov.valid &&
+                            CutsceneTheaterProjectionMatchesAspect(
+                                g_reachOwnerScope.cutsceneTheaterAspect,
+                                projectionMatrix[0], projectionMatrix[5])
+                        : ReachProjectionCoversOpenXr(rasterFov, requestedFov)))
                 {
                     transactionValid = false;
                     break;
@@ -14117,6 +14203,20 @@ namespace
         candidate.preparedSerial = prepared.Serial();
         memcpy(candidate.gameplayBasePosition,primaryCompact+0x00,
                sizeof(candidate.gameplayBasePosition));
+        const float* authoredProjection = reinterpret_cast<const float*>(
+            primaryDerived + kReachDerivedProjectionOffset);
+        const float authoredAspect =
+            CutsceneTheaterAspectFromProjectionScales(
+                authoredProjection[0], authoredProjection[5]);
+        candidate.cutsceneTheaterAspect = authoredAspect;
+        const uint32_t theaterGeneration =
+            g_reachCamera.generation.load(std::memory_order_relaxed);
+        if (theaterGeneration && authoredAspect > 0.0f)
+        {
+            TitleAdapter_PublishCutsceneTheaterProjection(
+                GameTitle::HaloReach, theaterGeneration,
+                authoredAspect, GetTickCount64());
+        }
         ReachSymmetricFovCover cullCover{};
         if (!ReachCollectEyeInputs(
                 observedPrimary.renderBounds, tracking,
@@ -14137,7 +14237,9 @@ namespace
         {
             headCullReady = ReachBuildHeadCullCamera(
                 primaryCompact, cullCover, tracking,
-                candidate.headCenter, headDerived);
+                candidate.headCenter, headDerived,
+                candidate.cutsceneTheaterAspect,
+                candidate.cutsceneTheater);
         }
         __except (EXCEPTION_EXECUTE_HANDLER)
         {
@@ -18182,6 +18284,64 @@ CinematicControlState Game_GetCinematicControlState()
         publication, runtime.runtime.owner, runtime.runtime.generation,
         enabled, now);
 }
+bool Game_GetCutsceneTheaterPresentation(float& authoredAspect)
+{
+    authoredAspect = 0.0f;
+    const uint64_t now = GetTickCount64();
+    const TitleAdapterRuntimeSnapshot runtime = RuntimeSnapshot(now);
+    if (runtime.ownershipPending ||
+        runtime.runtime.qualifyingOwnerCount != 1)
+    {
+        return false;
+    }
+    const uint32_t enabled = TitleRuntimeMaskUnarmedCapabilities(
+        runtime.runtime, kRuntimeCapabilitiesRequiringArm);
+    const CinematicControlPublication controlBefore =
+        TitleAdapter_GetCinematicControlPublication(runtime.runtime.owner);
+    if (!CutsceneTheaterRequested(
+            g_config.cutscene_theater_enabled,
+            ResolveCinematicControl(
+                controlBefore, runtime.runtime.owner, runtime.runtime.generation,
+                enabled, now)))
+    {
+        return false;
+    }
+    const CutsceneTheaterProjectionPublication projection =
+        TitleAdapter_GetCutsceneTheaterProjectionPublication(
+            runtime.runtime.owner);
+    if (!ResolveCutsceneTheaterProjection(
+            projection, runtime.runtime.owner, runtime.runtime.generation,
+            enabled, now, authoredAspect))
+    {
+        return false;
+    }
+    const CinematicControlPublication controlAfter =
+        TitleAdapter_GetCinematicControlPublication(runtime.runtime.owner);
+    return controlBefore.title == controlAfter.title &&
+        controlBefore.generation == controlAfter.generation &&
+        controlBefore.state == controlAfter.state &&
+        controlBefore.heartbeatMs == controlAfter.heartbeatMs;
+}
+void Game_OnCutsceneTheaterPresentationChanged()
+{
+    // Called by the compositor exactly at full black, after it publishes the
+    // new theatre-active state and before the next game frame can be built.
+    // This removes a one-frame lag in Halo 3/ODST's stock cinematic-FOV policy.
+    UpdateCinematicFovPolicy();
+    if (!VR_IsCutsceneTheaterActive() || CinematicFovPolicyStockReady())
+        return;
+    const TitleAdapterRuntimeSnapshot runtime =
+        RuntimeSnapshot(GetTickCount64());
+    if (runtime.runtime.owner == GameTitle::Halo3 ||
+        runtime.runtime.owner == GameTitle::Halo3ODST)
+    {
+        // The engine's stock FOV could not be restored. Revoke only the
+        // authored-projection proof while the screen is fully black; the
+        // generic compositor will keep this cinematic immersive.
+        TitleAdapter_ClearCutsceneTheaterProjection(
+            runtime.runtime.owner, runtime.runtime.generation);
+    }
+}
 bool Game_CanToggleImmersiveView()
 {
     return Game_AllowsSharedGameplayFeatures() || Game_IsCameraOnlyBringup();
@@ -18322,10 +18482,11 @@ void Game_AutoVrTick()
             }
         }
         wasOdstCameraContext = true;
-        // Issue #18: hold Halo's widescreen cinematic-FOV reduction at 0 while
-        // ODST stereo is active, exactly as the Halo 3 present path does. The
-        // policy no-ops until the var is resolved and self-restores when stereo
-        // is off; it must run here because the shared call site below is behind
+        // Issue #18: hold Halo's widescreen cinematic-FOV reduction at 0 only
+        // while ODST is immersive, exactly as the Halo 3 present path does;
+        // restore stock while theatre owns the cutscene. The policy no-ops until
+        // the var is resolved and self-restores when stereo is off; it must run
+        // here because the shared call site below is behind
         // the ODST-false Game_AllowsSharedGameplayFeatures() gate.
         UpdateCinematicFovPolicy();
         const uint64_t now = GetTickCount64();

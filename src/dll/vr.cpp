@@ -317,6 +317,7 @@ namespace
     // that one qualified cinematic; the next unqualified frame clears it.
     bool g_cutsceneTheaterWasQualified = false;
     bool g_cutsceneTheaterEntryBlocked = false;
+    float g_cutsceneTheaterAuthoredAspect = 0.0f;
 
     // Latest head pose in the LOCAL space, captured every frame on the render
     // thread and read by the game camera hook (M1) on the game thread — hence
@@ -6479,9 +6480,12 @@ float4 ps_scope_linearize(VSOut i):SV_Target { return paint(i.uv,true); }
                 const bool pausedPresentation = g_pausePresentation.load();
                 const bool stereo = !pausedPresentation && g_stereoEnabled.load() && viewsValid &&
                                     g_stereoChain != XR_NULL_HANDLE && Game_IsHeadTracking();
-                const bool theaterQualified = stereo && CutsceneTheaterRequested(
-                    g_config.cutscene_theater_enabled,
-                    Game_GetCinematicControlState());
+                float requestedTheaterAspect = 0.0f;
+                const bool theaterQualified = stereo &&
+                    Game_GetCutsceneTheaterPresentation(
+                        requestedTheaterAspect);
+                if (theaterQualified)
+                    g_cutsceneTheaterAuthoredAspect = requestedTheaterAspect;
                 if (theaterQualified && !g_cutsceneTheaterWasQualified)
                 {
                     g_cutsceneTheaterEntryBlocked =
@@ -6508,6 +6512,7 @@ float4 ps_scope_linearize(VSOut i):SV_Target { return paint(i.uv,true); }
                     comfortFadeAlpha, theaterTransition.fadeAlpha);
                 if (theaterTransition.switched)
                 {
+                    Game_OnCutsceneTheaterPresentationChanged();
                     if (theaterTransition.active)
                     {
                         LOG("cutscene theatre: entered room-fixed stereo presentation");
@@ -6927,9 +6932,9 @@ float4 ps_scope_linearize(VSOut i):SV_Target { return paint(i.uv,true); }
                                         CutsceneTheaterImageIndex(
                                             eye, g_config.cutscene_theater_flip_depth);
                                     theaterQuads[eye].size.height =
-                                        CutsceneTheaterHeight(
+                                        CutsceneTheaterHeightFromAspect(
                                             g_config.cutscene_theater_width_m,
-                                            g_stereoW, g_stereoH);
+                                            g_cutsceneTheaterAuthoredAspect);
                                     layers.push_back(
                                         reinterpret_cast<XrCompositionLayerBaseHeader*>(
                                             &theaterQuads[eye]));
@@ -7916,6 +7921,7 @@ void VR_DetachGamePresentation()
     g_cutsceneTheaterTransition.Reset(false);
     g_cutsceneTheaterWasQualified = false;
     g_cutsceneTheaterEntryBlocked = false;
+    g_cutsceneTheaterAuthoredAspect = 0.0f;
     if (g_stereoEnabled.load())
         VR_ToggleStereo();
     else

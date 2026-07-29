@@ -17,10 +17,84 @@ struct CinematicControlPublication
     uint64_t heartbeatMs = 0;
 };
 
+struct CutsceneTheaterProjectionPublication
+{
+    GameTitle title = GameTitle::None;
+    uint32_t generation = 0;
+    float authoredAspect = 0.0f;
+    uint64_t heartbeatMs = 0;
+};
+
+inline float CutsceneTheaterAspectFromTangents(
+    float horizontalTangent, float verticalTangent) noexcept
+{
+    if (!std::isfinite(horizontalTangent) ||
+        !std::isfinite(verticalTangent) ||
+        horizontalTangent <= 0.0001f || verticalTangent <= 0.0001f)
+    {
+        return 0.0f;
+    }
+    const float aspect = horizontalTangent / verticalTangent;
+    return std::isfinite(aspect) && aspect >= 0.25f && aspect <= 4.0f
+        ? aspect : 0.0f;
+}
+
+inline float CutsceneTheaterAspectFromProjectionScales(
+    float projectionX, float projectionY) noexcept
+{
+    if (!std::isfinite(projectionX) || !std::isfinite(projectionY) ||
+        std::fabs(projectionX) <= 0.0001f ||
+        std::fabs(projectionY) <= 0.0001f)
+    {
+        return 0.0f;
+    }
+    // tan(horizontal half-FOV) / tan(vertical half-FOV) = P[5] / P[0].
+    return CutsceneTheaterAspectFromTangents(
+        std::fabs(projectionY), std::fabs(projectionX));
+}
+
+inline float CutsceneTheaterAspectFromDimensions(
+    uint32_t width, uint32_t height) noexcept
+{
+    if (!width || !height)
+        return 0.0f;
+    const float aspect = static_cast<float>(width) /
+        static_cast<float>(height);
+    return std::isfinite(aspect) && aspect >= 0.25f && aspect <= 4.0f
+        ? aspect : 0.0f;
+}
+
+inline bool CutsceneTheaterProjectionMatchesAspect(
+    float authoredAspect, float projectionX, float projectionY,
+    float tolerance = 0.001f) noexcept
+{
+    const float actualAspect =
+        CutsceneTheaterAspectFromProjectionScales(projectionX, projectionY);
+    return std::isfinite(authoredAspect) && authoredAspect >= 0.25f &&
+        authoredAspect <= 4.0f && actualAspect > 0.0f &&
+        std::isfinite(tolerance) && tolerance >= 0.0f &&
+        std::fabs(actualAspect - authoredAspect) <= tolerance;
+}
+
 inline bool CutsceneTheaterRequested(
     bool enabled, CinematicControlState state) noexcept
 {
     return enabled && state == CinematicControlState::AuthoredLocked;
+}
+
+inline bool ShouldDisableWidescreenCinematicFov(
+    bool modEnabled, bool stereoEnabled, bool theaterActive) noexcept
+{
+    // The legacy widening remains exactly the immersive-VR policy. Theatre
+    // restores the engine's stock authored cinematic FOV instead.
+    return modEnabled && stereoEnabled && !theaterActive;
+}
+
+inline bool UseAuthoredCutsceneProjection(
+    bool theaterActive, float authoredAspect) noexcept
+{
+    return theaterActive && std::isfinite(authoredAspect) &&
+        authoredAspect >= 0.25f && authoredAspect <= 4.0f;
 }
 
 inline CinematicControlState ClassifyHalo3FamilyCinematicControl(
@@ -64,6 +138,30 @@ inline CinematicControlState ResolveCinematicControl(
     return publication.state;
 }
 
+inline bool ResolveCutsceneTheaterProjection(
+    const CutsceneTheaterProjectionPublication& publication,
+    GameTitle activeTitle, uint32_t activeGeneration,
+    uint32_t activeCapabilities, uint64_t nowMs,
+    float& authoredAspect,
+    uint64_t freshForMs = kCinematicControlFreshMs) noexcept
+{
+    authoredAspect = 0.0f;
+    if ((activeCapabilities & TitleCapability_CutsceneTheater) == 0 ||
+        activeTitle == GameTitle::None || activeTitle == GameTitle::Unknown ||
+        publication.title != activeTitle || !activeGeneration ||
+        publication.generation != activeGeneration ||
+        !publication.heartbeatMs || nowMs < publication.heartbeatMs ||
+        nowMs - publication.heartbeatMs > freshForMs ||
+        !std::isfinite(publication.authoredAspect) ||
+        publication.authoredAspect < 0.25f ||
+        publication.authoredAspect > 4.0f)
+    {
+        return false;
+    }
+    authoredAspect = publication.authoredAspect;
+    return true;
+}
+
 inline void ApplyCutsceneTheaterEyeTransform(
     bool active, float depth,
     float position[3], float orientation[4]) noexcept
@@ -99,6 +197,18 @@ inline float CutsceneTheaterHeight(
     }
     return widthMeters * static_cast<float>(imageHeight) /
         static_cast<float>(imageWidth);
+}
+
+inline float CutsceneTheaterHeightFromAspect(
+    float widthMeters, float authoredAspect) noexcept
+{
+    if (!std::isfinite(widthMeters) || widthMeters <= 0.0f ||
+        !std::isfinite(authoredAspect) || authoredAspect < 0.25f ||
+        authoredAspect > 4.0f)
+    {
+        return 0.0f;
+    }
+    return widthMeters / authoredAspect;
 }
 
 struct CutsceneTheaterTransitionOutput

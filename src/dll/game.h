@@ -60,6 +60,8 @@ bool Game_AllowsSharedGameplayFeatures();
 bool Game_AllowsSharedControllerInput();
 bool Game_HasTitleCapability(uint32_t requiredCapabilities);
 CinematicControlState Game_GetCinematicControlState();
+bool Game_GetCutsceneTheaterPresentation(float& authoredAspect);
+void Game_OnCutsceneTheaterPresentationChanged();
 bool Game_CanToggleImmersiveView();
 bool Game_ProcessPresentationDetachRequest();
 // Render-thread emergency transaction used only after OpenXR session failure.

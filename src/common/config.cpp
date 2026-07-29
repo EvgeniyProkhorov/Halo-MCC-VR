@@ -437,7 +437,7 @@ void ConfigSave()
     fprintf(f, "cutscene_theater_flip_depth = %d\n\n",
              g_config.cutscene_theater_flip_depth ? 1 : 0);
     fprintf(f, "# Room-fixed theatre screen width and distance in meters. Its height\n");
-    fprintf(f, "# follows the game's native image shape; it is never stretched to 16:9.\n");
+    fprintf(f, "# follows the authored cinematic projection; it is never forced to 16:9.\n");
     fprintf(f, "# (defaults %.2f wide at %.2f away)\n",
              d.cutscene_theater_width_m, d.cutscene_theater_distance_m);
     fprintf(f, "cutscene_theater_width_m = %.2f\n",

@@ -42,6 +42,13 @@ void TitleAdapter_ClearCinematicControl(
     GameTitle title, uint32_t generation);
 CinematicControlPublication TitleAdapter_GetCinematicControlPublication(
     GameTitle title);
+bool TitleAdapter_PublishCutsceneTheaterProjection(
+    GameTitle title, uint32_t generation,
+    float authoredAspect, uint64_t heartbeatMs);
+void TitleAdapter_ClearCutsceneTheaterProjection(
+    GameTitle title, uint32_t generation);
+CutsceneTheaterProjectionPublication
+TitleAdapter_GetCutsceneTheaterProjectionPublication(GameTitle title);
 
 void TitleAdapter_SetRuntimeMode(RuntimeMode mode);
 RuntimeMode TitleAdapter_GetRuntimeMode();

@@ -23,6 +23,12 @@ publication freshness window is 500 ms. Capability loss, title transitions,
 module unload, a missing detector, or a failed read therefore return only this
 feature to immersive presentation.
 
+The compositor also requires a separate fresh, generation-tagged authored
+projection aspect. It double-reads the cinematic-control publication around
+that projection read, so a title transition or camera-control handoff cannot
+combine state and aspect from different samples. Missing or invalid projection
+metadata keeps the frame immersive rather than guessing an aspect.
+
 ## Halo 3 and ODST
 
 Both engines expose the same uniquely matched
@@ -42,6 +48,15 @@ is readable. An inactive cinematic byte reports `PlayerControlled`. A missing
 or non-unique signature, missing object, read fault, stale generation, or title
 unload reports `Unknown` and masks the capability.
 
+Halo 3's pristine compact camera stores its authored horizontal/vertical
+projection tangents at `+0x28/+0x2C`. ODST's title-evidenced camera layout stores
+its vertical/reference FOV inputs at those offsets and the resulting projection
+matrix at derived-camera `+0x78`. The theatre branches retain those inputs and
+matrix scales instead of substituting OpenXR eye FOV. The engine debug variable
+`reduce_widescreen_fov_during_cinematics` is restored to its captured stock
+value only while theatre is active; immersive VR keeps the existing widening
+policy unchanged.
+
 ## Reach
 
 The accepted Winter Contingency probe identified the low byte of Reach's
@@ -56,10 +71,17 @@ zero to `PlayerControlled`. The existing authored-camera discontinuity detector
 is used only to reorient at shot cuts. Camera motion or a camera jump can never
 activate theatre by itself.
 
+The pristine Reach derived camera carries its authored projection at the
+evidenced derived-block offset `+0x78`. Theatre publishes that projection's
+aspect, retains the pristine compact camera's vertical FOV at `+0x28`, and
+requires both rebuilt eye projections to match the published authored aspect.
+Immersive Reach continues using its existing OpenXR covering FOV and validation.
+
 ## Future titles
 
 A future adapter may advertise `TitleCapability_CutsceneTheater` only after it
 has equivalent title-specific evidence that distinguishes an authored locked
-camera from player-controllable sequences. Once it publishes the shared state,
+camera from player-controllable sequences, plus a validated authored projection
+aspect. Once it publishes the shared state and projection,
 the existing compositor, configuration, transition, per-eye quad submission,
 and failure isolation apply without title-specific presentation code.
