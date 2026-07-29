@@ -555,11 +555,10 @@ inline constexpr uintptr_t kReachMotionBlurScaleEntryRva = 0x00B3A1E0;
 inline constexpr uintptr_t kReachMotionBlurMaxValueRva = 0x00B44600;
 inline constexpr uintptr_t kReachMotionBlurScaleValueRva = 0x00B44604;
 // Reach's object lightmap-shadow pass writes dynamic caster shadows specifically
-// onto static world lightmaps. That receiver boundary matches the headset fault:
-// large first-person weapons or a nearby vehicle trigger hard black regions on
-// world geometry while the reported caster, characters, decorators, sky, and
-// first-person presentation remain lit. It remains an isolation candidate until
-// this exact behavior is tested in the headset.
+// onto static world lightmaps. That receiver boundary matched the headset fault,
+// but candidate 839aed7 proved that suppressing the exact pass per eye leaves the
+// black static-world defect unchanged. The binding remains as rejected evidence;
+// production does not arm the scoped suppression.
 //
 // This is NOT `render_shadow_screenspace` or `_surface_shadow_mask`. The latter
 // was measured 100% white in both eyes and is a rejected branch. Official HREK

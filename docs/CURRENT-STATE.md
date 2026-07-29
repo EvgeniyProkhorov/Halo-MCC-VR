@@ -74,32 +74,27 @@ defect was identical, broad effect-matrix re-parenting is rejected as the
 black-world cause. The behavior is disabled in the following revert commit
 before any new candidate.
 
-### UNTESTED: Reach static-world lightmap-shadow isolation - 2026-07-29
+### REJECTED: Reach static-world lightmap-shadow isolation - 2026-07-29
 
-This candidate does not advance the accepted pointer above. Its only behavioral
-change is to disable Reach's exact `render_lightmap_shadows` pass while stock
-`player_view_render` executes each admitted VR eye, restoring the title boolean
-in `__finally`. Flat, screenshot, nested, and unclaimed renders remain stock.
+This result is evidence only and does not advance the accepted pointer above.
 
-This path matches the headset receiver boundary directly: HREK proves it
-enumerates object casters and applies their dynamic shadows to static world
-lightmaps before static lighting. Retail repeats the complete HREK chain through
-the type-5 descriptor at `0x00B41080`, live boolean `0x00B4444D`, player-view
-wrapper `0x0026E7B4`, renderer `0x0028B3D0`, and apply block `0x0026E878`.
-Characters, weapons, vehicles, sky, grass/decorators, and other dynamic geometry
-are not its receivers. This is separate from the rejected all-white
-`_surface_shadow_mask` path.
+| Identity | Value |
+| --- | --- |
+| Tested source | `839aed764dcaa9969c457ec919992f44015d4f02` |
+| Candidate package | `out/candidates/839aed7-reach-fp-parity-20260729-110212499Z` |
+| `halo3xr.dll` SHA-256 | `BEAA872494E042DDE4EFEF583946EAA9BD72218890F81DBA959C036900F8B66C` |
+| Runtime | Steam edition, SteamVR/OpenXR 2.17.6, PSVR2 at 120 Hz |
+| Headset result | Black static-world geometry unchanged |
+| Preserved evidence | `out/test-runs/839aed7-reach-world-black-lightmap-shadow-fail-20260729-061119` |
+| Preserved log SHA-256 | `40923EF9CDD1BEBECB6D8660CAB98E9385AB5BF81FB1C48986731930051B4A96` |
 
-The runtime verifies the name, descriptor type/value pointer, wrapper compare,
-and both call edges before enabling this candidate; failure leaves this feature
-stock without denying the existing Reach camera core. Worker-side counters
-separate completed `1 -> 0 -> 1` eye scopes from an already-disabled title byte
-and must show zero write/restore failures before the headset visual result is
-interpreted. The acceptance target is the exact known trigger:
-the longest first-person weapon or a nearby Ghost/Revenant must no longer paint
-different black regions onto each eye's static world geometry. The packaged
-source and artifact hashes will be recorded after the candidate is built; until
-then this section is implementation evidence only.
+The candidate disabled the exact `render_lightmap_shadows` boolean only while
+stock `player_view_render` executed each admitted VR eye, then restored it in
+`__finally`. The headset log proves the exact binding armed and records at least
+two completed `1 -> 0 -> 1` scopes with zero write or restore failures. The
+visual defect was unchanged, so Reach's object lightmap-shadow pass is rejected
+as the black-world cause. The implementation remains dormant as evidence; the
+following revert commit prevents it from arming before another candidate.
 
 ### ACCEPTED: Reach muzzle height - 2026-07-27
 

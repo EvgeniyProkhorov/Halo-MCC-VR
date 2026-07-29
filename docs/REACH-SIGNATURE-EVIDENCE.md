@@ -337,14 +337,15 @@ candidate. Evidence:
 (log SHA-256
 `E6BA52C4671C03002C003D7FF3BAEEA2CF125283E605D6BDC6F5976B6E9C1CFF`).
 
-## Static-world black geometry: lightmap-shadow isolation candidate (UNTESTED)
+## Static-world black geometry: lightmap-shadow isolation (REJECTED)
 
 The headset boundary is unusually specific. Large first-person weapons and
 nearby vehicles trigger hard black regions on authored terrain and other static
 world surfaces. The caster itself, characters, vehicles, first-person weapons,
 sky, grass blades, and instanced rocks stay lit. The regions differ between the
-two eyes but remain attached to world depth. This is the exact receiver/caster
-boundary of Reach's dynamic lightmap-shadow renderer.
+two eyes but remain attached to world depth. That resembled the receiver/caster
+boundary of Reach's dynamic lightmap-shadow renderer, but the exact isolation
+test below disproved it as the cause.
 
 Official HREK establishes the system rather than merely naming a retail debug
 byte:
@@ -400,17 +401,17 @@ The lightmap-shadow renderer is an earlier object-caster -> static-lightmap
 receiver path and does not use that all-white screen-space mask as its defining
 boundary.
 
-The untested candidate resolves the descriptor, name, type, value pointer,
+Candidate `839aed7` resolved the descriptor, name, type, value pointer,
 player-view call, wrapper compare, and renderer call exactly. For each admitted
-VR eye it saves the title boolean, clears it immediately around stock
-`player_view_render`, and restores it in `__finally`. Flat, screenshot, nested,
-and unclaimed renders remain stock. Hot-path diagnostics are atomic counters;
-the worker reports the zero-sample armed state, completed `1 -> 0 -> 1` eye
-scopes, already-disabled entry states, and all write/restore failures. A failed
-binding leaves only this feature stock; a failed scoped restoration drops that
-frame and retains an ownership record until restoration succeeds. This exact
-pass is a receiver-boundary candidate, not yet a proven root cause. No depth,
-Z-camera, SSAO, global shader, or generic postprocess behavior changes.
+VR eye it saved the title boolean, cleared it immediately around stock
+`player_view_render`, and restored it in `__finally`. The Steam/SteamVR PSVR2
+log records the exact candidate BOUND and ARMED, then at least two completed
+`1 -> 0 -> 1` eye scopes with zero write or restore failures. The black static
+world geometry remained unchanged. This rejects the exact object-lightmap-shadow
+pass as the cause; the implementation is retained but no longer armed. Evidence:
+`out/test-runs/839aed7-reach-world-black-lightmap-shadow-fail-20260729-061119`
+(log SHA-256
+`40923EF9CDD1BEBECB6D8660CAB98E9385AB5BF81FB1C48986731930051B4A96`).
 
 The same `0x121083` caller, entry
 `haloreach.dll+0x120FDC` through `+0x1210D3`. Its exact entry signature is:

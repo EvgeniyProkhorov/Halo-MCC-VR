@@ -10077,6 +10077,10 @@ namespace
     std::atomic<uint32_t> g_reachLightmapShadowRestoreFailures{0};
     std::atomic<uint8_t> g_reachLightmapShadowOutstandingValue{0};
     std::atomic<bool> g_reachLightmapShadowRestoreOutstanding{false};
+    // Headset candidate 839aed7 proved the exact pass can be suppressed and
+    // restored per eye without changing the black static-world defect. Keep
+    // the resolver and scoped implementation as evidence, but do not arm it.
+    constexpr bool kReachLightmapShadowIsolationEnabled = false;
     bool RestoreReachNativeWeaponIkBypass();
     bool RestoreReachLightmapShadowsControl();
     bool RestoreReachThirdPersonEffectSuppression();
@@ -15498,10 +15502,12 @@ namespace
         uint8_t* reachLightmapShadowsEnabled = nullptr;
         uint8_t reachLightmapShadowsOriginal = 0;
         const bool reachLightmapShadowsResolved =
+            kReachLightmapShadowIsolationEnabled &&
             ResolveReachLightmapShadowsControl(
                 base, size, reachLightmapShadowsEnabled,
                 reachLightmapShadowsOriginal);
-        if (!reachLightmapShadowsResolved)
+        if (kReachLightmapShadowIsolationEnabled &&
+            !reachLightmapShadowsResolved)
         {
             LOG("Reach world-shadow candidate UNAVAILABLE and not armed: "
                 "exact render_lightmap_shadows proof failed; only this feature "
