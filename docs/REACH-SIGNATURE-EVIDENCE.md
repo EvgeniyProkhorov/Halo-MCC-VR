@@ -1232,7 +1232,23 @@ culling policy, first-person rebuilds, depth/stencil modes, SSAO, shadows, or
 head/controller transforms. A preallocated atomic status records generation,
 prepared serial, and eye mask; the cold worker reports both-eye ACTIVE, including
 the armed-but-zero-sample install state, without logging or locking in the
-render hook. Headset acceptance remains pending.
+render hook.
+
+Source `74e1477d7ae02ea57f754ac76dfd99678d9028ec`, package
+`out/candidates/74e1477-reach-fp-parity-20260729-161950871Z`, exact DLL SHA-256
+`5BB673ABBA8BA9D4B0BC667D1009CE41880ABCB1F8EFDC31F7E118659C20C898`
+is headset-accepted. The Steam / SteamVR 2.17.6 / PSVR2 120 Hz log reports the
+unconditional BOUND line at 11:24:04 and a completed both-eye ACTIVE transaction
+at 11:24:10. With the headset on, the same-scene sniper versus alternate-weapon
+toggle no longer produced black static rock/terrain surfaces in either eye, and
+the previous candidate's 3D/interior regression was absent. The user reported
+“ITS FIXED.” The accepted log is preserved at
+`out/test-runs/74e1477-reach-outer-camera-commit-pass-20260729-112718/halo3xr.log`
+(SHA-256
+`064BD5E47FDE39F8E1D66EC4BA376372D5B974EFD32ED2FE4CD79ADFAE0BF3F9`).
+This advances the accepted development pointer: the missing outer-eye native
+camera commit is the headset-confirmed cause/fix for the reported black static
+world surfaces.
 
 The earlier camera-only candidate
 `6e12536ce401772876d55de0821780546af04131`, package

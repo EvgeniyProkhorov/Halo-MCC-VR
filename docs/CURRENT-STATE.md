@@ -1,6 +1,6 @@
 # Current state
 
-Authoritative as of 2026-07-27. This file is the only active accepted-build
+Authoritative as of 2026-07-29. This file is the only active accepted-build
 pointer. Detailed pre-cleanup experiments remain available in Git history; they
 are evidence, not instructions.
 
@@ -18,6 +18,13 @@ are evidence, not instructions.
 > - were false when read, and each cost hours because they were believed
 > instead of checked. If a comment or doc says a title cannot do something,
 > verify it against the code before building on it.
+
+> **CURRENT HEADSET-ACCEPTED DEVELOPMENT BUILD:** source
+> `74e1477d7ae02ea57f754ac76dfd99678d9028ec`, DLL SHA-256
+> `5BB673ABBA8BA9D4B0BC667D1009CE41880ABCB1F8EFDC31F7E118659C20C898`.
+> This is the accepted Reach black-static-world fix. The public distribution
+> release remains Alpha 0.3.0 below; do not confuse its older DLL with the
+> current headset-accepted development artifact.
 
 ## PUBLIC RELEASE: MCC VR Alpha 0.3.0 - 2026-07-27
 
@@ -99,9 +106,22 @@ depth/stencil surface with the lighting accumulation target. The failed headset
 result proves that preserving the native FP camera rebuild did not correct the
 reported pixels; the shared attachment fact must not be promoted to a cause.
 
-### CANDIDATE: commit each rebuilt Reach outer eye before world rendering - 2026-07-29
+### ACCEPTED: commit each rebuilt Reach outer eye before world rendering - 2026-07-29
 
-Headset acceptance is pending; this does not advance the public pointer above.
+This is the current headset-accepted development pointer. It does not silently
+republish or replace the public Alpha 0.3.0 archive above.
+
+| Identity | Value |
+| --- | --- |
+| Accepted source | `74e1477d7ae02ea57f754ac76dfd99678d9028ec` |
+| Candidate package | `out/candidates/74e1477-reach-fp-parity-20260729-161950871Z` |
+| `halo3xr.dll` SHA-256 | `5BB673ABBA8BA9D4B0BC667D1009CE41880ABCB1F8EFDC31F7E118659C20C898` |
+| Installed editions | Steam and Microsoft Store; hashes verified independently |
+| Accepted runtime | Steam edition, SteamVR/OpenXR 2.17.6, PSVR2 at 120 Hz |
+| Headset result | Accepted: sniper-triggered black static-world textures fixed in both eyes; paired weapon toggle remains normal; prior 3D/interior regression absent |
+| Preserved evidence | `out/test-runs/74e1477-reach-outer-camera-commit-pass-20260729-112718` |
+| Preserved log SHA-256 | `064BD5E47FDE39F8E1D66EC4BA376372D5B974EFD32ED2FE4CD79ADFAE0BF3F9` |
+
 This candidate matches one existing Halo 3/ODST behavior that Reach uniquely
 omitted: after rebuilding the current eye's CPU camera, commit that exact eye to
 the title's renderer before entering the world render.
@@ -130,6 +150,13 @@ returns with both callback bits for one stable prepared serial. Projection
 math, FP camera rebuild behavior, culling
 policy, SSAO, shadows, depth handling, and controller/head separation are
 unchanged.
+
+The exact accepted log reports the unconditional BOUND line and then both-eye
+ACTIVE at 11:24:10. The user's immediate headset result was explicit: “ITS
+FIXED.” Because this candidate changed only the missing native state-commit
+edge after the rejected candidates were reverted, the outer-eye commit is now
+the headset-confirmed fix for the reported weapon-sensitive black static-world
+surfaces.
 
 ### REJECTED: invalid Reach post-palette wrist write as black-world cause - 2026-07-29
 
