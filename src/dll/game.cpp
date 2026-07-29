@@ -10626,6 +10626,12 @@ namespace
     // origin, and world units are ~3 m, so 0.5 covers any weapon's markers
     // while staying far inside the distance to another character.
     constexpr float kReachWeaponMarkerRadius = 0.5f;
+    // Candidate b510b5e required the engine's first-person weapon-owner bit
+    // before re-parenting. The exact headset run proved that gate executed and
+    // left 215,356 no-owner world effects untouched, but the black world
+    // geometry was unchanged. Keep the rejected behavior dormant rather than
+    // stacking the next candidate onto it.
+    constexpr bool kReachEffectOwnerGateEnabled = false;
     std::atomic<uint32_t> g_reachMuzzleReparented{0};
     std::atomic<uint32_t> g_reachMuzzleOutOfRange{0};
     std::atomic<uint32_t> g_reachMuzzleNearestMilli{0xFFFFFFFFu};
@@ -10935,20 +10941,18 @@ namespace
             // orientation on the moved weapon. Rigid and exact - the marker
             // keeps its real position on the barrel, so there is no offset.
             //
-            // Require both ownership and position. The preserved 2026-07-28
-            // runtime log disproved the old claim that proximity alone implied
-            // ownership: before any first-person weapon effect was present,
-            // this block moved 690 ordinary world-effect matrices whose
-            // first_person_weapon_user_mask was zero. The low nibble is the
-            // engine's own discriminator for the local first-person weapon.
-            // Keep the accepted muzzle re-parent/height path for that owner,
-            // but never translate world, impact, explosion, or other-character
-            // effects merely because they happen to resolve near the head.
+            // Candidate b510b5e required both ownership and position after a
+            // preserved log disproved the claim that proximity implied weapon
+            // ownership. The gate worked exactly as intended, but its headset
+            // result left the black world geometry unchanged. It is disabled
+            // above and retained only as evidence; the next candidate starts
+            // from the accepted E490 behavior.
             {
                 BoneMatrix stockWeapon{};
                 BoneMatrix movedWeapon{};
                 float* resolved = static_cast<float*>(outMatrix);
-                if ((fpUserByte & 0x0Fu) != 0u &&
+                if ((!kReachEffectOwnerGateEnabled ||
+                     (fpUserByte & 0x0Fu) != 0u) &&
                     g_reachCamera.armed.load(std::memory_order_acquire) &&
                     g_enabled.load(std::memory_order_acquire) &&
                     ReachReadWeaponAnchor(stockWeapon, movedWeapon))

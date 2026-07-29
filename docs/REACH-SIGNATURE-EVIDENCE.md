@@ -325,12 +325,17 @@ proves the leak. Its final report contains 75,967 re-parent writes, 3,867,980
 were re-parented, at least 73,824 successful writes necessarily belonged to
 the no-owner world bucket.
 
-The production gate now requires the engine-owned low nibble to be nonzero
-before the existing proximity test may translate the matrix. The hook, loaded
-effect-definition capture, tag retarget worker, and accepted
-`muzzle_height_m` adjustment remain active for first-person-weapon-owned
-effects. This candidate is headset-pending and does not advance
-`docs/CURRENT-STATE.md`.
+Candidate `b510b5e` required the engine-owned low nibble to be nonzero before
+the existing proximity test could translate the matrix. Its exact PSVR2
+headset log proved the gate armed: 215,356 `world/no-fp-user` calls produced
+zero out-of-range attempts, while 252 first-person-owned calls produced 224
+re-parents. The black world geometry was unchanged. This conclusively rejects
+the cross-owner effect writes as its cause. The following revert leaves the
+gate dormant and restores the accepted E490 behavior before the next
+candidate. Evidence:
+`out/test-runs/b510b5e-reach-world-black-effect-gate-fail-20260729-042409`
+(log SHA-256
+`E6BA52C4671C03002C003D7FF3BAEEA2CF125283E605D6BDC6F5976B6E9C1CFF`).
 
 The same `0x121083` caller, entry
 `haloreach.dll+0x120FDC` through `+0x1210D3`. Its exact entry signature is:

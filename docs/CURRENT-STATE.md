@@ -52,6 +52,28 @@ at packaging time - not generated defaults.
 The published ZIP is the exact artifact that passed the second-machine test.
 Do not rebuild and republish without repeating that validation.
 
+### REJECTED: Reach black-world effect-owner gate - 2026-07-29
+
+This result is evidence only and does not advance the accepted pointer above.
+
+| Identity | Value |
+| --- | --- |
+| Tested source | `b510b5e5e361441befa1e2dbb6bf509c77216f2e` |
+| Candidate package | `out/candidates/b510b5e-reach-fp-parity-20260729-091346123Z` |
+| `halo3xr.dll` SHA-256 | `D140145AABCA2EC8ABDBB90294A51BBCB5C87FFA8A3988CEB36D2BAFB59F7EB9` |
+| Runtime | Steam edition, SteamVR/OpenXR 2.17.6, PSVR2 at 120 Hz |
+| Headset result | Black world geometry unchanged |
+| Preserved evidence | `out/test-runs/b510b5e-reach-world-black-effect-gate-fail-20260729-042409` |
+
+The candidate added exactly one runtime gate: only effects carrying Reach's
+first-person-weapon-owner low nibble could enter
+`ReachReparentEffectMatrix`. The runtime counters prove the gate executed:
+215,356 ordinary `world/no-fp-user` calls caused no proximity attempts,
+while 252 first-person-owned calls produced 224 re-parents. Since the visual
+defect was identical, broad effect-matrix re-parenting is rejected as the
+black-world cause. The behavior is disabled in the following revert commit
+before any new candidate.
+
 ### ACCEPTED: Reach muzzle height - 2026-07-27
 
 `muzzle_height_m` raises the re-parented muzzle effect origin - the flash and
