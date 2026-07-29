@@ -4,6 +4,7 @@
 #include <atomic>
 #include <cfloat>
 #include <cmath>
+#include <iterator>
 #include <imgui.h>
 #include <imgui_impl_win32.h>
 #include <imgui_impl_dx11.h>
@@ -130,6 +131,53 @@ namespace
     // Height of the grab bar in menu-texture pixels. The hover test is ImGui's
     // own item rectangle, so the bar you can see is exactly the bar you can grab.
     constexpr float kGrabHandleHeight = 46.0f;
+
+    // Sidebar categories, in the order they are listed. Replaces the seven flat
+    // tabs: the tab strip had already run out of room, and the two big tabs were
+    // long enough to need scrolling. A category is a plain row in a list, so
+    // adding a settings area later costs one enum entry and one row.
+    enum MenuCategory
+    {
+        Cat_Status = 0,
+        Cat_Comfort,
+        Cat_Controls,
+        Cat_WeaponAim,
+        Cat_Crosshair,
+        Cat_BodyHands,
+        Cat_Picture,
+        Cat_Hud,
+        Cat_Desktop,
+        Cat_Scope,
+        Cat_Advanced,
+        Cat_Count
+    };
+
+    struct CategoryRow
+    {
+        const char* label;
+        const char* blurb; // one line, shown at the top of the settings pane
+    };
+
+    // Kept in the same order as MenuCategory; a static assert below stops the
+    // two from drifting apart.
+    constexpr CategoryRow kCategories[Cat_Count] = {
+        {"Status",        "What the mod is doing right now, and the switches you reach for mid-game."},
+        {"Comfort",       "The flat screen you see in menus, and how head motion feels."},
+        {"Controls",      "Turning, gestures, and controller vibration."},
+        {"Weapon & Aim",  "Where the gun sits in your hand, and two-handed aiming."},
+        {"Crosshair",     "The floating reticle that shows where the weapon really shoots."},
+        {"Body & Hands",  "Arms, shoulders, and how much of Chief you can see."},
+        {"Picture",       "Render resolution, sharpening, anti-aliasing and brightness."},
+        {"HUD",           "Size, shape and position of the game's own HUD."},
+        {"Desktop",       "The window on your monitor, not the headset."},
+        {"Scope",         "Experimental gun-mounted zoom screen."},
+        {"Advanced",      "Tracking calibration, panel placement, and starting over."},
+    };
+    static_assert(sizeof(kCategories) / sizeof(kCategories[0]) == Cat_Count,
+                  "kCategories must list exactly one row per MenuCategory");
+
+    int g_activeCategory = Cat_Status;
+    constexpr float kSidebarWidth = 300.0f;
 
     // The one bar that moves the panel. Everything else is inert, which is the
     // whole point: before this, the settings window itself was a movable ImGui
@@ -410,9 +458,39 @@ namespace
         DrawGrabHandle();
 
         bool changed = false;
-        if (ImGui::BeginTabBar("HaloMCCVRTabs"))
+
+        // Leave room for the footer line below both columns.
+        const float footerHeight = ImGui::GetTextLineHeightWithSpacing() +
+            ImGui::GetStyle().ItemSpacing.y * 2.0f + 8.0f;
+
+        ImGui::BeginChild("##sidebar", ImVec2(kSidebarWidth, -footerHeight), ImGuiChildFlags_Borders);
+        for (int i = 0; i < Cat_Count; ++i)
         {
-        if (ImGui::BeginTabItem("Status"))
+            const bool selected = g_activeCategory == i;
+            if (ImGui::Selectable(kCategories[i].label, selected))
+                g_activeCategory = i;
+            // An orange bar down the left edge of the selected row, so the
+            // current category reads at a glance from across the panel.
+            if (selected)
+            {
+                const ImVec2 min = ImGui::GetItemRectMin();
+                const ImVec2 max = ImGui::GetItemRectMax();
+                ImGui::GetWindowDrawList()->AddRectFilled(
+                    min, ImVec2(min.x + 4.0f, max.y),
+                    ImGui::GetColorU32(Rgb(kAccent)));
+            }
+        }
+        ImGui::EndChild();
+
+        ImGui::SameLine();
+
+        ImGui::BeginChild("##pane", ImVec2(0, -footerHeight), ImGuiChildFlags_Borders);
+        ImGui::TextColored(Rgb(kAccent), "%s", kCategories[g_activeCategory].label);
+        ImGui::TextDisabled("%s", kCategories[g_activeCategory].blurb);
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        if (g_activeCategory == Cat_Status)
         {
         VrStatus st{};
         VR_GetStatus(st);
@@ -459,13 +537,21 @@ namespace
         ImGui::Separator();
         ImGui::Spacing();
         ImGui::TextDisabled("L3+R3 or F1 closes this menu.");
-        ImGui::EndTabItem();
         }
 
-        if (ImGui::BeginTabItem("Gameplay"))
+        if (g_activeCategory == Cat_Comfort)
         {
-        changed |= ImGui::SliderFloat("Screen width (m)", &g_config.screen_width_m, 1.0f, 10.0f, "%.1f");
-        changed |= ImGui::SliderFloat("Screen distance (m)", &g_config.screen_distance_m, 0.5f, 10.0f, "%.1f");
+        ImGui::Text("Virtual screen");
+        // These two used to stop at 10 m even though the config file accepts 20,
+        // so a value typed into halomccvr.cfg could not be reached or restored
+        // from the menu. The slider now spans the file's own range.
+        changed |= ImGui::SliderFloat("Screen width (m)", &g_config.screen_width_m, 0.5f, 20.0f, "%.1f");
+        changed |= ImGui::SliderFloat("Screen distance (m)", &g_config.screen_distance_m, 0.3f, 20.0f, "%.1f");
+        ImGui::TextDisabled("The flat screen the game is shown on in menus and 2D mode.\n"
+                            "This is NOT the F1 panel; that one lives under Advanced.");
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Text("Head motion");
         float headsetSmoothPercent = g_config.headset_smoothing * 100.0f;
         if (ImGui::SliderFloat("Headset micro-smoothing", &headsetSmoothPercent,
                                0.0f, 10.0f, "%.0f%%", ImGuiSliderFlags_None))
@@ -480,15 +566,15 @@ namespace
             changed = true;
         }
         ImGui::TextDisabled("Raw by default. Try 5%% only for micro-jitter; capped at 10%% for comfort.");
-        changed |= ImGui::Checkbox("Auto-enter VR on level load", &g_config.auto_vr);
-        ImGui::TextDisabled("Turns head tracking + stereo on when a level starts and off in the menu.");
-        ImGui::EndTabItem();
-        }
-
-        if (ImGui::BeginTabItem("Controls"))
-        {
         ImGui::Spacing();
         ImGui::Separator();
+        ImGui::Text("Startup");
+        changed |= ImGui::Checkbox("Auto-enter VR on level load", &g_config.auto_vr);
+        ImGui::TextDisabled("Turns head tracking + stereo on when a level starts and off in the menu.");
+        }
+
+        if (g_activeCategory == Cat_Controls)
+        {
         ImGui::Text("VR turning (right controller stick)");
         if (ImGui::RadioButton("Snap turn", !g_config.turn_smooth))
         {
@@ -529,13 +615,10 @@ namespace
             changed = true;
         }
         ImGui::TextDisabled("L3+R3 toggles this menu; the right trigger clicks the VR pointer.");
-        ImGui::EndTabItem();
         }
 
-        if (ImGui::BeginTabItem("Aim & Weapons"))
+        if (g_activeCategory == Cat_WeaponAim)
         {
-        ImGui::Spacing();
-        ImGui::Separator();
         ImGui::Text("Hand-held weapon");
         changed |= ImGui::SliderFloat("Weapon size", &g_config.gun_scale, 0.3f, 3.0f, "%.2fx");
         ImGui::TextDisabled("Uniform scale of RIGHT hand + weapon about your grip (Home/End in-game).");
@@ -559,8 +642,64 @@ namespace
         ImGui::TextDisabled("HALO REACH ONLY for now - Halo 3 and ODST support is coming soon.");
         ImGui::TextDisabled("Raises the muzzle flash / bullet spawn up the gun's own axis.");
         ImGui::TextDisabled("Where rounds LAND is unchanged. 0.11 is about four inches.");
+
         ImGui::Spacing();
         ImGui::Separator();
+        ImGui::Text("Two-handed aiming");
+        changed |= ImGui::Checkbox("Two-handed aiming", &g_config.two_handed_aim);
+        ImGui::SameLine();
+        ImGui::TextDisabled(VR_IsTwoHandAiming() ? "[engaged]" : "[one-handed]");
+        if (g_config.two_handed_aim)
+        {
+            ImGui::Indent();
+            if (ImGui::RadioButton("Toggle (click grip)", g_config.two_hand_toggle))
+            { g_config.two_hand_toggle = true; changed = true; }
+            ImGui::SameLine();
+            if (ImGui::RadioButton("Hold grip", !g_config.two_hand_toggle))
+            { g_config.two_hand_toggle = false; changed = true; }
+            changed |= ImGui::SliderFloat("Left hand forward offset (m)",
+                                          &g_config.left_hand_forward_m,
+                                          -0.15f, 0.30f, "%.3f");
+            ImGui::TextDisabled("Moves the visible support hand and the two-hand aim point together.");
+            changed |= ImGui::SliderFloat("Grab zone side offset (m)",
+                                          &g_config.two_hand_zone_right_m,
+                                          -0.10f, 0.10f, "%.3f");
+            ImGui::TextDisabled("Slides the grip-click zone sideways (+ = right) onto the visible barrel.");
+            changed |= ImGui::SliderFloat("Left palm depth (m)",
+                                          &g_config.left_grip_forward_m,
+                                          -0.05f, 0.25f, "%.3f");
+            ImGui::TextDisabled("Extends the two-hand grab line and grip-click zone to your visible palm.");
+            ImGui::Unindent();
+        }
+        ImGui::TextDisabled("Put your left hand on the front of the gun, click/hold the LEFT GRIP.\n"
+                            "Engages only when your hand is on the barrel line.");
+        }
+
+        if (g_activeCategory == Cat_Crosshair)
+        {
+        ImGui::Text("Authored weapon crosshair (stereo)");
+        changed |= ImGui::Checkbox("Show a crosshair where the weapon shoots", &g_config.crosshair);
+        if (g_config.crosshair)
+        {
+            float crosshairSmoothPercent = g_config.aim_stabilization * 100.0f;
+            if (ImGui::SliderFloat("Crosshair smoothing", &crosshairSmoothPercent,
+                                   0.0f, 95.0f, "%.0f%%", ImGuiSliderFlags_None))
+            {
+                g_config.aim_stabilization = crosshairSmoothPercent / 100.0f;
+                changed = true;
+            }
+            changed |= ImGui::SliderFloat("Crosshair size (deg)", &g_config.crosshair_size_deg,
+                                          0.3f, 20.0f, "%.1f");
+            changed |= ImGui::SliderFloat("Crosshair distance (m)", &g_config.crosshair_distance_m,
+                                          2.0f, 50.0f, "%.0f");
+            ImGui::TextDisabled("Uses the equipped weapon's authored crosshair and target colors.");
+        }
+        ImGui::TextDisabled("Crosshair smoothing is visual only; bullets keep the current controller ray.\n"
+                            "Set it to 0%% for exact raw tracking.");
+        }
+
+        if (g_activeCategory == Cat_Scope)
+        {
         ImGui::Text("Experimental gun-mounted zoom screen");
         if (ImGui::Checkbox("Enable experimental R3 zoom screen", &g_config.scope_enabled))
         {
@@ -596,63 +735,10 @@ namespace
                                 "still follows the gun every frame. Use 4 for the lowest GPU cost.");
             ImGui::Unindent();
         }
-        ImGui::Spacing();
-        ImGui::Separator();
-        ImGui::Text("Authored weapon crosshair (stereo)");
-        changed |= ImGui::Checkbox("Show a crosshair where the weapon shoots", &g_config.crosshair);
-        if (g_config.crosshair)
-        {
-            float crosshairSmoothPercent = g_config.aim_stabilization * 100.0f;
-            if (ImGui::SliderFloat("Crosshair smoothing", &crosshairSmoothPercent,
-                                   0.0f, 95.0f, "%.0f%%", ImGuiSliderFlags_None))
-            {
-                g_config.aim_stabilization = crosshairSmoothPercent / 100.0f;
-                changed = true;
-            }
-            changed |= ImGui::SliderFloat("Crosshair size (deg)", &g_config.crosshair_size_deg,
-                                          0.3f, 20.0f, "%.1f");
-            changed |= ImGui::SliderFloat("Crosshair distance (m)", &g_config.crosshair_distance_m,
-                                          2.0f, 50.0f, "%.0f");
-            ImGui::TextDisabled("Uses the equipped weapon's authored crosshair and target colors.");
-        }
-        ImGui::TextDisabled("Crosshair smoothing is visual only; bullets keep the current controller ray.\n"
-                            "Set it to 0%% for exact raw tracking.");
-
-        ImGui::Spacing();
-        changed |= ImGui::Checkbox("Two-handed aiming", &g_config.two_handed_aim);
-        ImGui::SameLine();
-        ImGui::TextDisabled(VR_IsTwoHandAiming() ? "[engaged]" : "[one-handed]");
-        if (g_config.two_handed_aim)
-        {
-            ImGui::Indent();
-            if (ImGui::RadioButton("Toggle (click grip)", g_config.two_hand_toggle))
-            { g_config.two_hand_toggle = true; changed = true; }
-            ImGui::SameLine();
-            if (ImGui::RadioButton("Hold grip", !g_config.two_hand_toggle))
-            { g_config.two_hand_toggle = false; changed = true; }
-            changed |= ImGui::SliderFloat("Left hand forward offset (m)",
-                                          &g_config.left_hand_forward_m,
-                                          -0.15f, 0.30f, "%.3f");
-            ImGui::TextDisabled("Moves the visible support hand and the two-hand aim point together.");
-            changed |= ImGui::SliderFloat("Grab zone side offset (m)",
-                                          &g_config.two_hand_zone_right_m,
-                                          -0.10f, 0.10f, "%.3f");
-            ImGui::TextDisabled("Slides the grip-click zone sideways (+ = right) onto the visible barrel.");
-            changed |= ImGui::SliderFloat("Left palm depth (m)",
-                                          &g_config.left_grip_forward_m,
-                                          -0.05f, 0.25f, "%.3f");
-            ImGui::TextDisabled("Extends the two-hand grab line and grip-click zone to your visible palm.");
-            ImGui::Unindent();
-        }
-        ImGui::TextDisabled("Put your left hand on the front of the gun, click/hold the LEFT GRIP.\n"
-                            "Engages only when your hand is on the barrel line.");
-        ImGui::EndTabItem();
         }
 
-        if (ImGui::BeginTabItem("Body & Room-scale"))
+        if (g_activeCategory == Cat_BodyHands)
         {
-        ImGui::Spacing();
-        ImGui::Separator();
         ImGui::Text("Body (VRIK)");
         changed |= ImGui::Checkbox("Arm IK (bend arm to controller)", &g_config.arm_ik);
         ImGui::TextDisabled("ON: shoulder stays, elbow bends, hand+gun follow your controller.\n"
@@ -676,10 +762,9 @@ namespace
         changed |= ImGui::Checkbox("Show body (VRIK stage A1)", &g_config.body_wip);
         ImGui::TextDisabled("Shows Chief's game-animated body via the engine's own director switches.");
         ImGui::TextDisabled("Room-scale unit movement is gated until the player-biped boundary is headset-proven.");
-        ImGui::EndTabItem();
         }
 
-        if (ImGui::BeginTabItem("Display & HUD"))
+        if (g_activeCategory == Cat_Hud)
         {
         ImGui::Text("HUD layout");
         changed |= ImGui::SliderFloat("HUD size", &g_config.hud_size, 0.30f, 1.00f, "%.2f");
@@ -689,24 +774,33 @@ namespace
                                       kHudCurvatureMin, kHudCurvatureMax, "%.2f");
         changed |= ImGui::SliderFloat("HUD height", &g_config.hud_vertical_offset,
                                       kHudHeightMin, kHudHeightMax, "%+.0f px");
-        if (ImGui::SmallButton("Set VR preset (0.45)##sf"))
+        if (ImGui::SmallButton("Pull HUD in (0.45)##sf"))
         { g_config.hud_size = 0.45f; changed = true; }
         ImGui::SameLine();
+        // This used to write 0.87 / 1.0 / 0.5 / 0, none of which are the
+        // defaults, so "reset" left the HUD somewhere the config file could not
+        // describe and disagreed with the global "Reset ALL settings".
         if (ImGui::SmallButton("Reset HUD layout##sf"))
         {
-            g_config.hud_size = 0.87f;
-            g_config.hud_aspect = 1.0f;
-            g_config.hud_curvature = 0.5f;
-            g_config.hud_vertical_offset = 0.0f;
+            const Config hudDefaults{};
+            g_config.hud_size = hudDefaults.hud_size;
+            g_config.hud_aspect = hudDefaults.hud_aspect;
+            g_config.hud_curvature = hudDefaults.hud_curvature;
+            g_config.hud_vertical_offset = hudDefaults.hud_vertical_offset;
             changed = true;
         }
-        ImGui::TextDisabled("0.87 is the calibrated stock layout; lower pulls HUD elements inward.");
+        ImGui::TextDisabled("Reset returns the four values above to the shipped defaults\n"
+                            "(%.2f / %.2f / %.2f / %+.0f). Lower size pulls HUD elements inward.",
+                            Config{}.hud_size, Config{}.hud_aspect,
+                            Config{}.hud_curvature, Config{}.hud_vertical_offset);
         ImGui::TextDisabled("Width corrects squeeze separately from size; 1.00 uses automatic correction.");
         ImGui::TextDisabled("Curvature: 0.00 = flat (+0.30), 1.00 = curved (-0.30); 0.50 is authored.");
         ImGui::TextDisabled("Height: positive raises the HUD, negative lowers it; the aiming reticle stays fixed.");
-        ImGui::Spacing();
-        ImGui::Separator();
-        ImGui::Text("Picture");
+        }
+
+        if (g_activeCategory == Cat_Picture)
+        {
+        ImGui::Text("Render resolution");
         changed |= ImGui::SliderFloat("Resolution scale", &g_config.resolution_scale,
                                       kResolutionScaleMin, kResolutionScaleMax, "%.2fx");
         // Same even-rounding the launcher applies, so this is the exact render
@@ -725,7 +819,9 @@ namespace
             {"Potato", 0.50f}, {"Low", 0.75f}, {"Medium", 1.00f},
             {"High", 1.30f}, {"Ultra", 1.80f}, {"Keith David", 2.64f}
         };
-        for (int i = 0; i < 6; ++i)
+        // Sized from the table, not a literal 6: the old hardcoded count would
+        // have silently dropped any tier added below.
+        for (int i = 0; i < (int)std::size(kPresets); ++i)
         {
             if (i)
                 ImGui::SameLine();
@@ -744,6 +840,7 @@ namespace
                                "[!] Very heavy (~5K and up): can crash weaker GPUs. Test in\n"
                                "    short sessions and drop this if the game won't start.");
         ImGui::Spacing();
+        ImGui::Separator();
         ImGui::Text("Image quality (applies live, every title)");
         const char* upscaleItems[] = {"Linear (old)", "Sharp (strong bicubic)"};
         changed |= ImGui::Combo("Upscale filter", &g_config.upscale_filter,
@@ -762,15 +859,8 @@ namespace
                             "the final option adds FXAA Strong for the most aggressive cleanup.\n"
                             "SMAA costs more GPU only when one of its modes is selected.");
         ImGui::Spacing();
-        changed |= ImGui::Checkbox("Fit desktop window to my monitor",
-                                   &g_config.fit_desktop_window);
-        ImGui::TextDisabled(
-            "For monitors SMALLER than your render (e.g. a big headset resolution on\n"
-            "a 1080p screen), where MCC's window overflows and you can't click the\n"
-            "\"Halo 3\" tile or Quit. The headset keeps the full resolution above; only\n"
-            "the desktop window shrinks to fit and the GPU downscales into it (no\n"
-            "extra render pass, no measurable cost). OFF by default. Takes effect on\n"
-            "the next launch -- close MCC and relaunch.");
+        ImGui::Separator();
+        ImGui::Text("Scene");
         changed |= ImGui::SliderFloat("Game brightness", &g_config.game_brightness, 0.5f, 2.0f, "%.2f");
         ImGui::TextDisabled("Brightens/darkens the whole game. 1.0 = the game's own brightness.");
         changed |= ImGui::Checkbox("Motion blur", &g_config.motion_blur);
@@ -782,11 +872,23 @@ namespace
                             "you, culling distant terrain/objects (skybox goes first). Most levels\n"
                             "only start culling below ~0.25; the lowest settings clip near geometry\n"
                             "(hard pop-in) for the most frames. Live, all three games.");
-
-        ImGui::EndTabItem();
         }
 
-        if (ImGui::BeginTabItem("Advanced/Diagnostics"))
+        if (g_activeCategory == Cat_Desktop)
+        {
+        ImGui::Text("The window on your monitor");
+        changed |= ImGui::Checkbox("Fit desktop window to my monitor",
+                                   &g_config.fit_desktop_window);
+        ImGui::TextDisabled(
+            "For monitors SMALLER than your render (e.g. a big headset resolution on\n"
+            "a 1080p screen), where MCC's window overflows and you can't click the\n"
+            "\"Halo 3\" tile or Quit. The headset keeps the full resolution above; only\n"
+            "the desktop window shrinks to fit and the GPU downscales into it (no\n"
+            "extra render pass, no measurable cost). OFF by default. Takes effect on\n"
+            "the next launch -- close MCC and relaunch.");
+        }
+
+        if (g_activeCategory == Cat_Advanced)
         {
         changed |= ImGui::Checkbox("Bone probe (diagnostic)", &g_config.weapon_probe);
         ImGui::TextDisabled("Pushes every composed skeleton 1m left to prove writable palette boundaries.");
@@ -878,10 +980,9 @@ namespace
         ImGui::TextDisabled("Puts every setting back to the value halomccvr.cfg lists as its\n"
                             "default, including your weapon calibration. Resolution needs a\n"
                             "game restart; everything else applies immediately.");
-        ImGui::EndTabItem();
         }
-        ImGui::EndTabBar();
-        }
+
+        ImGui::EndChild(); // ##pane
 
         static bool dirty = false;
         if (changed)
@@ -892,9 +993,8 @@ namespace
             dirty = false;
         }
 
-        ImGui::Spacing();
         ImGui::Separator();
-        ImGui::TextDisabled("F1 closes this menu. Settings save to halomccvr.cfg automatically.");
+        ImGui::TextDisabled("F1 or L3+R3 closes this menu. Settings save to halomccvr.cfg automatically.");
         ImGui::End();
     }
 } // namespace
