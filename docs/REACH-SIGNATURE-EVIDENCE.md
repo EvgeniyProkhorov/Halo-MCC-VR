@@ -426,10 +426,15 @@ vertex-buffer queries. Neither preserved run exhausted the budget.
 
 The captured stride-24, six-index data is identical in both logs and belongs to
 a fullscreen transition quad; it is not world-geometry or eye-differential
-evidence. Removing only this optional detour is therefore an A/B of a proven
-render-hook contaminant, not a shader/depth diagnosis. The diagnostic code stays
-dormant, and the mandatory Present/ResizeBuffers/OMSetRenderTargets hooks remain
-unchanged. Headset result is pending.
+evidence. Candidate `a50da4a` removed only this optional detour. Its exact log
+contains the disabled status, no draw/vertex samples, and a normally armed Reach
+camera/stereo path. The black geometry remained unchanged, rejecting the detour
+as its cause. The diagnostic remains disabled because its hot-hook GPU readback
+and synchronous logging are independently unsafe; mandatory Present,
+ResizeBuffers, and OMSetRenderTargets hooks remain unchanged. Evidence:
+`out/test-runs/a50da4a-reach-world-black-draw-hook-removal-fail-20260729-063330`
+(log SHA-256
+`FD28C568CA1FE55E378B85DFCE8A62FBE33CEDC37CE63942A81FDD5F47604659`).
 
 The same `0x121083` caller, entry
 `haloreach.dll+0x120FDC` through `+0x1210D3`. Its exact entry signature is:

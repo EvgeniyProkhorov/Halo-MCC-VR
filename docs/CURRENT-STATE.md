@@ -96,14 +96,19 @@ visual defect was unchanged, so Reach's object lightmap-shadow pass is rejected
 as the black-world cause. The implementation remains dormant as evidence; the
 following revert commit prevents it from arming before another candidate.
 
-### HEADSET-PENDING: remove stale Reach DrawIndexed diagnostic - 2026-07-29
+### REJECTED AS CAUSE: stale Reach DrawIndexed diagnostic - 2026-07-29
 
-This candidate does not advance the accepted pointer above. Its only behavioral
-change is to stop installing the optional global `ID3D11DeviceContext::DrawIndexed`
-detour added for Reach HUD discovery on July 26. The probe code remains dormant;
-Present, ResizeBuffers, render-target redirection, all Reach camera/FP hooks,
-and every player-visible feature remain unchanged. This is not a stock or 2D
-fallback.
+This result is evidence only and does not advance the accepted pointer above.
+
+| Identity | Value |
+| --- | --- |
+| Tested source | `a50da4ad7a9cb26e8f976b95dd4fcceb3e41b8ff` |
+| Candidate package | `out/candidates/a50da4a-reach-fp-parity-20260729-112514784Z` |
+| `halo3xr.dll` SHA-256 | `AC6DF361770758EEA457126829F109D6A55893F8385CDC74E94879B74976E111` |
+| Runtime | Steam edition, SteamVR/OpenXR 2.17.6, PSVR2 at 120 Hz |
+| Headset result | Black static-world geometry unchanged |
+| Preserved evidence | `out/test-runs/a50da4a-reach-world-black-draw-hook-removal-fail-20260729-063330` |
+| Preserved log SHA-256 | `FD28C568CA1FE55E378B85DFCE8A62FBE33CEDC37CE63942A81FDD5F47604659` |
 
 The failed `839aed7` run and the exact E490 baseline both prove the obsolete
 probe was still active. Before selected draws it allocated a staging GPU buffer,
@@ -114,10 +119,13 @@ draw. The captured shape was a fullscreen transition quad, not world geometry,
 so this is a direct hook-isolation test rather than a claim that the probe is
 already the proven root cause.
 
-The candidate log must contain `DrawIndexed diagnostic hook intentionally
-disabled` and no `REACHDRAW`/`REACHVTX` samples. Headset acceptance requires the
-long-weapon and nearby Ghost/Revenant triggers in Reach, followed by a Halo 3
-stereo regression check because the removed D3D method detour was process-wide.
+The exact candidate log contains `DrawIndexed diagnostic hook intentionally
+disabled`, contains no draw/vertex samples, and proves the Reach camera and
+stereo path armed. The black geometry was unchanged, so this detour is rejected
+as the cause. It remains disabled because re-enabling synchronous GPU readback,
+allocation, locked logging, and `fflush` in a render hot hook would knowingly
+restore a safety defect. That cleanup does not advance the accepted pointer and
+still requires the normal Halo 3 regression before a release.
 
 ### ACCEPTED: Reach muzzle height - 2026-07-27
 

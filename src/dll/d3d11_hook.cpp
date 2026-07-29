@@ -46,8 +46,9 @@ static OMSetRenderTargetsFn g_origOMSetRenderTargets = nullptr;
 static DrawIndexedFn g_origDrawIndexed = nullptr;
 // The July 26 HUD-discovery detour performed synchronous GPU readback and
 // logging before DrawIndexed. It produced no HUD/world evidence and remained
-// active in every later Reach build. The next candidate leaves that diagnostic
-// code dormant and tests the render path with no DrawIndexed detour at all.
+// active in every later Reach build. Candidate a50da4a proved removing it does
+// not change the black-world defect. It remains disabled because restoring
+// blocking GPU readback and file I/O to a render hot hook would be unsafe.
 constexpr bool kEnableReachDrawIndexedDiagnostic = false;
 #endif
 #if HALOMCCVR_EXPERIMENTAL_ODST_BRINGUP
