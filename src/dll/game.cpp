@@ -10935,16 +10935,21 @@ namespace
             // orientation on the moved weapon. Rigid and exact - the marker
             // keeps its real position on the barrel, so there is no offset.
             //
-            // Keyed on POSITION, not on any effect flag. Three previous
-            // candidates guessed at flags and all three fired without moving
-            // anything the player could see. Only a matrix already sitting on
-            // the stock weapon is touched, so other characters' weapons,
-            // impacts and explosions are out of range by construction.
+            // Require both ownership and position. The preserved 2026-07-28
+            // runtime log disproved the old claim that proximity alone implied
+            // ownership: before any first-person weapon effect was present,
+            // this block moved 690 ordinary world-effect matrices whose
+            // first_person_weapon_user_mask was zero. The low nibble is the
+            // engine's own discriminator for the local first-person weapon.
+            // Keep the accepted muzzle re-parent/height path for that owner,
+            // but never translate world, impact, explosion, or other-character
+            // effects merely because they happen to resolve near the head.
             {
                 BoneMatrix stockWeapon{};
                 BoneMatrix movedWeapon{};
                 float* resolved = static_cast<float*>(outMatrix);
-                if (g_reachCamera.armed.load(std::memory_order_acquire) &&
+                if ((fpUserByte & 0x0Fu) != 0u &&
+                    g_reachCamera.armed.load(std::memory_order_acquire) &&
                     g_enabled.load(std::memory_order_acquire) &&
                     ReachReadWeaponAnchor(stockWeapon, movedWeapon))
                 {

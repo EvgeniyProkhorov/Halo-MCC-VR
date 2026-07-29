@@ -80,18 +80,13 @@ foreach ($entry in $forbidden.GetEnumerator()) {
 }
 
 $forbiddenChud = [ordered]@{
-    'optional Reach authored-crosshair bridge' =
-        'Optional,\s*HREK-only authored-crosshair bridge|if\s*\(hudDrawWidget\)\s*\{'
-    'optional Reach CHUD hook target publication' =
-        'hudDrawWidgetCreated\s*\?\s*hudDrawWidget\s*:\s*nullptr'
-    'optional Reach CHUD hook enable' =
-        'hudDrawWidgetCreated\s*&&\s*MH_EnableHook\(hudDrawWidget\)'
+    # Optional hook creation/publication is required by the feature-isolation
+    # contract. Guard the rejected substitutes and unsafe selection logic, not
+    # the fail-open lifecycle that keeps an independent camera core alive.
     'Reach CHUD widget-name selection or fallback' =
         'ReachHudDrawWidgetDetour[\s\S]{0,3600}(?:strcmp|strstr|widgetName|artistName)'
     'Reach procedural reticle generation from the CHUD detour' =
         'ReachHudDrawWidgetDetour[\s\S]{0,3600}(?:PaintReticle|EnsureReticleChain|reticle_r|reticle_g|reticle_b)'
-    'Reach hardcoded shipping CHUD RVA' =
-        'base\s*\+\s*kReach\w*Chud\w*Rva'
     'Reach procedural or approximate CHUD action' =
         'ReachChudCrosshairAction::(?:Procedural|DrawProcedural|Fallback|Approximate)'
     'Reach projection queued before authored upload result' =

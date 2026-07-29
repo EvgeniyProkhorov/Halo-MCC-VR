@@ -312,6 +312,26 @@ first-person path is that getter inlined. Do not adopt a replacement name:
 bounds and signature below are correct and were re-measured unique; only the
 label was wrong.
 
+**CORRECTION (2026-07-29): position is not effect ownership.** The accepted
+effect-location hook re-parented every resolved matrix within 0.5 world units
+of the published head-to-gun anchor, even when `effect+0x50`'s
+`first_person_weapon_user_mask` (low nibble) was zero. The exact target
+`E4905011247978F570C17739FB7631FF91CB5F4870ADF5B42DC986E4A1585C88`
+runtime log preserved at
+`out/deploy-backups/e490501-steam-before-81b6573-20260728-212252666Z/halo3xr.log`
+proves the leak. Its final report contains 75,967 re-parent writes, 3,867,980
+`world/no-fp-user` calls, 1,355 `world/fp-output-none` calls, and 788
+`already-first-person` calls. Even if every call in both first-person buckets
+were re-parented, at least 73,824 successful writes necessarily belonged to
+the no-owner world bucket.
+
+The production gate now requires the engine-owned low nibble to be nonzero
+before the existing proximity test may translate the matrix. The hook, loaded
+effect-definition capture, tag retarget worker, and accepted
+`muzzle_height_m` adjustment remain active for first-person-weapon-owned
+effects. This candidate is headset-pending and does not advance
+`docs/CURRENT-STATE.md`.
+
 The same `0x121083` caller, entry
 `haloreach.dll+0x120FDC` through `+0x1210D3`. Its exact entry signature is:
 
