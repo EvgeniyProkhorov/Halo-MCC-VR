@@ -1102,12 +1102,12 @@ at `0x87C655`, gets the top again at `0x87C679`, uses `top+0x1E4` at
 This closes the static identity, ABI, nested-workspace layout, and lifetime
 proof.
 
-### Correction: the native FP rebuild owns the final per-eye state
+### Rejected correction: native FP rebuild as the black-world fix
 
-The black-static-world investigation exposed one invalid assumption in the
-accepted E490 hook shape. Halo 3 and ODST's post-rebuild copies are not an
-implementation template for Reach. Reach's exact native rebuild has additional
-title-specific work that a completed-block replacement destroys.
+The black-static-world investigation tested an assumption in the accepted E490
+hook shape: that Reach's title-specific native FP rebuild must remain the final
+writer. The static binding facts below remain valid, but the exact candidate was
+headset-rejected and must not be treated as a correction or causal finding.
 
 Pinned retail `0x286C6C` and HREK `0x87C4B0` read only the compact source
 pointer at `view+0x08` and the weapon/AA scale at `view+0x10` from their view
@@ -1136,20 +1136,45 @@ postprocess results. The first-person single-pass draw sits immediately before
 the static-lighting transaction. The camera-stack pop does invoke the restored
 outer callback, so the evidence does **not** claim that the nested constants
 simply remain live forever; the invalid state is active during the FP pass that
-precedes and shares the render transaction with static lighting. A shared
-render-object path is proven, but shared target/stencil contamination into the
-later static-lighting receiver is not. The candidate restores engine semantics;
-the headset result determines whether this overwrite caused the black pixels.
+precedes and shares the render transaction with static lighting.
 
-The corrected candidate uses a local `0x18`-byte proxy: it preserves the real
+Official HREK closes the actual persistence boundary. The
+`first_person_single_pass` setup at `0x834877/0x834892` reaches `0x7CB180`, whose
+`0x8331C0` target bind uses surface 9 as depth/stencil and surfaces 16/17 as
+color targets. The name-pointer table has `0x58`-byte stride from
+`_surface_none`: entries 9, 16, and 17 are exactly
+`_surface_depth_stencil`, `_surface_albedo`, and `_surface_normal`. It then sets
+material pass 6 and performs the nested FP-camera draw. Static-lighting setup
+through `0x7CB200` selects surface 15 (`_surface_accum_LDR`) as its color target
+but binds the same surface 9 depth/stencil at `0x7CB241`; that setup runs at
+`0x834CEA` immediately before first-person static lighting and world
+`render_static_lighting`, and `0x8373EE` binds it again inside the latter.
+HREK `0x7CAD20` maps FP material pass 6 and apply-static-lighting pass 2 to
+their distinct depth/stencil modes. This proves only that both passes share an
+attachment under distinct modes. It does not prove that FP coverage caused the
+reported pixels. The headset result below rejected the native-rebuild change
+while leaving the black static-world geometry unchanged.
+
+The rejected candidate used a local `0x18`-byte proxy: it preserved the real
 view header and weapon scale, changes only `+0x08` to the exact admitted eye
 compact, and lets Reach perform its native true/false rebuild and upload once.
 The proxy has synchronous stack lifetime, the exact hashed body reads no other
 view field, and the real view is still used for the full nested-workspace,
 callback, active-view, specialization, generation, eye, and serial gate. The
-runtime proof separately requires draw and post-draw-restore masks `0b11` for
-the same prepared serial before reporting ACTIVE. Headset acceptance remains
-pending.
+runtime proof separately required draw and post-draw-restore masks `0b11` for
+the same prepared serial before reporting ACTIVE. The exact Steam / SteamVR
+2.17.6 / PSVR2 120 Hz run did report ACTIVE, but the user observed a complete
+regression: the black static-world geometry was unchanged, 3D was broken, and
+interior visibility was no longer correct. Candidate source is
+`5a4101caab5c9f22262703323caa3cdedef6265e`, package
+`out/candidates/5a4101c-reach-fp-parity-20260729-153523252Z`, exact installed
+DLL SHA-256
+`833B249ED970EC91AA2B2964017427F944596C49CB9C5E5DB8EACCA2E359F06A`.
+The preserved log is
+`out/test-runs/5a4101c-reach-native-fp-rebuild-fail-20260729-103809/halo3xr.log`
+(SHA-256
+`ACCABA6DED2F9B9507D9F7711EC2814F9D93AE4A1F856012F42E25BB086907F7`).
+The candidate behavior is reverted before any subsequent candidate.
 
 The earlier camera-only candidate
 `6e12536ce401772876d55de0821780546af04131`, package

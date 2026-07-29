@@ -52,14 +52,25 @@ at packaging time - not generated defaults.
 The published ZIP is the exact artifact that passed the second-machine test.
 Do not rebuild and republish without repeating that validation.
 
-### CANDIDATE: preserve Reach's native per-eye FP camera rebuild - 2026-07-29
+### REJECTED: preserve Reach's native per-eye FP camera rebuild - 2026-07-29
 
-Headset acceptance is pending; this does not advance the public pointer above.
+This result is evidence only and does not advance the public pointer above.
 The user's exact E490 baseline is source `9cb88d7` and DLL SHA-256
 `E4905011247978F570C17739FB7631FF91CB5F4870ADF5B42DC986E4A1585C88`.
 The failed candidates after it have been behaviorally reverted. Static review
 then found one older E490 behavior in the exact weapon-sensitive FP stage: the
 Reach FP camera detour's post-original whole-block overwrite.
+
+| Identity | Value |
+| --- | --- |
+| Tested source | `5a4101caab5c9f22262703323caa3cdedef6265e` |
+| Candidate package | `out/candidates/5a4101c-reach-fp-parity-20260729-153523252Z` |
+| `halo3xr.dll` SHA-256 | `833B249ED970EC91AA2B2964017427F944596C49CB9C5E5DB8EACCA2E359F06A` |
+| Installed editions | Steam and Microsoft Store; hashes verified separately |
+| Runtime | Steam edition, SteamVR/OpenXR 2.17.6, PSVR2 at 120 Hz |
+| Headset result | Complete regression: black static-world geometry unchanged; stereo/3D and interior visibility newly broken |
+| Preserved evidence | `out/test-runs/5a4101c-reach-native-fp-rebuild-fail-20260729-103809` |
+| Preserved log SHA-256 | `ACCABA6DED2F9B9507D9F7711EC2814F9D93AE4A1F856012F42E25BB086907F7` |
 
 Official HREK and the pinned retail module prove that Reach's native FP rebuild
 copies its source compact camera from `view+0x08`, preserves the weapon scale at
@@ -70,15 +81,23 @@ transaction finish, then replaced the native compact and derived blocks with a
 raw world pair and manually uploaded the replacement. That made our hook the
 last writer over the title's sniper-sensitive result.
 
-The candidate instead passes the exact eye compact to the native rebuild
+The rejected candidate passed the exact eye compact to the native rebuild
 through a bounded `0x18`-byte input proxy. Reach itself now performs both the
 FP-draw rebuild and the post-draw restore for each eye. It does not disable the
 FP pass, restore a 2D viewmodel, or disconnect the hand/head separation. The
 worker reports ACTIVE only after both eyes have completed both native phases in
 one stable prepared serial. Build, core tests, and the Reach consistency gate
-must pass before packaging. Static evidence proves the overwrite is wrong but
-does not prove its FP pass contaminates the later static-lighting targets; the
-headset result remains the causal and acceptance test.
+passed before packaging, and the runtime log proves the new path reported
+ACTIVE. Those facts did not predict the headset result: the black geometry was
+unchanged and the proxy introduced a complete 3D/interior regression. The
+behavior is reverted before further diagnosis.
+
+Official HREK separately proves a shared attachment boundary:
+the FP material pass binds `_surface_depth_stencil` with albedo/normal targets;
+the immediately following world-static-lighting pass reuses that exact
+depth/stencil surface with the lighting accumulation target. The failed headset
+result proves that preserving the native FP camera rebuild did not correct the
+reported pixels; the shared attachment fact must not be promoted to a cause.
 
 ### REJECTED: invalid Reach post-palette wrist write as black-world cause - 2026-07-29
 
