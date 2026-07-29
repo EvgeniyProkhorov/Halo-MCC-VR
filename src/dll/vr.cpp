@@ -4267,7 +4267,8 @@ float4 ps_scope_linearize(VSOut i):SV_Target { return paint(i.uv,true); }
 
     XrCompositionLayerQuad MakeQuad(XrSwapchain chain, int32_t imgW, int32_t imgH,
                                     float widthMeters, float distMeters, float yOffset,
-                                    XrCompositionLayerFlags flags, bool headLocked)
+                                    XrCompositionLayerFlags flags, bool headLocked,
+                                    float xOffset = 0.0f)
     {
         XrCompositionLayerQuad q{XR_TYPE_COMPOSITION_LAYER_QUAD};
         q.layerFlags = flags;
@@ -4280,13 +4281,13 @@ float4 ps_scope_linearize(VSOut i):SV_Target { return paint(i.uv,true); }
             // Pinned in front of the head (VIEW space); the game camera looks around.
             q.space = g_viewSpace;
             q.pose.orientation = {0, 0, 0, 1};
-            q.pose.position = {0, yOffset, -distMeters};
+            q.pose.position = {xOffset, yOffset, -distMeters};
         }
         else
         {
             q.space = g_localSpace;
             q.pose.orientation = g_centerRot;
-            const XrVector3f off = Rotate(g_centerRot, {0, yOffset, -distMeters});
+            const XrVector3f off = Rotate(g_centerRot, {xOffset, yOffset, -distMeters});
             q.pose.position = {g_centerPos.x + off.x, g_centerPos.y + off.y, g_centerPos.z + off.z};
         }
         q.size = {widthMeters, widthMeters * (float)imgH / (float)imgW};
@@ -5265,11 +5266,21 @@ float4 ps_scope_linearize(VSOut i):SV_Target { return paint(i.uv,true); }
         static bool hadHit = false;
         static float smoothU = 0.5f, smoothV = 0.5f;
         static uint64_t lastDiagMs = 0;
+        static bool dragging = false;
+        static float grabOffsetX = 0.0f, grabOffsetY = 0.0f;
         if (!g_rightAimPoseValid || (headLocked && !g_headPoseValid) ||
             (!headLocked && !g_haveCenter))
         {
             triggerPressed = false;
             hadHit = false;
+            if (dragging)
+            {
+                // Tracking dropped mid-drag. Keep wherever the panel got to
+                // rather than leaving the handle stuck to a stale ray.
+                dragging = false;
+                Menu_SetPanelDragging(false);
+                ConfigSave();
+            }
             Menu_ClearVrPointer();
             return;
         }
@@ -5291,15 +5302,10 @@ float4 ps_scope_linearize(VSOut i):SV_Target { return paint(i.uv,true); }
         const float origin[3] = {localOrigin.x, localOrigin.y, localOrigin.z};
         const float direction[3] = {localDirection.x, localDirection.y, localDirection.z};
         const MenuPointerHit hit = IntersectMenuQuad(origin, direction,
-            1.2f, 1.1f, 1.1f * MENU_H / MENU_W, -0.08f);
+            g_config.menu_distance_m, g_config.menu_width_m,
+            g_config.menu_width_m * MENU_H / MENU_W,
+            g_config.menu_height_m, g_config.menu_side_m);
 
-        if (!triggerPressed && g_padState.trigR >= 0.65f)
-            triggerPressed = true;
-        else if (triggerPressed && g_padState.trigR <= 0.35f)
-            triggerPressed = false;
-        const float scroll = std::fabs(g_padState.turnY) > 0.25f
-            ? g_padState.turnY * 0.12f
-            : 0.0f;
         if (hit.hit)
         {
             if (!hadHit)
@@ -5314,6 +5320,82 @@ float4 ps_scope_linearize(VSOut i):SV_Target { return paint(i.uv,true); }
             }
         }
         hadHit = hit.hit;
+
+        const bool wasTriggerPressed = triggerPressed;
+        if (!triggerPressed && g_padState.trigR >= 0.65f)
+            triggerPressed = true;
+        else if (triggerPressed && g_padState.trigR <= 0.35f)
+            triggerPressed = false;
+        const float stickY = std::fabs(g_padState.turnY) > 0.25f
+            ? g_padState.turnY
+            : 0.0f;
+
+        // Panel drag. The trigger only starts a drag when it goes down on the
+        // grab handle; anywhere else on the panel it is an ordinary click, so
+        // nothing moves by accident. While dragging, the panel keeps the offset
+        // it had when grabbed, and the stick pushes it further away or pulls it
+        // in -- the ray recomputes at the new distance, so it stays under the
+        // pointer.
+        auto planeHit = [&](float distance, float& outX, float& outY) -> bool {
+            if (std::fabs(direction[2]) < 1e-5f)
+                return false;
+            const float t = (-distance - origin[2]) / direction[2];
+            if (t <= 0.0f)
+                return false;
+            outX = origin[0] + direction[0] * t;
+            outY = origin[1] + direction[1] * t;
+            return true;
+        };
+        if (!dragging && !wasTriggerPressed && triggerPressed &&
+            hit.hit && Menu_PointerOverGrabHandle())
+        {
+            float hx = 0.0f, hy = 0.0f;
+            if (planeHit(g_config.menu_distance_m, hx, hy))
+            {
+                grabOffsetX = g_config.menu_side_m - hx;
+                grabOffsetY = g_config.menu_height_m - hy;
+                dragging = true;
+                Menu_SetPanelDragging(true);
+                LOG("menu panel: grabbed at distance %.2f m", g_config.menu_distance_m);
+            }
+        }
+        if (dragging)
+        {
+            if (stickY != 0.0f)
+            {
+                // ~0.6 m/s at full deflection, frame-rate independent.
+                static uint64_t lastPushMs = 0;
+                const uint64_t nowPush = GetTickCount64();
+                const float dt = lastPushMs ? (float)(nowPush - lastPushMs) * 0.001f : 0.0f;
+                lastPushMs = nowPush;
+                if (dt > 0.0f && dt < 0.25f)
+                    g_config.menu_distance_m = std::clamp(
+                        g_config.menu_distance_m - stickY * 0.6f * dt,
+                        kMenuDistanceMin, kMenuDistanceMax);
+            }
+            float hx = 0.0f, hy = 0.0f;
+            if (planeHit(g_config.menu_distance_m, hx, hy))
+            {
+                g_config.menu_side_m = std::clamp(hx + grabOffsetX,
+                                                  -kMenuOffsetLimit, kMenuOffsetLimit);
+                g_config.menu_height_m = std::clamp(hy + grabOffsetY,
+                                                    -kMenuOffsetLimit, kMenuOffsetLimit);
+            }
+            if (!triggerPressed)
+            {
+                dragging = false;
+                Menu_SetPanelDragging(false);
+                ConfigSave();
+                LOG("menu panel: released at distance %.2f m, side %.2f m, height %.2f m",
+                    g_config.menu_distance_m, g_config.menu_side_m, g_config.menu_height_m);
+            }
+            // Swallow the click and the scroll so dragging never also drives a
+            // widget underneath the handle.
+            Menu_SetVrPointer(hit.hit, smoothU, smoothV, false, 0.0f);
+            return;
+        }
+
+        const float scroll = stickY * 0.12f;
         Menu_SetVrPointer(hit.hit, smoothU, smoothV, triggerPressed, scroll);
 
         const uint64_t now = GetTickCount64();
@@ -6994,10 +7076,18 @@ float4 ps_scope_linearize(VSOut i):SV_Target { return paint(i.uv,true); }
                             Blit(menuTex, md, g_menuImages[idx], MENU_W, MENU_H,
                                  GetRtv(g_menuImages, g_menuRtvs, idx));
                             xrReleaseSwapchainImage(g_menuChain, &ri);
-                            menuQuad = MakeQuad(g_menuChain, MENU_W, MENU_H, 1.1f, 1.2f, -0.08f,
+                            // Placement comes from the config, which the grab
+                            // handle writes. UpdateMenuPointer above raycasts
+                            // against the same four values, so the pointer can
+                            // never drift off the visible panel.
+                            menuQuad = MakeQuad(g_menuChain, MENU_W, MENU_H,
+                                                g_config.menu_width_m,
+                                                g_config.menu_distance_m,
+                                                g_config.menu_height_m,
                                                 XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT |
                                                     XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT,
-                                                menuHeadLocked);
+                                                menuHeadLocked,
+                                                g_config.menu_side_m);
                             layers.push_back(reinterpret_cast<XrCompositionLayerBaseHeader*>(&menuQuad));
                         }
                     }

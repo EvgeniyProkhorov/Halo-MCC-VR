@@ -36,6 +36,18 @@ inline constexpr float kHudAspectMax = 2.00f;
 inline constexpr float kHudHeightMin = -300.0f;
 inline constexpr float kHudHeightMax = 300.0f;
 
+// Where the F1 menu panel sits in the headset, in meters. These four values are
+// the ONLY description of the panel's placement: both the composition quad and
+// the laser-pointer raycast read them, so the two can never disagree. Until
+// 2026-07-29 each carried its own copy of the same literals (1.2 / 1.1 / -0.08),
+// which meant moving the panel would have left the pointer behind.
+inline constexpr float kMenuDistanceMin = 0.40f;
+inline constexpr float kMenuDistanceMax = 6.00f;
+inline constexpr float kMenuWidthMin = 0.40f;
+inline constexpr float kMenuWidthMax = 4.00f;
+// Lateral/vertical travel of the grab handle, measured from straight ahead.
+inline constexpr float kMenuOffsetLimit = 3.00f;
+
 struct Config
 {
     int config_version = 4;
@@ -51,6 +63,16 @@ struct Config
 
     float screen_width_m = 4.0f;    // width of the virtual screen, in meters
     float screen_distance_m = 2.4f; // how far away the screen floats, in meters
+
+    // F1 menu panel placement. The panel is its own composition quad, separate
+    // from the virtual screen above. The defaults are the fixed constants the
+    // panel used before it became movable. The grab handle at the top of the
+    // panel writes these live and saves on release; "Reset panel position" in
+    // the Advanced category puts them back.
+    float menu_distance_m = 1.2f;   // how far in front of you the panel floats
+    float menu_width_m = 1.1f;      // panel width; height follows the 4:3 texture
+    float menu_height_m = -0.08f;   // vertical offset, negative = below eye line
+    float menu_side_m = 0.0f;       // sideways offset, positive = to your right
 
     // M3 VR controller turning (right Sense stick).
     bool turn_smooth = true;           // false = snap turn, true = smooth turn

@@ -15,3 +15,12 @@ bool Menu_Toggle();
 void Menu_SetVrPointer(bool hit, float u, float v, bool pressed, float scrollY);
 void Menu_ClearVrPointer();
 ID3D11Texture2D* Menu_Render(); // draws the current frame of UI; nullptr on failure
+
+// Panel dragging. The panel itself is locked -- nothing inside it moves -- and
+// the ONLY way to reposition it is the grab handle along the top edge. The menu
+// reports when the pointer is over that bar; vr.cpp owns the actual drag because
+// it is the side that has the controller ray. Placement lives in halomccvr.cfg
+// as menu_distance_m / menu_width_m / menu_height_m / menu_side_m, read by both
+// the composition quad and the pointer raycast.
+bool Menu_PointerOverGrabHandle();
+void Menu_SetPanelDragging(bool dragging);

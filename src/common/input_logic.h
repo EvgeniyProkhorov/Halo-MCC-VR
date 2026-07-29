@@ -28,8 +28,12 @@ struct MenuPointerHit
     float v = 0.0f;
 };
 
+// Ray/panel intersection in anchor-local space. `centerX`/`centerY` place the
+// panel off straight-ahead, which is what the grab handle moves; they must match
+// the composition quad's own offsets or the pointer lands somewhere the user
+// cannot see.
 MenuPointerHit IntersectMenuQuad(const float origin[3], const float direction[3],
-    float distance, float width, float height, float centerY);
+    float distance, float width, float height, float centerY, float centerX = 0.0f);
 
 float BlendXInputMotors(uint16_t lowFrequencyMotor, uint16_t highFrequencyMotor);
 

@@ -1,5 +1,6 @@
 #include <windows.h>
 #include <windowsx.h>
+#include <algorithm>
 #include <atomic>
 #include <cfloat>
 #include <cmath>
@@ -36,6 +37,139 @@ namespace
     };
     VrPointerInput g_vrPointer;
     bool g_resetArmed = false; // "reset all settings" needs a second click
+    // Panel drag state. The panel is otherwise completely locked; the grab
+    // handle along the top edge is the only thing that moves it. vr.cpp owns the
+    // drag itself because it holds the controller ray -- we only tell it whether
+    // the pointer is on the handle, and it tells us when a drag is running so
+    // the bar can light up.
+    std::atomic<bool> g_pointerOverGrabHandle{false};
+    std::atomic<bool> g_panelDragging{false};
+
+    // Master Chief green with orange visor highlights. Applied once at init,
+    // immediately after StyleColorsDark seeds every slot, so anything not named
+    // here still has a sane value.
+    constexpr ImVec4 Rgb(unsigned hex, float alpha = 1.0f)
+    {
+        return ImVec4(((hex >> 16) & 0xFF) / 255.0f,
+                      ((hex >> 8) & 0xFF) / 255.0f,
+                      (hex & 0xFF) / 255.0f,
+                      alpha);
+    }
+
+    constexpr unsigned kPanelBg     = 0x10160F; // near-black armour green
+    constexpr unsigned kSurfaceBg   = 0x161D14; // sidebar / child panels
+    constexpr unsigned kTroughBg    = 0x1E2A1B; // slider + input backgrounds
+    constexpr unsigned kRaised      = 0x26331F; // buttons at rest
+    constexpr unsigned kRaisedHover = 0x3A4E30;
+    constexpr unsigned kSelected    = 0x2A3A22; // selected row
+    constexpr unsigned kTextMain    = 0xE4EBDF;
+    constexpr unsigned kTextDim     = 0x7E8C76;
+    constexpr unsigned kAccent      = 0xFFA22B; // visor orange
+    constexpr unsigned kAccentHot   = 0xFFBC5E;
+    constexpr unsigned kAccentDown  = 0xE08312;
+    constexpr unsigned kBorder      = 0x2C3A26;
+    constexpr unsigned kSeparator   = 0x35472E;
+    // Deliberately a different orange from the accent so a warning can never be
+    // mistaken for a highlight.
+    constexpr unsigned kWarning     = 0xFF6B3D;
+
+    void ApplyTheme()
+    {
+        ImGuiStyle& s = ImGui::GetStyle();
+        ImVec4* c = s.Colors;
+        c[ImGuiCol_WindowBg]            = Rgb(kPanelBg, 0.96f);
+        c[ImGuiCol_ChildBg]             = Rgb(kSurfaceBg, 1.00f);
+        c[ImGuiCol_PopupBg]             = Rgb(kSurfaceBg, 0.98f);
+        c[ImGuiCol_Text]                = Rgb(kTextMain);
+        c[ImGuiCol_TextDisabled]        = Rgb(kTextDim);
+        c[ImGuiCol_Border]              = Rgb(kBorder);
+        c[ImGuiCol_BorderShadow]        = Rgb(0x000000, 0.0f);
+        c[ImGuiCol_Separator]           = Rgb(kSeparator);
+        c[ImGuiCol_SeparatorHovered]    = Rgb(kAccent, 0.60f);
+        c[ImGuiCol_SeparatorActive]     = Rgb(kAccent);
+        c[ImGuiCol_FrameBg]             = Rgb(kTroughBg);
+        c[ImGuiCol_FrameBgHovered]      = Rgb(kRaisedHover);
+        c[ImGuiCol_FrameBgActive]       = Rgb(kSelected);
+        c[ImGuiCol_TitleBg]             = Rgb(kSurfaceBg);
+        c[ImGuiCol_TitleBgActive]       = Rgb(kSelected);
+        c[ImGuiCol_TitleBgCollapsed]    = Rgb(kSurfaceBg);
+        c[ImGuiCol_MenuBarBg]           = Rgb(kSurfaceBg);
+        c[ImGuiCol_Button]              = Rgb(kRaised);
+        c[ImGuiCol_ButtonHovered]       = Rgb(kRaisedHover);
+        c[ImGuiCol_ButtonActive]        = Rgb(kAccentDown);
+        c[ImGuiCol_Header]              = Rgb(kSelected);
+        c[ImGuiCol_HeaderHovered]       = Rgb(kRaisedHover);
+        c[ImGuiCol_HeaderActive]        = Rgb(kAccentDown, 0.85f);
+        c[ImGuiCol_CheckMark]           = Rgb(kAccent);
+        c[ImGuiCol_SliderGrab]          = Rgb(kAccent);
+        c[ImGuiCol_SliderGrabActive]    = Rgb(kAccentHot);
+        c[ImGuiCol_ScrollbarBg]         = Rgb(kPanelBg, 0.0f);
+        c[ImGuiCol_ScrollbarGrab]       = Rgb(kSeparator);
+        c[ImGuiCol_ScrollbarGrabHovered]= Rgb(kRaisedHover);
+        c[ImGuiCol_ScrollbarGrabActive] = Rgb(kAccent);
+        c[ImGuiCol_Tab]                 = Rgb(kRaised);
+        c[ImGuiCol_TabHovered]          = Rgb(kRaisedHover);
+        c[ImGuiCol_TabSelected]         = Rgb(kSelected);
+        c[ImGuiCol_ResizeGrip]          = Rgb(kPanelBg, 0.0f); // panel is locked
+        c[ImGuiCol_ResizeGripHovered]   = Rgb(kPanelBg, 0.0f);
+        c[ImGuiCol_ResizeGripActive]    = Rgb(kPanelBg, 0.0f);
+        c[ImGuiCol_NavCursor]           = Rgb(kAccent);
+
+        // Square, industrial edges suit the armour look and stay crisp when the
+        // panel is sampled at an angle in the headset.
+        s.WindowRounding = 0.0f;
+        s.ChildRounding = 0.0f;
+        s.FrameRounding = 2.0f;
+        s.GrabRounding = 2.0f;
+        s.TabRounding = 0.0f;
+        s.ScrollbarRounding = 2.0f;
+        s.WindowBorderSize = 0.0f;
+        s.FrameBorderSize = 1.0f;
+    }
+
+    // Height of the grab bar in menu-texture pixels. The hover test is ImGui's
+    // own item rectangle, so the bar you can see is exactly the bar you can grab.
+    constexpr float kGrabHandleHeight = 46.0f;
+
+    // The one bar that moves the panel. Everything else is inert, which is the
+    // whole point: before this, the settings window itself was a movable ImGui
+    // window floating inside a transparent quad, so grabbing near its title bar
+    // slid it around and it read as "two windows in one".
+    void DrawGrabHandle()
+    {
+        const bool dragging = g_panelDragging.load(std::memory_order_acquire);
+        ImDrawList* draw = ImGui::GetWindowDrawList();
+        const ImVec2 topLeft = ImGui::GetCursorScreenPos();
+        const float width = ImGui::GetContentRegionAvail().x;
+        const ImVec2 bottomRight(topLeft.x + width, topLeft.y + kGrabHandleHeight);
+
+        ImGui::InvisibleButton("##panelgrab", ImVec2(width, kGrabHandleHeight));
+        const bool hovered = ImGui::IsItemHovered();
+        g_pointerOverGrabHandle.store(hovered || dragging, std::memory_order_release);
+
+        draw->AddRectFilled(topLeft, bottomRight,
+                            ImGui::GetColorU32(dragging  ? Rgb(kAccentDown, 0.55f)
+                                               : hovered ? Rgb(kRaisedHover)
+                                                         : Rgb(kSurfaceBg)));
+        // A bright rule along the bottom edge reads as a seam you can pick up.
+        draw->AddRectFilled(ImVec2(topLeft.x, bottomRight.y - 2.0f), bottomRight,
+                            ImGui::GetColorU32(Rgb(kAccent, dragging ? 1.0f : 0.75f)));
+
+        // Grip dots, centered, so the bar looks draggable without any text.
+        const float midY = topLeft.y + kGrabHandleHeight * 0.5f;
+        const float midX = topLeft.x + width * 0.5f;
+        const ImU32 gripColor = ImGui::GetColorU32(Rgb(kAccent, dragging ? 1.0f : 0.8f));
+        for (int i = -3; i <= 3; ++i)
+            draw->AddCircleFilled(ImVec2(midX + i * 14.0f, midY), 2.5f, gripColor);
+
+        ImGui::SetCursorScreenPos(ImVec2(topLeft.x + 12.0f, topLeft.y + 10.0f));
+        ImGui::TextColored(Rgb(kTextMain), "HALO MCC VR");
+        ImGui::SetCursorScreenPos(ImVec2(topLeft.x, bottomRight.y + 6.0f));
+        ImGui::TextDisabled("%s", dragging
+            ? "Moving the panel. Right stick up/down changes the distance; release to place it."
+            : "Hold the right trigger on this bar to move the whole panel.");
+        ImGui::Separator();
+    }
     // ImGui gets input on the game's window thread but draws on its render
     // thread; this lock keeps the two from touching ImGui at the same time.
     CRITICAL_SECTION g_cs;
@@ -260,9 +394,20 @@ namespace
 
     void DrawUI()
     {
-        ImGui::SetNextWindowPos(ImVec2(16, 16), ImGuiCond_FirstUseEver);
-        ImGui::SetNextWindowSize(ImVec2(MENU_W - 32, MENU_H - 32), ImGuiCond_FirstUseEver);
-        ImGui::Begin("HaloMCCVR Settings", nullptr, ImGuiWindowFlags_NoCollapse);
+        // The window fills the whole panel texture and is completely locked.
+        // Cond_Always (not FirstUseEver) means ImGui cannot keep a position of
+        // its own, and NoMove/NoResize/NoTitleBar remove every drag target. The
+        // panel background now covers the entire quad, so there is no
+        // transparent surround for a smaller window to slide around inside.
+        ImGui::SetNextWindowPos(ImVec2(0, 0), ImGuiCond_Always);
+        ImGui::SetNextWindowSize(ImVec2(MENU_W, MENU_H), ImGuiCond_Always);
+        ImGui::Begin("HaloMCCVR Settings", nullptr,
+                     ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize |
+                         ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoCollapse |
+                         ImGuiWindowFlags_NoBringToFrontOnFocus |
+                         ImGuiWindowFlags_NoSavedSettings);
+
+        DrawGrabHandle();
 
         bool changed = false;
         if (ImGui::BeginTabBar("HaloMCCVRTabs"))
@@ -595,7 +740,7 @@ namespace
                             "sharpness for frame rate; above it supersamples. Keith David is\n"
                             "8K-class. Changing this requires a full game restart.");
         if (g_config.resolution_scale > kResolutionScaleHeavy)
-            ImGui::TextColored(ImVec4(1.0f, 0.55f, 0.25f, 1.0f),
+            ImGui::TextColored(Rgb(kWarning),
                                "[!] Very heavy (~5K and up): can crash weaker GPUs. Test in\n"
                                "    short sessions and drop this if the game won't start.");
         ImGui::Spacing();
@@ -667,6 +812,41 @@ namespace
 
         ImGui::Spacing();
         ImGui::TextDisabled("Insert toggles hand aim. Sense sticks move/turn; grips = bumpers,\ntriggers = fire/grenade, stick-click = zoom/crouch, left menu = Start.");
+
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Text("Menu panel");
+        ImGui::TextDisabled("Currently %.2f m away, %.2f m wide, %+.2f m high, %+.2f m across.",
+                            g_config.menu_distance_m, g_config.menu_width_m,
+                            g_config.menu_height_m, g_config.menu_side_m);
+        if (ImGui::Button("Reset panel position"))
+        {
+            const Config defaults{};
+            g_config.menu_distance_m = defaults.menu_distance_m;
+            g_config.menu_width_m = defaults.menu_width_m;
+            g_config.menu_height_m = defaults.menu_height_m;
+            g_config.menu_side_m = defaults.menu_side_m;
+            changed = true;
+        }
+        ImGui::SameLine();
+        // Clamped here as well as in ConfigSave: the render thread reads these
+        // for the composition quad before the save runs.
+        if (ImGui::SmallButton("Smaller##panel"))
+        {
+            g_config.menu_width_m = std::clamp(g_config.menu_width_m - 0.10f,
+                                               kMenuWidthMin, kMenuWidthMax);
+            changed = true;
+        }
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Bigger##panel"))
+        {
+            g_config.menu_width_m = std::clamp(g_config.menu_width_m + 0.10f,
+                                               kMenuWidthMin, kMenuWidthMax);
+            changed = true;
+        }
+        ImGui::TextDisabled("Grab the bar at the top of this panel with the right trigger to\n"
+                            "move it; push the right stick up/down while holding to change\n"
+                            "how far away it sits. Your placement is saved automatically.");
 
         ImGui::Spacing();
         ImGui::Separator();
@@ -750,6 +930,7 @@ bool Menu_Init(HWND gameWindow, ID3D11Device* device, ID3D11DeviceContext* conte
     io.MouseDrawCursor = true;             // draw the cursor into our texture
     io.ConfigFlags |= ImGuiConfigFlags_NoMouseCursorChange;
     ImGui::StyleColorsDark();
+    ApplyTheme();                          // Master Chief green / visor orange
     ImGui::GetStyle().ScaleAllSizes(1.5f); // legible at panel distance in the headset
     io.FontGlobalScale = 1.5f;
 
@@ -792,8 +973,22 @@ bool Menu_Toggle()
     const bool open = !g_open.load(std::memory_order_acquire);
     g_open.store(open, std::memory_order_release);
     g_resetArmed = false; // never leave a reset half-armed across sessions
+    // A closed menu can never be mid-drag, and a stale hover would otherwise let
+    // the next trigger press grab the panel without touching the handle.
+    g_pointerOverGrabHandle.store(false, std::memory_order_release);
+    g_panelDragging.store(false, std::memory_order_release);
     LOG("menu %s", open ? "opened" : "closed");
     return open;
+}
+
+bool Menu_PointerOverGrabHandle()
+{
+    return g_ready && g_pointerOverGrabHandle.load(std::memory_order_acquire);
+}
+
+void Menu_SetPanelDragging(bool dragging)
+{
+    g_panelDragging.store(dragging, std::memory_order_release);
 }
 
 void Menu_SetVrPointer(bool hit, float u, float v, bool pressed, float scrollY)

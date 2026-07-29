@@ -44,7 +44,7 @@ MenuChordResult MenuChordDetector::Update(uint64_t nowMs, bool leftClick, bool r
 }
 
 MenuPointerHit IntersectMenuQuad(const float origin[3], const float direction[3],
-    float distance, float width, float height, float centerY)
+    float distance, float width, float height, float centerY, float centerX)
 {
     MenuPointerHit result{};
     if (!origin || !direction || distance <= 0.0f || width <= 0.0f || height <= 0.0f)
@@ -59,12 +59,12 @@ MenuPointerHit IntersectMenuQuad(const float origin[3], const float direction[3]
     const float y = origin[1] + direction[1] * t;
     const float halfWidth = width * 0.5f;
     const float halfHeight = height * 0.5f;
-    if (x < -halfWidth || x > halfWidth ||
+    if (x < centerX - halfWidth || x > centerX + halfWidth ||
         y < centerY - halfHeight || y > centerY + halfHeight)
         return result;
 
     result.hit = true;
-    result.u = x / width + 0.5f;
+    result.u = (x - centerX) / width + 0.5f;
     result.v = 0.5f - (y - centerY) / height;
     return result;
 }

@@ -44,6 +44,14 @@ static void Clamp()
     g_config.aim_stabilization = std::clamp(g_config.aim_stabilization, 0.0f, 0.95f);
     g_config.screen_width_m = std::clamp(g_config.screen_width_m, 0.5f, 20.0f);
     g_config.screen_distance_m = std::clamp(g_config.screen_distance_m, 0.3f, 20.0f);
+    g_config.menu_distance_m = std::clamp(g_config.menu_distance_m,
+                                          kMenuDistanceMin, kMenuDistanceMax);
+    g_config.menu_width_m = std::clamp(g_config.menu_width_m,
+                                       kMenuWidthMin, kMenuWidthMax);
+    g_config.menu_height_m = std::clamp(g_config.menu_height_m,
+                                        -kMenuOffsetLimit, kMenuOffsetLimit);
+    g_config.menu_side_m = std::clamp(g_config.menu_side_m,
+                                      -kMenuOffsetLimit, kMenuOffsetLimit);
     g_config.turn_snap_deg = std::clamp(g_config.turn_snap_deg, 5.0f, 90.0f);
     g_config.turn_smooth_deg_s = std::clamp(g_config.turn_smooth_deg_s, 30.0f, 360.0f);
     g_config.crosshair_distance_m = std::clamp(g_config.crosshair_distance_m, 2.0f, 50.0f);
@@ -144,6 +152,14 @@ void ConfigLoad(const wchar_t* path)
             g_config.screen_width_m = (float)atof(val);
         else if (!strcmp(key, "screen_distance_m"))
             g_config.screen_distance_m = (float)atof(val);
+        else if (!strcmp(key, "menu_distance_m"))
+            ParseFloatSetting(key, val, g_config.menu_distance_m);
+        else if (!strcmp(key, "menu_width_m"))
+            ParseFloatSetting(key, val, g_config.menu_width_m);
+        else if (!strcmp(key, "menu_height_m"))
+            ParseFloatSetting(key, val, g_config.menu_height_m);
+        else if (!strcmp(key, "menu_side_m"))
+            ParseFloatSetting(key, val, g_config.menu_side_m);
         else if (!strcmp(key, "turn_smooth"))
             g_config.turn_smooth = atoi(val) != 0;
         else if (!strcmp(key, "turn_snap_deg"))
@@ -388,6 +404,25 @@ void ConfigSave()
     fprintf(f, "# Distance from your head to that screen, in meters.\n");
     fprintf(f, "# (default %.2f, range 0.3 to 20)\n", d.screen_distance_m);
     fprintf(f, "screen_distance_m = %.2f\n\n", g_config.screen_distance_m);
+    fprintf(f, "# Where the F1 menu panel floats. You do not need to edit these by\n");
+    fprintf(f, "# hand: grab the bar along the top of the panel with your right\n");
+    fprintf(f, "# trigger to move it, and push the right stick up/down while holding\n");
+    fprintf(f, "# to change how far away it is. \"Reset panel position\" in the menu's\n");
+    fprintf(f, "# Advanced page puts all four back to the defaults below.\n");
+    fprintf(f, "# (defaults %.2f / %.2f / %.2f / %.2f)\n",
+             d.menu_distance_m, d.menu_width_m, d.menu_height_m, d.menu_side_m);
+    fprintf(f, "# Distance from your head to the panel, in meters. (range %.2f to %.2f)\n",
+             kMenuDistanceMin, kMenuDistanceMax);
+    fprintf(f, "menu_distance_m = %.2f\n", g_config.menu_distance_m);
+    fprintf(f, "# Panel width in meters; its height follows automatically. (range %.2f to %.2f)\n",
+             kMenuWidthMin, kMenuWidthMax);
+    fprintf(f, "menu_width_m = %.2f\n", g_config.menu_width_m);
+    fprintf(f, "# Height offset in meters, negative = below your eye line. (range -%.2f to %.2f)\n",
+             kMenuOffsetLimit, kMenuOffsetLimit);
+    fprintf(f, "menu_height_m = %.2f\n", g_config.menu_height_m);
+    fprintf(f, "# Sideways offset in meters, positive = to your right. (range -%.2f to %.2f)\n",
+             kMenuOffsetLimit, kMenuOffsetLimit);
+    fprintf(f, "menu_side_m = %.2f\n\n", g_config.menu_side_m);
     fprintf(f, "# -------------------------------------------------------------------\n");
     fprintf(f, "#  CONTROLS & TURNING\n");
     fprintf(f, "#  Universal controller choices used in every supported title.\n");

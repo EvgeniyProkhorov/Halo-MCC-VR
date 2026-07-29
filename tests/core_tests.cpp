@@ -3891,6 +3891,25 @@ int main()
     const float rayAway[3] = { 0.0f, 0.0f, 1.0f };
     Check(!IntersectMenuQuad(rayOrigin, rayAway, 1.2f, 1.1f, 0.825f, -0.08f).hit,
         "Controller rays pointing away from the menu miss");
+
+    // The grab handle can slide the panel sideways, so the pointer must follow
+    // it. A forward ray that centred the old fixed panel has to miss a panel
+    // pushed a full width to the right, and hit its left edge exactly.
+    Check(!IntersectMenuQuad(rayOrigin, rayForward, 1.2f, 1.1f, 0.825f, -0.08f, 1.1f).hit,
+        "A panel moved a full width aside is no longer under a straight-ahead ray");
+    const MenuPointerHit offsetHit =
+        IntersectMenuQuad(rayOrigin, rayForward, 1.2f, 1.1f, 0.825f, -0.08f, 0.55f);
+    Check(offsetHit.hit && offsetHit.u == 0.0f,
+        "A panel moved half a width right puts its left edge on the forward ray");
+    // Passing centerX explicitly must match the defaulted call exactly, and the
+    // vertical offset still applies: the panel hangs below the eye line, so a
+    // level ray lands above its middle.
+    const MenuPointerHit offsetCenter =
+        IntersectMenuQuad(rayOrigin, rayForward, 1.2f, 1.1f, 0.825f, -0.08f, 0.0f);
+    Check(offsetCenter.hit && offsetCenter.u == hit.u && offsetCenter.v == hit.v,
+        "An explicit zero side offset matches the defaulted panel exactly");
+    Check(offsetCenter.v > 0.0f && offsetCenter.v < 0.5f,
+        "A level ray lands above the middle of a panel hung below the eye line");
     Check(BlendXInputMotors(0, 0) == 0.0f, "Zero XInput rumble stops haptics");
     Check(BlendXInputMotors(65535, 65535) == 1.0f,
         "Both full XInput motors produce full portable haptics");
