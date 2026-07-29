@@ -337,6 +337,61 @@ candidate. Evidence:
 (log SHA-256
 `E6BA52C4671C03002C003D7FF3BAEEA2CF125283E605D6BDC6F5976B6E9C1CFF`).
 
+## Static-world black geometry: post-palette world/local wrist corruption (CANDIDATE)
+
+This candidate removes one active mod write, not a native-renderer feature and
+not a stock or 2D fallback. Commit `511eb0b` was a failed muzzle-flash candidate
+that remained in every later build, including the requested E490 artifact. It
+copies `alignedRight` directly into
+`context.source[context.layout.rightWristSource]` after the visible palette has
+already been composed.
+
+The coordinate-space violation is explicit in the existing code and official
+palette contract:
+
+- `FpExplicitPoseTargets` carries absolute world poses. Reach builds the wrist
+  translation as gameplay base plus tracked controller offset and standoff;
+  `ReachAlignRightTargetToAuthoredBarrel` preserves that world translation in
+  `alignedRight`.
+- The live interpolation graph is root-relative record space. The HREK/retail
+  palette builds `destination[i] = root * source[boneMap[i]]`. The correct
+  earlier `ApplyControllerToMarkerBonesWithTarget` path therefore computes the
+  world wrist, forms the world delta, converts it back through the inverse root,
+  and applies that record-space transform to every graph record.
+- The later `511eb0b` block skips that conversion and replaces only the right
+  wrist record with the absolute-world matrix. Any later stock composition sees
+  `root * world`, and the wrist is no longer coherent with the already-transformed
+  descendants. Halo 3 and ODST have the correct whole-graph transform but no
+  equivalent post-palette single-record assignment.
+- `main_render_view` performs interpolation and palette work before its two
+  `player_view_render` calls. The visible weapon has therefore already consumed
+  the private correct palette, while the invalid live record remains resident
+  through later world-eye rendering. No success-path restore exists. Worse, the
+  pending write was armed before palette reconstruction finished, so a failed
+  reconstruction could restore the stock graph and then immediately poison it
+  again after the stock palette call.
+
+This block is proven hot in the exact affected runtime. The requested E490
+source `9cb88d7` log reaches 118,490 recorded attempts at the write:
+`out/deploy-backups/e490501-steam-before-81b6573-20260728-212252666Z/halo3xr.log`
+(SHA-256
+`87018037E82623984B32828DA1A556D9636628E881E79F7FD08209C37C53B34F`).
+The DrawIndexed and SSAO black-world failures independently reached 10,240 and
+7,192 attempts. The historical counter increments after `SafeWriteBytes`
+without checking its return, so these are formally attempts; the same validated
+source buffer had just passed a complete finite read/write transaction.
+
+The write had no remaining feature owner. The next investigation after
+`511eb0b` identified the live-skeleton approach as ineffective, and accepted
+`b942078` fixed the muzzle flash solely by retargeting loaded tag location data,
+explicitly with no bone change. The forward candidate leaves the coherent
+whole-graph marker transform, visible controller gun/hands, stereo camera, and
+accepted tag retarget intact. It compile-time disables only the late world-to-
+local assignment and reports an unconditional generation line plus the first
+prevented invocation from the worker. A valid headset run must show prevented
+greater than zero, executed zero, and the existing both-eye FP camera ACTIVE
+line. Causal acceptance still requires the headset result.
+
 ## Static-world black geometry: lightmap-shadow isolation (REJECTED)
 
 The headset boundary is unusually specific. Large first-person weapons and
@@ -394,18 +449,27 @@ block that the existing eye transaction already refreshes and mirrors for each
 eye. The pass therefore is not reading a camera block omitted by the current
 per-eye rebuild; the direct isolation boundary is the pass itself.
 
-This is **not** native SSAO/HDAO or the later
-`render_shadow_screenspace` work. The old `_surface_shadow_mask` diagnostic
-cleared the surface before each `player_view_render`, so native SSAO could and
-did regenerate it before lighting applied it. Its asynchronous readback also
-sampled only the centre 64x64 texels, not the complete 3262x2352 surface. A
-clear-off preserved log disproves the stale blanket claim that the surface was
-always white: paired samples include 67.45%/63.03%, 27.24%/48.85%, and
-24.53%/25.21% lit. That measurement remains a valid limited observation, but it
-did not isolate or reject the later SSAO producer. Evidence:
+This is **not** native SSAO/HDAO. It does, however, enclose the real
+`render_shadow_screenspace` work; the earlier text that called that a later,
+separate gate was wrong. Official HREK publishes `render_shadow_screenspace` at
+descriptor `0x02015488` and five reads of its live value `0x02059019`. Its
+player-view path is nested under the enabled `render_lightmap_shadows` call:
+`0x00865910 -> 0x00867F60 -> 0x00866CA0`. Retail has the homologous chain
+`0x0028B3D0 -> 0x0028BF50 -> 0x0028C8E0`; the retail descriptor's value pointer
+is optimized to null. The `render_lightmap_shadows` false branch at
+`0x0026E7D4` skips the outer call and therefore skips this screen-space apply
+block too. Candidate `839aed7` consequently rejects both the object-caster and
+native screen-space-shadow work in that transaction.
+
+The old `_surface_shadow_mask` diagnostic cleared the surface before each
+`player_view_render`, so native SSAO could and did regenerate it before lighting
+applied it. Its asynchronous readback also sampled only the centre 64x64 texels,
+not the complete 3262x2352 surface. A clear-off preserved log disproves the stale
+blanket claim that the surface was always white: paired samples include
+67.45%/63.03%, 27.24%/48.85%, and 24.53%/25.21% lit. That measurement remains a
+valid limited observation, but it did not isolate or reject the later SSAO
+producer. Evidence:
 `out/deploy-backups/681c161-steam-before-fd6da0a-20260729-065406006Z/halo3xr.log`.
-The lightmap-shadow renderer remains a separate earlier object-caster ->
-static-lightmap receiver path.
 
 Candidate `839aed7` resolved the descriptor, name, type, value pointer,
 player-view call, wrapper compare, and renderer call exactly. For each admitted
@@ -413,8 +477,9 @@ VR eye it saved the title boolean, cleared it immediately around stock
 `player_view_render`, and restored it in `__finally`. The Steam/SteamVR PSVR2
 log records the exact candidate BOUND and ARMED, then at least two completed
 `1 -> 0 -> 1` eye scopes with zero write or restore failures. The black static
-world geometry remained unchanged. This rejects the exact object-lightmap-shadow
-pass as the cause; the implementation is retained but no longer armed. Evidence:
+world geometry remained unchanged. This rejects the exact lightmap-shadow
+transaction, including its nested native screen-space-shadow apply, as the
+cause; the implementation is retained but no longer armed. Evidence:
 `out/test-runs/839aed7-reach-world-black-lightmap-shadow-fail-20260729-061119`
 (log SHA-256
 `40923EF9CDD1BEBECB6D8660CAB98E9385AB5BF81FB1C48986731930051B4A96`).
@@ -452,13 +517,15 @@ The pinned retail module repeats the complete chain:
 | SSAO body SHA-256 | `760D2BEC3AA13ABFA0AB2002E2873C9C8A9F1FEA9EE63238585C2A6C92943EE7` |
 | Final multipass/direct output calls | `0x002A169A`, `0x002A1755` |
 | Both output calls -> surface-2 helper | `0x00252F08` |
-| Following screen-space-shadow gate | `0x0026E822` |
+| Following `render_rain` gate (not shadow) | `0x0026E822` |
 
 The surface helper begins `sub rsp,38h; mov edx,2; xor ecx,ecx`, then calls the
 render-target binder. The later apply block at `0x0026E878` gates on the
 current-frame touched flag, binds surface 2, and draws it before static lighting.
-This makes the causal boundary executable evidence rather than a resource-name
-guess.
+The byte immediately after the SSAO call is not that apply gate. HREK descriptor
+`0x02014C48 -> 0x02056C74` and retail descriptor
+`0x00B40FF0 -> 0x00B4444C` both identify it as `render_rain`. No rain behavior
+was built or tested for this black-world defect.
 
 The current Reach VR transaction also supplies the missing symptom link. Its
 first-person camera hook replaces the nested weapon camera with the current

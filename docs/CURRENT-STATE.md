@@ -52,6 +52,25 @@ at packaging time - not generated defaults.
 The published ZIP is the exact artifact that passed the second-machine test.
 Do not rebuild and republish without repeating that validation.
 
+### CANDIDATE: reject invalid Reach post-palette wrist write - 2026-07-29
+
+Headset acceptance is pending; this does not advance the public pointer above.
+The candidate disables only the failed `511eb0b` post-palette write that copied
+an absolute-world controller wrist matrix directly into one root-relative live
+skeleton record. Reach had already performed the correct world-to-record
+conversion over the complete graph, and the visible gun had already consumed
+its private correct palette. The invalid single-record write then remained live
+through both later world-eye renders with no success-path restore.
+
+This is active-hook cleanup, not a native SSAO, shadow, depth-buffer, culling,
+camera-orientation, or rain theory. It does not restore a stock viewmodel or 2D
+path. The valid controller transform, controller-held gun/hands, per-eye camera,
+and accepted loaded-tag muzzle retarget all remain active. The exact requested
+E490 log proves the removed block was reached 118,490 times. The new worker proof
+must report a positive prevented count, zero executed writes, and the existing
+both-eye FP camera ACTIVE line before the headset result is considered valid.
+Full binding and ordering evidence is in `docs/REACH-SIGNATURE-EVIDENCE.md`.
+
 ### REJECTED: Reach black-world effect-owner gate - 2026-07-29
 
 This result is evidence only and does not advance the accepted pointer above.

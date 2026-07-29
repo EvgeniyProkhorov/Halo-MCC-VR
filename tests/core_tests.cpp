@@ -834,8 +834,8 @@ int main()
             "Reach head translation and runtime IPD use the exact ten-foot world-unit conversion");
 
         Check(kReachSsaoCallRva == 0x0026E81D &&
-              kReachShadowScreenspaceGateRva == 0x0026E822 &&
-              kReachSsaoCallRva + 5 == kReachShadowScreenspaceGateRva &&
+              kReachRainGateAfterSsaoRva == 0x0026E822 &&
+              kReachSsaoCallRva + 5 == kReachRainGateAfterSsaoRva &&
               kReachLightmapShadowsRenderCallRva < kReachSsaoCallRva &&
               kReachSsaoRva == 0x002A13A0 &&
               kReachSsaoEndRva == 0x002A1907 &&

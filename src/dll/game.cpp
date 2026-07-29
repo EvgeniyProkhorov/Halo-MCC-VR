@@ -10604,12 +10604,16 @@ namespace
     constexpr size_t kReachChudMaxCollectionSlots = 256;
     std::atomic<uint8_t> g_reachChudMaxCollection[kReachChudMaxCollectionSlots]{};
     std::atomic<uint32_t> g_reachHudFlashHidden{0};
-    // Set when this palette call produced a controller-aligned weapon, so the
-    // post-compose write knows there is something valid to publish into the
-    // engine's live skeleton.
+    // Historical 511eb0b candidate. It copied the absolute-world
+    // controller wrist directly into one local-space live-skeleton record
+    // after palette composition. That write did not fix the muzzle flash;
+    // b942078 later fixed it in loaded tag data. Keep the old write dormant
+    // for evidence and count every exact invocation that would have reached it.
+    constexpr bool kReachPostPaletteWorldWristWriteEnabled = false;
     thread_local bool g_reachWeaponAnchorPending = false;
     thread_local BoneMatrix g_reachWeaponAnchorMoved{};
     std::atomic<uint32_t> g_reachLiveGraphWeaponWrites{0};
+    std::atomic<uint32_t> g_reachWorldWristWritesPrevented{0};
 
     void ReachPublishWeaponAnchor(
         const BoneMatrix& stock, const BoneMatrix& moved, uint32_t generation)
@@ -13803,36 +13807,35 @@ namespace
         if (original)
             original(tag,root,destination,unused,selectedSource,boneMap);
 
-        // Put the moved weapon into the ENGINE'S OWN skeleton, after the
-        // visible gun has already been composed from g_fpPaletteScratch.
-        //
-        // This is the piece that was missing. Everything above writes the
-        // controller-aligned weapon into a scratch buffer and hands only that
-        // to the renderer, so the gun the player sees is correct while the
-        // engine's live bones still hold the weapon at the player's body.
-        // Anything that samples the real skeleton afterwards - the muzzle
-        // flash particle among them - therefore spawns at the head.
-        //
-        // Proven, not assumed: the effect LOCATION matrix was re-parented 11,913
-        // times at a measured 17 mm from the player's head and the flash did not
-        // move (candidate 4d837d1). So the particle does not read that matrix;
-        // it reads the skeleton. Writing the moved wrist back into the live
-        // graph is what makes the skeleton agree with what is on screen.
-        //
-        // Safe to write after the compose call: the visible palette has already
-        // been produced, and the engine rebuilds this graph from animation every
-        // frame, so nothing accumulates.
+        // Candidate 511eb0b put alignedRight here after the visible palette had
+        // already been composed. alignedRight is an absolute world pose; the
+        // live interpolation records are local to the first-person root. The
+        // same source file had already measured those as different coordinate
+        // spaces, but the candidate nevertheless copied the world matrix into
+        // one local record. It was ineffective for the muzzle flash and was
+        // superseded by b942078's accepted loaded-tag retarget, yet the bad
+        // write remained active. Do not let a later render consumer observe
+        // that internally inconsistent skeleton. The coherent rigid local
+        // graph transform performed before the palette remains unchanged.
         if (g_reachWeaponAnchorPending &&
             context.layout.rightWristSource >= 0 &&
             context.layout.rightWristSource < context.liveSourceCount &&
             context.source)
         {
-            SafeWriteBytes(
-                const_cast<BoneMatrix*>(context.source) +
-                    context.layout.rightWristSource,
-                &g_reachWeaponAnchorMoved, sizeof(BoneMatrix));
-            g_reachLiveGraphWeaponWrites.fetch_add(
-                1, std::memory_order_relaxed);
+            if constexpr (kReachPostPaletteWorldWristWriteEnabled)
+            {
+                SafeWriteBytes(
+                    const_cast<BoneMatrix*>(context.source) +
+                        context.layout.rightWristSource,
+                    &g_reachWeaponAnchorMoved, sizeof(BoneMatrix));
+                g_reachLiveGraphWeaponWrites.fetch_add(
+                    1, std::memory_order_relaxed);
+            }
+            else
+            {
+                g_reachWorldWristWritesPrevented.fetch_add(
+                    1, std::memory_order_relaxed);
+            }
         }
         g_reachWeaponAnchorPending = false;
     }
@@ -16069,6 +16072,7 @@ namespace
         g_reachMuzzleRepaired.store(0, std::memory_order_relaxed);
         g_reachMuzzleReparented.store(0, std::memory_order_relaxed);
         g_reachLiveGraphWeaponWrites.store(0, std::memory_order_relaxed);
+        g_reachWorldWristWritesPrevented.store(0, std::memory_order_relaxed);
         g_reachHudFlashHidden.store(0, std::memory_order_relaxed);
         for (auto& slot : g_reachChudMaxCollection)
             slot.store(0, std::memory_order_relaxed);
@@ -16581,6 +16585,40 @@ namespace
             redirects, noFpUser, fpNone, alreadyFp, failures,
             g_reachMuzzleFpByteLowMask.load(std::memory_order_relaxed),
             g_reachMuzzleFpByteHighMask.load(std::memory_order_relaxed));
+    }
+
+    // Worker-side proof for the isolated 511eb0b rejection. The palette hook
+    // only increments a lock-free counter; logging stays off the render path.
+    void ReachWorldWristWriteLogTick()
+    {
+        static uint32_t lastGeneration = 0;
+        static uint32_t lastPrevented = 0;
+        static uint64_t lastReportMs = 0;
+        if (!g_reachCamera.installed.load(std::memory_order_acquire))
+        {
+            lastGeneration = 0;
+            lastPrevented = 0;
+            lastReportMs = 0;
+            return;
+        }
+        const uint32_t generation = g_reachCamera.generation;
+        const uint32_t prevented = g_reachWorldWristWritesPrevented.load(
+            std::memory_order_relaxed);
+        const uint32_t executed = g_reachLiveGraphWeaponWrites.load(
+            std::memory_order_relaxed);
+        const uint64_t now = GetTickCount64();
+        const bool newGeneration = generation != lastGeneration;
+        const bool firstPrevention = prevented != 0 && lastPrevented == 0;
+        const bool periodic = prevented != lastPrevented &&
+            lastReportMs != 0 && now - lastReportMs >= 30000;
+        if (!newGeneration && !firstPrevention && !periodic)
+            return;
+        lastGeneration = generation;
+        lastPrevented = prevented;
+        lastReportMs = now;
+        LOG("Reach FP post-palette world-to-local wrist write DISABLED: "
+            "generation=%u, prevented=%u, executed=%u",
+            generation, prevented, executed);
     }
 
     // Worker-side only: report which of the six observer-camera call sites are
@@ -17100,6 +17138,7 @@ namespace
         ReachSsaoLogTick();
         ReachObserverCameraLogTick();
         ReachMuzzleLogTick();
+        ReachWorldWristWriteLogTick();
         ReachCineProbeLogTick();
         LogReachFpCameraUploadIfReady();
         LogReachFpStatusIfNew();

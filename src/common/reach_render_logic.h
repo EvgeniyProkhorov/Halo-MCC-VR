@@ -588,7 +588,10 @@ inline constexpr uintptr_t kReachLightmapShadowsRenderRva = 0x0028B3D0;
 // eye transaction; it mutates no native TLS flag and introduces no direct
 // surface write or clear.
 inline constexpr uintptr_t kReachSsaoCallRva = 0x0026E81D;
-inline constexpr uintptr_t kReachShadowScreenspaceGateRva = 0x0026E822;
+// This immediately following byte is `render_rain`, not a screen-space-shadow
+// control. Official HREK descriptor/name mapping and the retail descriptor at
+// 0x00B40FF0 both identify it. Keep the address only to pin SSAO call ordering.
+inline constexpr uintptr_t kReachRainGateAfterSsaoRva = 0x0026E822;
 inline constexpr uintptr_t kReachSsaoRva = 0x002A13A0;
 inline constexpr uintptr_t kReachSsaoEndRva = 0x002A1907;
 inline constexpr size_t kReachSsaoBodySize =
