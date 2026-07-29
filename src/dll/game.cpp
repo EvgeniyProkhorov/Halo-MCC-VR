@@ -24,6 +24,7 @@
 #endif
 #include "../common/log.h"
 #include "../common/config.h"
+#include "../common/cutscene_theater_logic.h"
 #include "../common/hud_layout_logic.h"
 #include "../common/input_logic.h"
 #include "../common/odst_bringup_logic.h"
@@ -54,7 +55,8 @@ namespace
         TitleCapability_RuntimeModes |
         TitleCapability_RoomScale |
         TitleCapability_ControllerInput |
-        TitleCapability_Haptics;
+        TitleCapability_Haptics |
+        TitleCapability_CutsceneTheater;
     constexpr uint32_t kOdstRuntimeCapabilities =
         kHalo3RuntimeCapabilities;
     // Matches kReachCapabilities in title_registry.cpp. Hud is granted: Reach's
@@ -73,14 +75,16 @@ namespace
         TitleCapability_RuntimeModes |
         TitleCapability_RoomScale |
         TitleCapability_ControllerInput |
-        TitleCapability_Haptics;
+        TitleCapability_Haptics |
+        TitleCapability_CutsceneTheater;
     constexpr uint32_t kRuntimeCapabilitiesRequiringArm =
         TitleCapability_Stereo |
         TitleCapability_ControllerAim |
         TitleCapability_Hud |
         TitleCapability_ArmIk |
         TitleCapability_RoomScale |
-        TitleCapability_Haptics;
+        TitleCapability_Haptics |
+        TitleCapability_CutsceneTheater;
     constexpr uint64_t kTitleRuntimeHeartbeatFreshMs = 500;
 
     constexpr uintptr_t kCamCopyRva = 0x2A628C; // fastcall(dst, src) camera copy
@@ -1303,6 +1307,8 @@ namespace
         lifecycle.teardownRequested = teardownRequested;
         lifecycle.enabledCapabilities = installed && !teardownRequested
             ? kHalo3RuntimeCapabilities : TitleCapability_None;
+        if (!g_cinematicTlsIndex)
+            lifecycle.enabledCapabilities &= ~TitleCapability_CutsceneTheater;
         return TitleAdapter_PublishLifecycle(
             GameTitle::Halo3, generation, lifecycle);
     }
@@ -1324,6 +1330,8 @@ namespace
         lifecycle.enabledCapabilities =
             lifecycle.installed && !lifecycle.teardownRequested
                 ? kOdstRuntimeCapabilities : TitleCapability_None;
+        if (!g_cinematicTlsIndex)
+            lifecycle.enabledCapabilities &= ~TitleCapability_CutsceneTheater;
         return TitleAdapter_PublishLifecycle(
             GameTitle::Halo3ODST, generation, lifecycle);
     }
@@ -1337,6 +1345,7 @@ namespace
         TitleAdapter_PublishLifecycle(
             GameTitle::Halo3ODST, generation, {});
         TitleAdapter_ClearHeartbeat(GameTitle::Halo3ODST, generation);
+        TitleAdapter_ClearCinematicControl(GameTitle::Halo3ODST, generation);
         g_odstLastCamCopyMs.store(0, std::memory_order_release);
         g_odstRuntimeGeneration.store(0, std::memory_order_release);
     }
@@ -4732,33 +4741,35 @@ namespace
             v[i] = v[i] * cosA + c[i] * sinA + axis[i] * d * (1.0f - cosA);
     }
 
-    bool ReadCinematicShot(int32_t& scene, int32_t& shot)
+    CinematicControlState ReadCinematicControl(int32_t& scene, int32_t& shot)
     {
         if (!g_cinematicTlsIndex)
-            return false;
+            return CinematicControlState::Unknown;
         __try
         {
             auto** slots = reinterpret_cast<void**>(__readgsqword(0x58));
             if (!slots)
-                return false;
+                return CinematicControlState::Unknown;
             auto* tls = reinterpret_cast<unsigned char*>(
                 slots[*g_cinematicTlsIndex]);
             if (!tls)
-                return false;
+                return CinematicControlState::Unknown;
             auto* globals = *reinterpret_cast<unsigned char**>(tls + 0xA8);
-            if (!globals || globals[5] == 0)
-                return false;
+            if (!globals)
+                return ClassifyHalo3FamilyCinematicControl(false, false, false);
+            if (globals[5] == 0)
+                return ClassifyHalo3FamilyCinematicControl(true, false, false);
             auto* shotState = *reinterpret_cast<unsigned char**>(
                 tls + g_cinematicShotStateOffset);
             if (!shotState)
-                return false;
+                return ClassifyHalo3FamilyCinematicControl(true, true, false);
             scene = *reinterpret_cast<const int32_t*>(shotState + 4);
             shot = *reinterpret_cast<const int32_t*>(shotState + 8);
-            return true;
+            return ClassifyHalo3FamilyCinematicControl(true, true, true);
         }
         __except (EXCEPTION_EXECUTE_HANDLER)
         {
-            return false;
+            return CinematicControlState::Unknown;
         }
     }
 
@@ -4811,8 +4822,20 @@ namespace
         static thread_local int32_t previousShot = -1;
         int32_t cinematicScene = -1;
         int32_t cinematicShot = -1;
-        const bool cinematic =
-            ReadCinematicShot(cinematicScene, cinematicShot);
+        const CinematicControlState cinematicControl =
+            ReadCinematicControl(cinematicScene, cinematicShot);
+        const bool cinematic = cinematicControl ==
+            CinematicControlState::AuthoredLocked;
+        const uint32_t cinematicGeneration =
+            g_halo3RuntimeGeneration.load(std::memory_order_relaxed);
+        if (cinematicGeneration)
+        {
+            TitleAdapter_PublishCinematicControl(
+                GameTitle::Halo3, cinematicGeneration, cinematicControl,
+                GetTickCount64());
+        }
+        if (cinematic && VR_IsCutsceneTheaterActive())
+            return; // authored camera + stereo eye offsets only in theatre
         const bool cinematicBoundary =
             (cinematic && (!previousCinematic ||
                 cinematicScene != previousScene ||
@@ -5245,6 +5268,10 @@ namespace
             float eyeOrientation[4]{};
             const bool haveEyeView =
                 VR_GetEyeViewOffset(eye,eyePosition,eyeOrientation);
+            ApplyCutsceneTheaterEyeTransform(
+                VR_IsCutsceneTheaterActive(),
+                g_config.cutscene_theater_depth,
+                eyePosition, eyeOrientation);
             const float eyeScale=g_worldScale.load();
             for(int axis=0;axis<3;++axis)
                 pos[axis] += (right[axis]*eyePosition[0] +
@@ -5888,7 +5915,20 @@ namespace
         static thread_local int32_t prevShot = -1;
         int32_t cinematicScene = -1;
         int32_t cinematicShot = -1;
-        const bool cinematic = ReadCinematicShot(cinematicScene, cinematicShot);
+        const CinematicControlState cinematicControl =
+            ReadCinematicControl(cinematicScene, cinematicShot);
+        const bool cinematic = cinematicControl ==
+            CinematicControlState::AuthoredLocked;
+        const uint32_t cinematicGeneration =
+            g_odstRuntimeGeneration.load(std::memory_order_relaxed);
+        if (cinematicGeneration)
+        {
+            TitleAdapter_PublishCinematicControl(
+                GameTitle::Halo3ODST, cinematicGeneration,
+                cinematicControl, GetTickCount64());
+        }
+        if (cinematic && VR_IsCutsceneTheaterActive())
+            return; // keep ODST's pristine authored camera on the theatre screen
         const bool cinematicBoundary =
             (cinematic && (!prevCinematic ||
                 cinematicScene != prevScene || cinematicShot != prevShot)) ||
@@ -6915,6 +6955,10 @@ namespace
             eyeInputsValid = VR_GetEyeViewOffset(
                 eye, eyeInputs[eye].position, eyeInputs[eye].orientation) &&
                 VR_GetEyeFov(eye, fov) && eyeInputsValid;
+            ApplyCutsceneTheaterEyeTransform(
+                VR_IsCutsceneTheaterActive(),
+                g_config.cutscene_theater_depth,
+                eyeInputs[eye].position, eyeInputs[eye].orientation);
             for (float component : eyeInputs[eye].position)
                 eyeInputsValid = isfinite(component) && eyeInputsValid;
             float orientationLength = 0.0f;
@@ -7347,7 +7391,7 @@ namespace
     // and LocateCinematicState reads the exact per-title offset from it. The
     // getter is byte-identical between Halo 3 and ODST. Requiring both unique
     // signatures to resolve the same TLS-index global proves every offset used
-    // by ReadCinematicShot; otherwise automatic shot-facing stays disabled.
+    // by ReadCinematicControl; otherwise cinematic qualification stays Unknown.
     const char* kCinematicInProgressSig =
         "8B 0D ?? ?? ?? ?? 33 D2 65 48 8B 04 25 58 00 00 00 "
         "41 B8 A8 00 00 00 48 8B 04 C8 49 8B 0C 00 48 85 C9 "
@@ -7360,6 +7404,9 @@ namespace
 
     void LocateCinematicState(uintptr_t base, size_t size)
     {
+        // Never retain a pointer from a prior title generation when a new
+        // signature proof fails.
+        g_cinematicTlsIndex = nullptr;
         const uintptr_t getter = sig::Find(base, size, kCinematicInProgressSig);
         const uintptr_t setter = sig::Find(base, size, kCinematicSetShotSig);
         const bool uniqueGetter = getter &&
@@ -7516,6 +7563,7 @@ namespace
         g_autoVrOwned.store(false, std::memory_order_release);
         g_autoVrUserVeto.store(false, std::memory_order_release);
         TitleAdapter_ClearHeartbeat(GameTitle::Halo3, runtimeGeneration);
+        TitleAdapter_ClearCinematicControl(GameTitle::Halo3, runtimeGeneration);
         const MH_STATUS createStatus = MH_CreateHook(
             target, reinterpret_cast<void*>(&CamCopyHook),
             reinterpret_cast<void**>(&g_origCamCopy));
@@ -7525,6 +7573,7 @@ namespace
                 "head tracking unavailable",
                 target, static_cast<int>(createStatus));
             TitleAdapter_ClearHeartbeat(GameTitle::Halo3, runtimeGeneration);
+            TitleAdapter_ClearCinematicControl(GameTitle::Halo3, runtimeGeneration);
             g_halo3RuntimeGeneration.store(0, std::memory_order_release);
             return false;
         }
@@ -7541,6 +7590,7 @@ namespace
             if (removeStatus == MH_OK || removeStatus == MH_ERROR_NOT_CREATED)
                 g_origCamCopy = nullptr;
             TitleAdapter_ClearHeartbeat(GameTitle::Halo3, runtimeGeneration);
+            TitleAdapter_ClearCinematicControl(GameTitle::Halo3, runtimeGeneration);
             g_halo3RuntimeGeneration.store(0, std::memory_order_release);
             return false;
         }
@@ -7550,6 +7600,7 @@ namespace
             MH_DisableHook(target);
             MH_RemoveHook(target);
             TitleAdapter_ClearHeartbeat(GameTitle::Halo3, runtimeGeneration);
+            TitleAdapter_ClearCinematicControl(GameTitle::Halo3, runtimeGeneration);
             g_halo3RuntimeGeneration.store(0, std::memory_order_release);
             g_origCamCopy = nullptr;
             return false;
@@ -12058,6 +12109,11 @@ namespace
             frustum.relativeOrientation = {
                 eyeSnapshot.orientation[0], eyeSnapshot.orientation[1],
                 eyeSnapshot.orientation[2], eyeSnapshot.orientation[3]};
+            ApplyCutsceneTheaterEyeTransform(
+                VR_IsCutsceneTheaterActive(),
+                g_config.cutscene_theater_depth,
+                inputs[eye].position,
+                frustum.relativeOrientation.data());
             inputs[eye].frustum = frustum;
             inputs[eye].rasterCover = SelectReachSymmetricFovCover(
                 frustum.angleLeft, frustum.angleRight,
@@ -12185,7 +12241,7 @@ namespace
 
     // Engine render thread, once per owned outer pass. Deterministic and
     // allocation/log-free per the hot-path rules; the SEH guard mirrors the
-    // accepted Halo 3 ReadCinematicShot TLS read.
+    // accepted Halo 3 ReadCinematicControl TLS read.
     void ReachCineProbeSample()
     {
         if (!g_reachCineProbe.armed.load(std::memory_order_acquire))
@@ -12384,6 +12440,8 @@ namespace
         // across a 65-second cutscene, and the user confirmed in-headset that
         // the first shot orients but every later shot does not. The camera
         // discontinuity test below is what covers the shots it misses.
+        CinematicControlState reachCinematicControl =
+            CinematicControlState::Unknown;
         if (g_reachCineProbe.armed.load(std::memory_order_acquire))
         {
             const uint32_t stateWord = g_reachCineProbe.bufA[0x24 / 4];
@@ -12394,6 +12452,8 @@ namespace
             // and during ordinary play, rises to 1 for the whole cutscene, and
             // drops back to 0 on the frame the cutscene hands back to gameplay.
             const bool cinematicRunning = (stateWord & 0xFFu) != 0;
+            reachCinematicControl = ClassifyReachCinematicControl(
+                true, stateWord);
             bool cut = g_reachCineProbe.cutPrevValid && screenVisible &&
                 (shotStamp != g_reachCineProbe.cutPrevStamp ||
                  !g_reachCineProbe.cutPrevVisible);
@@ -12459,10 +12519,24 @@ namespace
             g_reachCineProbe.cutPrevVisible = screenVisible;
             g_reachCineProbe.cutPrevValid = true;
         }
+        const uint32_t cinematicGeneration =
+            g_reachCamera.generation.load(std::memory_order_relaxed);
+        if (cinematicGeneration)
+        {
+            TitleAdapter_PublishCinematicControl(
+                GameTitle::HaloReach, cinematicGeneration,
+                reachCinematicControl, GetTickCount64());
+        }
         memcpy(headCenter, stockCompact, kReachCompactCameraBytes);
-        ApplyVrTurn(tracking.pad);
-        if (!ReachApplyHeadLook(headCenter, tracking))
-            return false;
+        const bool authoredTheater =
+            reachCinematicControl == CinematicControlState::AuthoredLocked &&
+            VR_IsCutsceneTheaterActive();
+        if (!authoredTheater)
+        {
+            ApplyVrTurn(tracking.pad);
+            if (!ReachApplyHeadLook(headCenter, tracking))
+                return false;
+        }
         *reinterpret_cast<float*>(headCenter + 0x28) = cullCover.verticalFov;
 
         ReachCompactCameraObservation transformed{};
@@ -14742,6 +14816,9 @@ namespace
 
     bool RemoveReachCameraCore()
     {
+        TitleAdapter_ClearCinematicControl(
+            GameTitle::HaloReach,
+            g_reachCamera.generation.load(std::memory_order_acquire));
         g_reachCamera.teardownRequested.store(
             true, std::memory_order_release);
         g_reachCamera.armed.store(false, std::memory_order_release);
@@ -16592,6 +16669,8 @@ namespace
         lifecycle.enabledCapabilities =
             lifecycle.installed && !lifecycle.teardownRequested
                 ? kReachRuntimeCapabilities : TitleCapability_None;
+        if (!g_reachCineProbe.armed.load(std::memory_order_acquire))
+            lifecycle.enabledCapabilities &= ~TitleCapability_CutsceneTheater;
 
         // Publish ONLY on a real state change. Republishing identical state
         // every 50 ms poll re-opens the runtime publication sequence
@@ -16962,6 +17041,9 @@ namespace
     {
         if (!soleReachTitle || !base || !generation)
         {
+            TitleAdapter_ClearCinematicControl(
+                GameTitle::HaloReach,
+                g_reachCamera.generation.load(std::memory_order_acquire));
             g_reachCineProbe.armed.store(false, std::memory_order_release);
             g_reachCineProbe.cutPrevValid = false;
             g_reachCineProbe.cutPrevPoseValid = false;
@@ -17526,6 +17608,8 @@ namespace
                 PublishHalo3Lifecycle(true, false, true);
                 TitleAdapter_ClearHeartbeat(
                     GameTitle::Halo3, haloGeneration);
+                TitleAdapter_ClearCinematicControl(
+                    GameTitle::Halo3, haloGeneration);
                 g_halo3LastCamCopyMs.store(0, std::memory_order_release);
                 // Stop new camera transactions immediately. Presentation
                 // detaches on the render thread in Game_AutoVrTick.
@@ -18080,6 +18164,23 @@ bool Game_HasTitleCapability(uint32_t requiredCapabilities)
     const uint32_t enabled = TitleRuntimeMaskUnarmedCapabilities(
         runtime.runtime, kRuntimeCapabilitiesRequiringArm);
     return (enabled & requiredCapabilities) == requiredCapabilities;
+}
+CinematicControlState Game_GetCinematicControlState()
+{
+    const uint64_t now = GetTickCount64();
+    const TitleAdapterRuntimeSnapshot runtime = RuntimeSnapshot(now);
+    if (runtime.ownershipPending ||
+        runtime.runtime.qualifyingOwnerCount != 1)
+    {
+        return CinematicControlState::Unknown;
+    }
+    const uint32_t enabled = TitleRuntimeMaskUnarmedCapabilities(
+        runtime.runtime, kRuntimeCapabilitiesRequiringArm);
+    const CinematicControlPublication publication =
+        TitleAdapter_GetCinematicControlPublication(runtime.runtime.owner);
+    return ResolveCinematicControl(
+        publication, runtime.runtime.owner, runtime.runtime.generation,
+        enabled, now);
 }
 bool Game_CanToggleImmersiveView()
 {

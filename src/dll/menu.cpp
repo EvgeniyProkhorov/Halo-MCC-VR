@@ -158,6 +158,7 @@ namespace
         Cat_Welcome = 0,
         Cat_Status,
         Cat_Comfort,
+        Cat_Theatre,
         Cat_Controls,
         Cat_WeaponAim,
         Cat_Crosshair,
@@ -182,6 +183,7 @@ namespace
         {"Welcome",       "Read me first."},
         {"Status",        "What the mod is doing right now, and the switches you reach for mid-game."},
         {"Comfort",       "The flat screen you see in menus, and how head motion feels."},
+        {"3D Theatre",    "A room-fixed stereo screen used only when the game locks the cinematic camera."},
         {"Controls",      "Turning, gestures, and controller vibration."},
         {"Weapon & Aim",  "Where the gun sits in your hand, and two-handed aiming."},
         {"Crosshair",     "The floating reticle that shows where the weapon really shoots."},
@@ -517,6 +519,12 @@ namespace
             g_config.show_welcome = !dontShow;
             changed = true;
         }
+        changed |= ImGui::Checkbox(
+            "Stereo 3D Theatre for cutscenes",
+            &g_config.cutscene_theater_enabled);
+        ImGui::TextDisabled(
+            "On by default. Player-controlled cameras always stay immersive.\n"
+            "Open 3D Theatre in the left column for depth and screen controls.");
         ImGui::Spacing();
         ImGui::TextUnformatted(kWelcomeCloseHint);
         ImGui::Separator();
@@ -609,6 +617,45 @@ namespace
         ImGui::Text("Startup");
         changed |= ImGui::Checkbox("Auto-enter VR on level load", &g_config.auto_vr);
         ImGui::TextDisabled("Turns head tracking + stereo on when a level starts and off in the menu.");
+        }
+
+        if (g_activeCategory == Cat_Theatre)
+        {
+        changed |= ImGui::Checkbox(
+            "Enable Stereo 3D Theatre for cutscenes",
+            &g_config.cutscene_theater_enabled);
+        ImGui::TextDisabled(
+            "Applies to every supported game, including future additions.\n"
+            "Only an engine-confirmed cinematic with no player camera control qualifies.\n"
+            "Scripted gameplay, vehicles, death cameras, loading and pause stay immersive.");
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Text("Stereo depth");
+        float depthPercent = g_config.cutscene_theater_depth * 100.0f;
+        if (ImGui::SliderFloat(
+                "Depth", &depthPercent, 0.0f, 200.0f, "%.0f%%"))
+        {
+            g_config.cutscene_theater_depth = depthPercent / 100.0f;
+            changed = true;
+        }
+        changed |= ImGui::Checkbox(
+            "Flip Depth (swap left and right eyes)",
+            &g_config.cutscene_theater_flip_depth);
+        ImGui::TextDisabled(
+            "0%% is flat, 100%% uses your headset's natural eye spacing,\n"
+            "and 200%% doubles the separation. Flip only if depth looks reversed.");
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Text("Room-fixed screen");
+        changed |= ImGui::SliderFloat(
+            "Screen width (m)##theatre",
+            &g_config.cutscene_theater_width_m, 0.5f, 20.0f, "%.1f");
+        changed |= ImGui::SliderFloat(
+            "Screen distance (m)##theatre",
+            &g_config.cutscene_theater_distance_m, 0.3f, 20.0f, "%.1f");
+        ImGui::TextDisabled(
+            "Defaults: 6.0 m wide at 4.0 m away. Height follows the game's\n"
+            "native image shape; the picture is never stretched or cropped to 16:9.");
         }
 
         if (g_activeCategory == Cat_Controls)

@@ -24,7 +24,8 @@ namespace
         TitleCapability_RuntimeModes |
         TitleCapability_RoomScale |
         TitleCapability_ControllerInput |
-        TitleCapability_Haptics;
+        TitleCapability_Haptics |
+        TitleCapability_CutsceneTheater;
     constexpr uint32_t kHalo3AdmissionCapabilities =
         TitleCapability_ControllerInput;
     // Reach camera + motion core: stereo, tracked look/turn, locomotion input,
@@ -39,7 +40,8 @@ namespace
         TitleCapability_RuntimeModes |
         TitleCapability_RoomScale |
         TitleCapability_ControllerInput |
-        TitleCapability_Haptics;
+        TitleCapability_Haptics |
+        TitleCapability_CutsceneTheater;
 #if HALOMCCVR_EXPERIMENTAL_ODST_BRINGUP
     constexpr uint32_t kOdstAdmissionCapabilities =
         TitleCapability_ControllerInput;

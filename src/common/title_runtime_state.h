@@ -54,7 +54,8 @@ constexpr uint32_t kTitleRuntimeKnownCapabilities =
     TitleCapability_RuntimeModes |
     TitleCapability_RoomScale |
     TitleCapability_ControllerInput |
-    TitleCapability_Haptics;
+    TitleCapability_Haptics |
+    TitleCapability_CutsceneTheater;
 
 struct TitleRuntimeCandidate
 {

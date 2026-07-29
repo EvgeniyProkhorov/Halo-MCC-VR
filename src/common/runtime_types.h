@@ -27,6 +27,17 @@ enum class RuntimeMode : uint8_t
     Unsupported,
 };
 
+// A title adapter's proof of who owns the active camera. Shared presentation
+// code may enter the cutscene theatre only for AuthoredLocked. Unknown is a
+// deliberate fail-open state: keep today's immersive view when proof is absent
+// or stale instead of guessing from camera motion, black bars, or title names.
+enum class CinematicControlState : uint8_t
+{
+    Unknown = 0,
+    PlayerControlled,
+    AuthoredLocked,
+};
+
 enum class VrHand : uint8_t
 {
     Left = 0,
@@ -44,4 +55,5 @@ enum TitleCapability : uint32_t
     TitleCapability_RoomScale = 1u << 5,
     TitleCapability_ControllerInput = 1u << 6,
     TitleCapability_Haptics = 1u << 7,
+    TitleCapability_CutsceneTheater = 1u << 8,
 };

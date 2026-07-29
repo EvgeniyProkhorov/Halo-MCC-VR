@@ -85,6 +85,9 @@ void VR_ToggleScreenFollow();
 // submits the two retained images as an OpenXR projection layer.
 void VR_ToggleStereo();
 bool VR_IsStereoEnabled();
+// True only while the shared compositor is presenting a proven authored,
+// player-locked cinematic on its room-fixed stereo theatre screen.
+bool VR_IsCutsceneTheaterActive();
 // True only for the begun OpenXR frame the runtime asked us to render. A
 // synchronized/unfocused session commonly publishes false while the headset is
 // idle; game hooks must not treat the resulting absent eye raster as failure.

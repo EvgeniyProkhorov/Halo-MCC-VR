@@ -13,6 +13,7 @@
 #include <windows.h>
 
 #include "config.h"
+#include "cutscene_theater_logic.h"
 #include "frame_pacing_logic.h"
 #include "hud_layout_logic.h"
 #include "input_logic.h"
@@ -2347,8 +2348,119 @@ int main()
             "title-runtime availability bits are stable and non-overlapping");
         Check(static_cast<uint32_t>(TitleCapability_ControllerInput) == 0x40u &&
                   static_cast<uint32_t>(TitleCapability_Haptics) == 0x80u &&
-                  kTitleRuntimeKnownCapabilities == 0xFFu,
-            "controller input and haptics extend the known capability mask exactly");
+                  static_cast<uint32_t>(TitleCapability_CutsceneTheater) == 0x100u &&
+                  kTitleRuntimeKnownCapabilities == 0x1FFu,
+            "controller input, haptics, and cutscene theatre extend the known capability mask exactly");
+    }
+
+    {
+        const CinematicControlPublication locked{
+            GameTitle::Halo4, 77, CinematicControlState::AuthoredLocked, 1000};
+        const uint32_t capability = TitleCapability_CutsceneTheater;
+        Check(ResolveCinematicControl(
+                  locked, GameTitle::Halo4, 77, capability, 1100) ==
+                  CinematicControlState::AuthoredLocked,
+            "a mock future title receives the generic theatre contract without a title check");
+        Check(CutsceneTheaterRequested(
+                  true, CinematicControlState::AuthoredLocked) &&
+              !CutsceneTheaterRequested(
+                  false, CinematicControlState::AuthoredLocked) &&
+              !CutsceneTheaterRequested(
+                  true, CinematicControlState::PlayerControlled) &&
+              !CutsceneTheaterRequested(
+                  true, CinematicControlState::Unknown),
+            "only enabled AuthoredLocked state requests theatre presentation");
+        Check(ClassifyHalo3FamilyCinematicControl(true, true, true) ==
+                  CinematicControlState::AuthoredLocked &&
+              ClassifyHalo3FamilyCinematicControl(true, false, false) ==
+                  CinematicControlState::PlayerControlled &&
+              ClassifyHalo3FamilyCinematicControl(false, false, false) ==
+                  CinematicControlState::Unknown &&
+              ClassifyHalo3FamilyCinematicControl(true, true, false) ==
+                  CinematicControlState::Unknown,
+            "Halo 3 and ODST require both their cinematic flag and shot-state proof");
+        Check(ClassifyReachCinematicControl(true, 1) ==
+                  CinematicControlState::AuthoredLocked &&
+              ClassifyReachCinematicControl(true, 0) ==
+                  CinematicControlState::PlayerControlled &&
+              ClassifyReachCinematicControl(false, 1) ==
+                  CinematicControlState::Unknown,
+            "Reach qualifies only its proven cinematic-globals +0x24 state");
+        CinematicControlPublication publication = locked;
+        publication.state = CinematicControlState::PlayerControlled;
+        Check(ResolveCinematicControl(
+                  publication, GameTitle::Halo4, 77, capability, 1100) ==
+                  CinematicControlState::PlayerControlled,
+            "player-controlled sequences remain immersive");
+        publication.state = CinematicControlState::Unknown;
+        Check(ResolveCinematicControl(
+                  publication, GameTitle::Halo4, 77, capability, 1100) ==
+                  CinematicControlState::Unknown,
+            "unproven sequences remain immersive");
+        Check(ResolveCinematicControl(
+                  locked, GameTitle::Halo4, 78, capability, 1100) ==
+                  CinematicControlState::Unknown &&
+              ResolveCinematicControl(
+                  locked, GameTitle::Halo3, 77, capability, 1100) ==
+                  CinematicControlState::Unknown &&
+              ResolveCinematicControl(
+                  locked, GameTitle::Halo4, 77, TitleCapability_None, 1100) ==
+                  CinematicControlState::Unknown &&
+              ResolveCinematicControl(
+                  locked, GameTitle::Halo4, 77, capability, 1501) ==
+                  CinematicControlState::Unknown,
+            "title transitions, generation changes, capability loss, and stale state exit theatre");
+
+        float position[3]{0.032f, -0.004f, 0.002f};
+        float orientation[4]{0.1f, 0.2f, 0.3f, 0.9f};
+        ApplyCutsceneTheaterEyeTransform(true, 0.0f, position, orientation);
+        Check(position[0] == 0.0f && position[1] == 0.0f &&
+                  position[2] == 0.0f && orientation[0] == 0.0f &&
+                  orientation[1] == 0.0f && orientation[2] == 0.0f &&
+                  orientation[3] == 1.0f,
+            "zero theatre depth is flat and uses parallel eye cameras");
+        float doublePosition[3]{0.032f, -0.004f, 0.002f};
+        float doubleOrientation[4]{0.1f, 0.2f, 0.3f, 0.9f};
+        ApplyCutsceneTheaterEyeTransform(
+            true, 2.0f, doublePosition, doubleOrientation);
+        Check(std::fabs(doublePosition[0] - 0.064f) < 0.00001f &&
+                  std::fabs(doublePosition[1] + 0.008f) < 0.00001f &&
+                  std::fabs(doublePosition[2] - 0.004f) < 0.00001f,
+            "two hundred percent theatre depth doubles natural eye separation");
+        float unchangedPosition[3]{1.0f, 2.0f, 3.0f};
+        float unchangedOrientation[4]{0.1f, 0.2f, 0.3f, 0.9f};
+        ApplyCutsceneTheaterEyeTransform(
+            false, 0.0f, unchangedPosition, unchangedOrientation);
+        Check(unchangedPosition[0] == 1.0f && unchangedOrientation[0] == 0.1f,
+            "inactive theatre leaves immersive eye transforms untouched");
+        Check(CutsceneTheaterImageIndex(0, false) == 0 &&
+                  CutsceneTheaterImageIndex(1, false) == 1 &&
+                  CutsceneTheaterImageIndex(0, true) == 1 &&
+                  CutsceneTheaterImageIndex(1, true) == 0,
+            "Flip Depth swaps only the per-eye image slices");
+        Check(std::fabs(CutsceneTheaterHeight(6.0f, 2912, 2100) -
+                    6.0f * 2100.0f / 2912.0f) < 0.00001f &&
+                  CutsceneTheaterHeight(6.0f, 0, 2100) == 0.0f,
+            "theatre height preserves the native render-image aspect ratio");
+
+        CutsceneTheaterTransition transition;
+        Check(!transition.Update(1000, true).active,
+            "theatre entry starts by fading the immersive view");
+        const auto entryHalf = transition.Update(1050, true);
+        const auto entered = transition.Update(1100, true);
+        const auto entryFadeIn = transition.Update(1150, true);
+        const auto entryDone = transition.Update(1200, true);
+        Check(std::fabs(entryHalf.fadeAlpha - 0.5f) < 0.001f &&
+                  entered.active && entered.switched && entered.fadeAlpha == 1.0f &&
+                  entryFadeIn.active &&
+                  std::fabs(entryFadeIn.fadeAlpha - 0.5f) < 0.001f &&
+                  entryDone.active && entryDone.fadeAlpha == 0.0f,
+            "theatre entry uses a 100 ms fade out and 100 ms fade in");
+        const auto exitHalf = transition.Update(1250, false);
+        const auto exited = transition.Update(1300, false);
+        Check(exitHalf.active && std::fabs(exitHalf.fadeAlpha - 0.5f) < 0.001f &&
+                  !exited.active && exited.switched && exited.fadeAlpha == 1.0f,
+            "capability loss begins a comfort-faded theatre exit");
     }
 
     {
@@ -2360,14 +2472,16 @@ int main()
             TitleCapability_ControllerAim |
             TitleCapability_RuntimeModes |
             TitleCapability_ControllerInput |
-            TitleCapability_Haptics;
+            TitleCapability_Haptics |
+            TitleCapability_CutsceneTheater;
         constexpr uint32_t kArmRequiredCapabilities =
             TitleCapability_Stereo |
             TitleCapability_ControllerAim |
             TitleCapability_Hud |
             TitleCapability_ArmIk |
             TitleCapability_RoomScale |
-            TitleCapability_Haptics;
+            TitleCapability_Haptics |
+            TitleCapability_CutsceneTheater;
         constexpr uint32_t kUnarmedCapabilities =
             TitleCapability_RuntimeModes |
             TitleCapability_ControllerInput;
@@ -3374,6 +3488,8 @@ int main()
     Check(halo3 && halo3->admissionCapabilities ==
               TitleCapability_ControllerInput,
         "Halo 3 retains ordinary shared-controller admission");
+    Check(halo3 && (halo3->capabilities & TitleCapability_CutsceneTheater) != 0,
+        "Halo 3 advertises the proven cutscene-theatre capability");
 
     const TitleDescriptor* odst =
         TitleRegistry_FromModuleName(L"N:/MCC/HALO3ODST.DLL");
@@ -3412,8 +3528,9 @@ int main()
                TitleCapability_ArmIk | TitleCapability_Hud |
                TitleCapability_RuntimeModes |
                TitleCapability_RoomScale |
-               TitleCapability_ControllerInput | TitleCapability_Haptics),
-        "Reach advertises controller aim and arm IK with its 3D motion core");
+               TitleCapability_ControllerInput | TitleCapability_Haptics |
+               TitleCapability_CutsceneTheater),
+        "Reach advertises controller aim, arm IK, and proven cutscene theatre");
     Check(reach && (reach->capabilities &
               TitleCapability_Hud) != 0u,
         "Reach advertises native HUD capability now that its layout adapter "
@@ -3550,6 +3667,9 @@ int main()
     constexpr const char* universalKeys[] = {
         "config_version", "haptic_intensity", "headset_smoothing",
         "aim_stabilization", "screen_width_m", "screen_distance_m",
+        "cutscene_theater_enabled", "cutscene_theater_depth",
+        "cutscene_theater_flip_depth", "cutscene_theater_width_m",
+        "cutscene_theater_distance_m",
         "turn_smooth", "turn_snap_deg", "turn_smooth_deg_s", "dpad_hand",
         "crosshair", "crosshair_distance_m", "crosshair_size_deg",
         "reticle_r", "reticle_g", "reticle_b", "kill_reticle",
@@ -3588,6 +3708,42 @@ int main()
     Check(g_config.aim_stabilization == 0.0f, "Aim stabilization is safely clamped");
     Check(g_config.aa_mode == 4,
         "SMAA 1x plus FXAA Strong survives config loading");
+    Check(g_config.cutscene_theater_enabled &&
+              g_config.cutscene_theater_depth == 1.0f &&
+              !g_config.cutscene_theater_flip_depth &&
+              g_config.cutscene_theater_width_m == 6.0f &&
+              g_config.cutscene_theater_distance_m == 4.0f,
+        "legacy configs inherit the enabled cutscene-theatre defaults");
+
+    {
+        std::ofstream file(primary);
+        file << "config_version = 5\n";
+        file << "cutscene_theater_enabled = 0\n";
+        file << "cutscene_theater_depth = 9\n";
+        file << "cutscene_theater_flip_depth = 1\n";
+        file << "cutscene_theater_width_m = 0.1\n";
+        file << "cutscene_theater_distance_m = 99\n";
+    }
+    ConfigLoad(primary.c_str());
+    Check(!g_config.cutscene_theater_enabled &&
+              g_config.cutscene_theater_depth == 2.0f &&
+              g_config.cutscene_theater_flip_depth &&
+              g_config.cutscene_theater_width_m == 0.5f &&
+              g_config.cutscene_theater_distance_m == 20.0f,
+        "cutscene-theatre settings load and clamp independently");
+    g_config.cutscene_theater_enabled = true;
+    g_config.cutscene_theater_depth = 1.25f;
+    g_config.cutscene_theater_flip_depth = false;
+    g_config.cutscene_theater_width_m = 6.5f;
+    g_config.cutscene_theater_distance_m = 4.5f;
+    ConfigSave();
+    ConfigLoad(primary.c_str());
+    Check(g_config.cutscene_theater_enabled &&
+              g_config.cutscene_theater_depth == 1.25f &&
+              !g_config.cutscene_theater_flip_depth &&
+              g_config.cutscene_theater_width_m == 6.5f &&
+              g_config.cutscene_theater_distance_m == 4.5f,
+        "cutscene-theatre settings survive a save/reload round trip");
 
     // resolution_scale is free-form: a hand-typed value must survive exactly,
     // not snap to one of the six installer tiers (the pre-2026-07-20 behavior).
@@ -3667,7 +3823,7 @@ int main()
     ConfigSave();
     ConfigLoad(primary.c_str());
     Check(std::fabs(g_config.scope_zoom - 11.87f) < 1e-4f,
-        "Migrated scope zoom is not strengthened again after saving version 4");
+        "Migrated scope zoom is not strengthened again after saving version 5");
 
     {
         std::ofstream file(primary);
@@ -3727,7 +3883,12 @@ int main()
           g_config.scope_screen_right_m == defaults.scope_screen_right_m &&
           g_config.scope_screen_up_m == defaults.scope_screen_up_m &&
           g_config.scope_screen_forward_m == defaults.scope_screen_forward_m &&
-          g_config.scope_refresh_divisor == defaults.scope_refresh_divisor,
+          g_config.scope_refresh_divisor == defaults.scope_refresh_divisor &&
+          g_config.cutscene_theater_enabled == defaults.cutscene_theater_enabled &&
+          g_config.cutscene_theater_depth == defaults.cutscene_theater_depth &&
+          g_config.cutscene_theater_flip_depth == defaults.cutscene_theater_flip_depth &&
+          g_config.cutscene_theater_width_m == defaults.cutscene_theater_width_m &&
+          g_config.cutscene_theater_distance_m == defaults.cutscene_theater_distance_m,
         "The recreated config file carries the struct defaults");
     std::filesystem::remove_all(configDir);
 

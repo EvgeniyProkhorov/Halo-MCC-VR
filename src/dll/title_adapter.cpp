@@ -1,5 +1,6 @@
 #include "title_adapter.h"
 
+#include <array>
 #include <atomic>
 #include <cstdio>
 #include <cstring>
@@ -17,6 +18,18 @@ namespace
     std::atomic<GameTitle> g_activeTitle{ GameTitle::None };
     std::atomic<uint64_t> g_activeTitleEpochMs{ 0 };
     std::atomic<RuntimeMode> g_runtimeMode{ RuntimeMode::Shell };
+
+    struct CinematicControlSlot
+    {
+        // High dword = module generation, low byte = CinematicControlState.
+        // A tiny sequence lock keeps state and heartbeat from different camera
+        // samples from ever being combined by the compositor.
+        std::atomic<uint64_t> sequence{0};
+        std::atomic<uint64_t> stamp{0};
+        std::atomic<uint64_t> heartbeatMs{0};
+    };
+    std::array<CinematicControlSlot, kTitleRuntimeSlotCount>
+        g_cinematicControlSlots{};
 
     GameTitle UniqueAvailableTitle(uint32_t availabilityMask)
     {
@@ -209,6 +222,90 @@ bool TitleAdapter_PublishHeartbeat(
 bool TitleAdapter_ClearHeartbeat(GameTitle title, uint32_t generation)
 {
     return g_titleRuntime.ClearHeartbeat(title, generation);
+}
+
+bool TitleAdapter_PublishCinematicControl(
+    GameTitle title, uint32_t generation,
+    CinematicControlState state, uint64_t heartbeatMs)
+{
+    const size_t slot = TitleRuntimeSlotIndex(title);
+    if (slot >= kTitleRuntimeSlotCount || !generation || !heartbeatMs ||
+        state > CinematicControlState::AuthoredLocked ||
+        g_titleRuntime.Generation(title) != generation)
+    {
+        return false;
+    }
+    CinematicControlSlot& publication = g_cinematicControlSlots[slot];
+    uint64_t sequence = publication.sequence.load(std::memory_order_acquire);
+    if ((sequence & 1u) || !publication.sequence.compare_exchange_strong(
+            sequence, sequence + 1, std::memory_order_acq_rel))
+    {
+        return false;
+    }
+    publication.heartbeatMs.store(heartbeatMs, std::memory_order_relaxed);
+    const uint64_t stamp = (static_cast<uint64_t>(generation) << 32) |
+        static_cast<uint8_t>(state);
+    publication.stamp.store(stamp, std::memory_order_relaxed);
+    publication.sequence.store(sequence + 2, std::memory_order_release);
+    return true;
+}
+
+void TitleAdapter_ClearCinematicControl(
+    GameTitle title, uint32_t generation)
+{
+    const size_t slot = TitleRuntimeSlotIndex(title);
+    if (slot >= kTitleRuntimeSlotCount)
+        return;
+    CinematicControlSlot& publication = g_cinematicControlSlots[slot];
+    const uint64_t stamp = publication.stamp.load(std::memory_order_acquire);
+    if (generation && static_cast<uint32_t>(stamp >> 32) != generation)
+        return;
+    uint64_t sequence = publication.sequence.load(std::memory_order_acquire);
+    if ((sequence & 1u) || !publication.sequence.compare_exchange_strong(
+            sequence, sequence + 1, std::memory_order_acq_rel))
+    {
+        return;
+    }
+    publication.stamp.store(0, std::memory_order_relaxed);
+    publication.heartbeatMs.store(0, std::memory_order_relaxed);
+    publication.sequence.store(sequence + 2, std::memory_order_release);
+}
+
+CinematicControlPublication TitleAdapter_GetCinematicControlPublication(
+    GameTitle title)
+{
+    CinematicControlPublication result{};
+    result.title = title;
+    const size_t slot = TitleRuntimeSlotIndex(title);
+    if (slot >= kTitleRuntimeSlotCount)
+        return result;
+    const CinematicControlSlot& publication = g_cinematicControlSlots[slot];
+    for (uint32_t attempt = 0; attempt < kAdapterSnapshotReadAttempts; ++attempt)
+    {
+        const uint64_t before = publication.sequence.load(
+            std::memory_order_acquire);
+        if (before & 1u)
+            continue;
+        const uint64_t stamp = publication.stamp.load(
+            std::memory_order_relaxed);
+        const uint64_t heartbeat = publication.heartbeatMs.load(
+            std::memory_order_relaxed);
+        const uint64_t after = publication.sequence.load(
+            std::memory_order_acquire);
+        if (before != after)
+            continue;
+        const uint8_t rawState = static_cast<uint8_t>(stamp & 0xFFu);
+        if (rawState > static_cast<uint8_t>(
+                CinematicControlState::AuthoredLocked))
+        {
+            return result;
+        }
+        result.generation = static_cast<uint32_t>(stamp >> 32);
+        result.state = static_cast<CinematicControlState>(rawState);
+        result.heartbeatMs = heartbeat;
+        return result;
+    }
+    return result;
 }
 
 TitleAdapterRuntimeSnapshot TitleAdapter_GetRuntimeSnapshot(

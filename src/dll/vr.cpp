@@ -35,6 +35,7 @@
 #include "../common/reach_chud_logic.h"
 #include "../common/log.h"
 #include "../common/config.h"
+#include "../common/cutscene_theater_logic.h"
 #include "../common/frame_pacing_logic.h"
 #include "../common/input_logic.h"
 #include "../common/scope_logic.h"
@@ -310,6 +311,12 @@ namespace
     std::atomic<int> g_pauseRequest{-1};
     std::atomic<bool> g_pausePresentation{false};
     std::atomic<bool> g_pauseTarget{false};
+    std::atomic<bool> g_cutsceneTheaterActive{false};
+    CutsceneTheaterTransition g_cutsceneTheaterTransition;
+    // Render-thread-only admission latches. A failed entry recenter blocks only
+    // that one qualified cinematic; the next unqualified frame clears it.
+    bool g_cutsceneTheaterWasQualified = false;
+    bool g_cutsceneTheaterEntryBlocked = false;
 
     // Latest head pose in the LOCAL space, captured every frame on the render
     // thread and read by the game camera hook (M1) on the game thread — hence
@@ -6252,7 +6259,7 @@ float4 ps_scope_linearize(VSOut i):SV_Target { return paint(i.uv,true); }
         if (!g_preparedFrame.begun)
             return;
         const XrFrameState fs = g_preparedFrame.state;
-        const float comfortFadeAlpha = UpdatePauseTransition();
+        float comfortFadeAlpha = UpdatePauseTransition();
 
         // M2: per-eye pose + field of view for this frame (foundation for
         // stereo rendering — not used to render yet).
@@ -6290,6 +6297,7 @@ float4 ps_scope_linearize(VSOut i):SV_Target { return paint(i.uv,true); }
         }
 
         XrCompositionLayerQuad screenQuad, menuQuad, reticleQuad, scopeQuad, fadeQuad;
+        XrCompositionLayerQuad theaterQuads[2]{};
         XrCompositionLayerProjection projection{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
         // Reused across frames (Frame runs only on the render thread) so the
         // per-frame layer assembly allocates nothing in steady state.
@@ -6471,6 +6479,47 @@ float4 ps_scope_linearize(VSOut i):SV_Target { return paint(i.uv,true); }
                 const bool pausedPresentation = g_pausePresentation.load();
                 const bool stereo = !pausedPresentation && g_stereoEnabled.load() && viewsValid &&
                                     g_stereoChain != XR_NULL_HANDLE && Game_IsHeadTracking();
+                const bool theaterQualified = stereo && CutsceneTheaterRequested(
+                    g_config.cutscene_theater_enabled,
+                    Game_GetCinematicControlState());
+                if (theaterQualified && !g_cutsceneTheaterWasQualified)
+                {
+                    g_cutsceneTheaterEntryBlocked =
+                        !TryRecenter(fs.predictedDisplayTime);
+                    if (g_cutsceneTheaterEntryBlocked)
+                    {
+                        LOG("cutscene theatre: current head pose unavailable; "
+                            "keeping this cinematic immersive");
+                    }
+                }
+                else if (!theaterQualified)
+                {
+                    g_cutsceneTheaterEntryBlocked = false;
+                }
+                g_cutsceneTheaterWasQualified = theaterQualified;
+
+                const CutsceneTheaterTransitionOutput theaterTransition =
+                    g_cutsceneTheaterTransition.Update(
+                        GetTickCount64(), theaterQualified &&
+                            !g_cutsceneTheaterEntryBlocked);
+                g_cutsceneTheaterActive.store(
+                    theaterTransition.active, std::memory_order_release);
+                comfortFadeAlpha = std::max(
+                    comfortFadeAlpha, theaterTransition.fadeAlpha);
+                if (theaterTransition.switched)
+                {
+                    if (theaterTransition.active)
+                    {
+                        LOG("cutscene theatre: entered room-fixed stereo presentation");
+                    }
+                    else
+                    {
+                        LOG("cutscene theatre: returned to immersive presentation");
+                        Game_Recenter();
+                    }
+                }
+                const bool theaterPresentation =
+                    theaterTransition.active && g_haveCenter;
                 if (stereo)
                 {
 #if HALOMCCVR_EXPERIMENTAL_REACH_RENDER_CANDIDATE
@@ -6861,14 +6910,42 @@ float4 ps_scope_linearize(VSOut i):SV_Target { return paint(i.uv,true); }
                             (!reachTitle || reachProjectionAdmitted);
                         if (reachProjectionAdmitted)
                         {
-                            layers.push_back(
-                                reinterpret_cast<XrCompositionLayerBaseHeader*>(
-                                    &projection));
+                            if (theaterPresentation)
+                            {
+                                for (uint32_t eye = 0; eye < 2; ++eye)
+                                {
+                                    theaterQuads[eye] = MakeQuad(
+                                        g_stereoChain, static_cast<int32_t>(g_stereoW),
+                                        static_cast<int32_t>(g_stereoH),
+                                        g_config.cutscene_theater_width_m,
+                                        g_config.cutscene_theater_distance_m,
+                                        0.0f, 0, false);
+                                    theaterQuads[eye].eyeVisibility = eye == 0
+                                        ? XR_EYE_VISIBILITY_LEFT
+                                        : XR_EYE_VISIBILITY_RIGHT;
+                                    theaterQuads[eye].subImage.imageArrayIndex =
+                                        CutsceneTheaterImageIndex(
+                                            eye, g_config.cutscene_theater_flip_depth);
+                                    theaterQuads[eye].size.height =
+                                        CutsceneTheaterHeight(
+                                            g_config.cutscene_theater_width_m,
+                                            g_stereoW, g_stereoH);
+                                    layers.push_back(
+                                        reinterpret_cast<XrCompositionLayerBaseHeader*>(
+                                            &theaterQuads[eye]));
+                                }
+                            }
+                            else
+                            {
+                                layers.push_back(
+                                    reinterpret_cast<XrCompositionLayerBaseHeader*>(
+                                        &projection));
+                            }
                         }
                         const bool reticleChainAdmitted = reticleUploadAdmitted;
                         const bool reticleQuadSubmitted =
                             reticleOwnerAdmitted && g_config.crosshair &&
-                            haveAim && reticleChainAdmitted;
+                            haveAim && reticleChainAdmitted && !theaterPresentation;
 #if HALOMCCVR_EXPERIMENTAL_REACH_RENDER_CANDIDATE
                         // The 2026-07-27 objective blackout is proven NOT to be
                         // the capture, the class resolution, or the redirect:
@@ -6973,6 +7050,7 @@ float4 ps_scope_linearize(VSOut i):SV_Target { return paint(i.uv,true); }
                         }
 
                         if (reachProjectionAdmitted &&
+                            !theaterPresentation &&
                             Game_AllowsSharedGameplayFeatures() &&
                             g_config.scope_enabled &&
                             g_scopeActive.load() &&
@@ -7803,6 +7881,11 @@ bool VR_IsStereoEnabled()
     return g_stereoEnabled.load();
 }
 
+bool VR_IsCutsceneTheaterActive()
+{
+    return g_cutsceneTheaterActive.load(std::memory_order_acquire);
+}
+
 bool VR_ShouldRenderPreparedFrame()
 {
     return g_preparedShouldRender.load(std::memory_order_acquire);
@@ -7829,6 +7912,10 @@ void VR_DetachGamePresentation()
     // down the session or shared MCC D3D hooks: the flat shell still needs
     // them. Only disarm Halo's per-eye work and release its retained render
     // target so a different MCC engine can own the shared device cleanly.
+    g_cutsceneTheaterActive.store(false, std::memory_order_release);
+    g_cutsceneTheaterTransition.Reset(false);
+    g_cutsceneTheaterWasQualified = false;
+    g_cutsceneTheaterEntryBlocked = false;
     if (g_stereoEnabled.load())
         VR_ToggleStereo();
     else

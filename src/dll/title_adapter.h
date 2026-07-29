@@ -2,6 +2,7 @@
 
 #include "../common/title_registry.h"
 #include "../common/title_runtime_state.h"
+#include "../common/cutscene_theater_logic.h"
 
 struct TitleAdapterRuntimeSnapshot
 {
@@ -30,6 +31,17 @@ bool TitleAdapter_PublishMode(
 bool TitleAdapter_PublishHeartbeat(
     GameTitle title, uint32_t generation, uint64_t heartbeatMs);
 bool TitleAdapter_ClearHeartbeat(GameTitle title, uint32_t generation);
+
+// Universal cutscene-camera contract. Title adapters publish only verified
+// engine state; the shared compositor decides presentation without title-name
+// checks. Publications are generation tagged and become Unknown when stale.
+bool TitleAdapter_PublishCinematicControl(
+    GameTitle title, uint32_t generation,
+    CinematicControlState state, uint64_t heartbeatMs);
+void TitleAdapter_ClearCinematicControl(
+    GameTitle title, uint32_t generation);
+CinematicControlPublication TitleAdapter_GetCinematicControlPublication(
+    GameTitle title);
 
 void TitleAdapter_SetRuntimeMode(RuntimeMode mode);
 RuntimeMode TitleAdapter_GetRuntimeMode();

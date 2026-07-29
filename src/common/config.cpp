@@ -38,12 +38,18 @@ static bool FileExists(const wchar_t* path)
 
 static void Clamp()
 {
-    g_config.config_version = 4;
+    g_config.config_version = 5;
     g_config.haptic_intensity = std::clamp(g_config.haptic_intensity, 0.0f, 1.0f);
     g_config.headset_smoothing = std::clamp(g_config.headset_smoothing, 0.0f, 0.10f);
     g_config.aim_stabilization = std::clamp(g_config.aim_stabilization, 0.0f, 0.95f);
     g_config.screen_width_m = std::clamp(g_config.screen_width_m, 0.5f, 20.0f);
     g_config.screen_distance_m = std::clamp(g_config.screen_distance_m, 0.3f, 20.0f);
+    g_config.cutscene_theater_depth = std::clamp(
+        g_config.cutscene_theater_depth, 0.0f, 2.0f);
+    g_config.cutscene_theater_width_m = std::clamp(
+        g_config.cutscene_theater_width_m, 0.5f, 20.0f);
+    g_config.cutscene_theater_distance_m = std::clamp(
+        g_config.cutscene_theater_distance_m, 0.3f, 20.0f);
     g_config.menu_distance_m = std::clamp(g_config.menu_distance_m,
                                           kMenuDistanceMin, kMenuDistanceMax);
     g_config.menu_width_m = std::clamp(g_config.menu_width_m,
@@ -138,8 +144,8 @@ void ConfigLoad(const wchar_t* path)
             else
             {
                 loadedConfigVersion = static_cast<int>(parsed);
-                if (parsed > 4)
-                    LOG("config: version %ld is newer than supported version 4; known keys will be loaded", parsed);
+                if (parsed > 5)
+                    LOG("config: version %ld is newer than supported version 5; known keys will be loaded", parsed);
             }
         }
         else if (!strcmp(key, "haptic_intensity"))
@@ -152,6 +158,16 @@ void ConfigLoad(const wchar_t* path)
             g_config.screen_width_m = (float)atof(val);
         else if (!strcmp(key, "screen_distance_m"))
             g_config.screen_distance_m = (float)atof(val);
+        else if (!strcmp(key, "cutscene_theater_enabled"))
+            g_config.cutscene_theater_enabled = atoi(val) != 0;
+        else if (!strcmp(key, "cutscene_theater_depth"))
+            ParseFloatSetting(key, val, g_config.cutscene_theater_depth);
+        else if (!strcmp(key, "cutscene_theater_flip_depth"))
+            g_config.cutscene_theater_flip_depth = atoi(val) != 0;
+        else if (!strcmp(key, "cutscene_theater_width_m"))
+            ParseFloatSetting(key, val, g_config.cutscene_theater_width_m);
+        else if (!strcmp(key, "cutscene_theater_distance_m"))
+            ParseFloatSetting(key, val, g_config.cutscene_theater_distance_m);
         else if (!strcmp(key, "menu_distance_m"))
             ParseFloatSetting(key, val, g_config.menu_distance_m);
         else if (!strcmp(key, "menu_width_m"))
@@ -406,6 +422,28 @@ void ConfigSave()
     fprintf(f, "# Distance from your head to that screen, in meters.\n");
     fprintf(f, "# (default %.2f, range 0.3 to 20)\n", d.screen_distance_m);
     fprintf(f, "screen_distance_m = %.2f\n\n", g_config.screen_distance_m);
+    fprintf(f, "# Stereo 3D theatre for engine-confirmed cutscenes where the game\n");
+    fprintf(f, "# has taken camera control away from the player. Shared by every\n");
+    fprintf(f, "# supported title, including future title adapters. (default %d)\n",
+             d.cutscene_theater_enabled ? 1 : 0);
+    fprintf(f, "cutscene_theater_enabled = %d\n\n",
+             g_config.cutscene_theater_enabled ? 1 : 0);
+    fprintf(f, "# Theatre stereo separation: 0 = flat, 1 = natural IPD, 2 = double.\n");
+    fprintf(f, "# (default %.2f, range 0 to 2)\n", d.cutscene_theater_depth);
+    fprintf(f, "cutscene_theater_depth = %.2f\n\n",
+             g_config.cutscene_theater_depth);
+    fprintf(f, "# Swap the theatre's left/right images to reverse depth. (default %d)\n",
+             d.cutscene_theater_flip_depth ? 1 : 0);
+    fprintf(f, "cutscene_theater_flip_depth = %d\n\n",
+             g_config.cutscene_theater_flip_depth ? 1 : 0);
+    fprintf(f, "# Room-fixed theatre screen width and distance in meters. Its height\n");
+    fprintf(f, "# follows the game's native image shape; it is never stretched to 16:9.\n");
+    fprintf(f, "# (defaults %.2f wide at %.2f away)\n",
+             d.cutscene_theater_width_m, d.cutscene_theater_distance_m);
+    fprintf(f, "cutscene_theater_width_m = %.2f\n",
+             g_config.cutscene_theater_width_m);
+    fprintf(f, "cutscene_theater_distance_m = %.2f\n\n",
+             g_config.cutscene_theater_distance_m);
     fprintf(f, "# Where the F1 menu panel floats. You do not need to edit these by\n");
     fprintf(f, "# hand: grab the bar along the top of the panel with your right\n");
     fprintf(f, "# trigger to move it, and push the right stick up/down while holding\n");

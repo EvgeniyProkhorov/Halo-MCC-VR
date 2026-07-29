@@ -50,7 +50,7 @@ inline constexpr float kMenuOffsetLimit = 3.00f;
 
 struct Config
 {
-    int config_version = 4;
+    int config_version = 5;
 
     // Portable OpenXR feedback and pose stabilization. Headset smoothing is a
     // deliberately tiny previous-frame blend (0.03 shipped default, 10% hard maximum)
@@ -63,6 +63,15 @@ struct Config
 
     float screen_width_m = 4.0f;    // width of the virtual screen, in meters
     float screen_distance_m = 2.4f; // how far away the screen floats, in meters
+
+    // Universal cutscene-only stereo theatre. A title enters it only after its
+    // adapter proves the engine owns an authored camera and player camera
+    // control is unavailable. Future title adapters inherit the same settings.
+    bool cutscene_theater_enabled = true;
+    float cutscene_theater_depth = 1.0f; // 0 flat, 1 runtime IPD, 2 double
+    bool cutscene_theater_flip_depth = false;
+    float cutscene_theater_width_m = 6.0f;
+    float cutscene_theater_distance_m = 4.0f;
 
     // F1 menu panel placement. The panel is its own composition quad, separate
     // from the virtual screen above. The defaults are the fixed constants the

@@ -59,6 +59,7 @@ void Game_RejectReachAuthoredReticle(uint32_t expectedGeneration,
 bool Game_AllowsSharedGameplayFeatures();
 bool Game_AllowsSharedControllerInput();
 bool Game_HasTitleCapability(uint32_t requiredCapabilities);
+CinematicControlState Game_GetCinematicControlState();
 bool Game_CanToggleImmersiveView();
 bool Game_ProcessPresentationDetachRequest();
 // Render-thread emergency transaction used only after OpenXR session failure.
