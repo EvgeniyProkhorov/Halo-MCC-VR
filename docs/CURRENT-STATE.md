@@ -127,11 +127,9 @@ allocation, locked logging, and `fflush` in a render hot hook would knowingly
 restore a safety defect. That cleanup does not advance the accepted pointer and
 still requires the normal Halo 3 regression before a release.
 
-### HEADSET-PENDING: Reach owned-eye native SSAO/HDAO isolation - 2026-07-29
+### REJECTED: Reach owned-eye native SSAO/HDAO isolation - 2026-07-29
 
-This candidate is not accepted and does not advance the public pointer above.
-The only acceptance result is the user's headset result with a known trigger
-(long weapon and/or nearby Ghost/Revenant).
+This result is evidence only and does not advance the public pointer above.
 
 | Identity | Value |
 | --- | --- |
@@ -140,7 +138,10 @@ The only acceptance result is the user's headset result with a known trigger
 | `halo3xr.dll` SHA-256 | `99693E1488ACA887DEEA09BA4D438EC5D4C446FF5911A9ED04060342D0F7E7A6` |
 | `halo3xr_launcher.exe` SHA-256 | `EB9EE3FFEE013D14EB44D7911FCC051921D7136A0704F0440791BE7C093D0843` |
 | Deployment | Independently hash-verified in both Steam and Store `Halo_MCC_VR` folders; MCC was not launched and config was unchanged |
-| Headset result | Pending |
+| Runtime | Steam edition, SteamVR/OpenXR 2.17.6, PSVR2 at 120 Hz |
+| Headset result | Black static-world geometry unchanged |
+| Preserved evidence | `out/test-runs/8d7af6e-reach-world-black-ssao-fail-20260729-091522` |
+| Preserved log SHA-256 | `9567C19D0610E4D7C0651456517ABFF36CA6C15BCE2F33F8FE9661F06CEC7420` |
 
 It makes exactly one behavioral change: the pinned retail native SSAO/HDAO
 callee at `haloreach.dll+0x2A13A0` returns without drawing only for an exact
@@ -165,6 +166,13 @@ both final output calls, and the unique surface-index-2 helper. The hot detour
 increments lock-free eye counters only; the worker logs BOUND and ARMED with
 zero samples and then reports the first actual per-eye suppression. A headset
 result is invalid if that execution line never shows both eyes advancing.
+
+The exact log proves this candidate was not inert: suppression reached 3,602
+calls in eye 0 and 3,602 calls in eye 1 with 66 unowned calls passed through to
+stock, the per-eye first-person camera reported ACTIVE, and stereo held 120 Hz.
+The user's headset result was unchanged. Native SSAO/HDAO is therefore rejected
+as the black-world cause. The following revert disables the behavior while
+retaining its verified code and evidence.
 
 ### ACCEPTED: Reach muzzle height - 2026-07-27
 

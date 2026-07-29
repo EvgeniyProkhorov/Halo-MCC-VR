@@ -419,7 +419,7 @@ pass as the cause; the implementation is retained but no longer armed. Evidence:
 (log SHA-256
 `40923EF9CDD1BEBECB6D8660CAB98E9385AB5BF81FB1C48986731930051B4A96`).
 
-## Static-world black geometry: native SSAO/HDAO isolation (HEADSET-PENDING)
+## Static-world black geometry: native SSAO/HDAO isolation (REJECTED)
 
 This is one behavioral candidate, not an accepted fix. It suppresses Reach's
 exact native SSAO/HDAO callee only for the two fully owned VR-eye renders. It
@@ -493,13 +493,23 @@ arm logs state zero samples unconditionally, and the first actual suppression
 reports eye-0/eye-1 counts so a headset run cannot be mistaken for an executed
 candidate if its ownership gate never fired.
 
-Packaged headset-pending identity: source
+Packaged identity: source
 `8d7af6e25418c2d2c86aa518d8d8f199a6e7080d`, candidate
 `out/candidates/8d7af6e-reach-fp-parity-20260729-140858597Z`, DLL SHA-256
 `99693E1488ACA887DEEA09BA4D438EC5D4C446FF5911A9ED04060342D0F7E7A6`.
 The exact DLL hash was independently verified after automatic installation to
 both Steam and Microsoft Store editions. MCC was not launched and the existing
 configuration was not changed.
+
+The exact Steam/SteamVR PSVR2 log proves the behavior executed for both eyes:
+the worker first reported zero samples, then 6/6, and later 3,602/3,602
+suppressed eye calls with 66 unowned calls passed through to the original. The
+per-eye first-person camera reported ACTIVE and stereo held 120 Hz. The user's
+headset result was that the black static-world geometry was unchanged. This
+rejects native SSAO/HDAO as the cause; the hook remains in source as dormant
+evidence and the following revert prevents it from arming. Preserved evidence:
+`out/test-runs/8d7af6e-reach-world-black-ssao-fail-20260729-091522` (log
+SHA-256 `9567C19D0610E4D7C0651456517ABFF36CA6C15BCE2F33F8FE9661F06CEC7420`).
 
 ## Static-world black geometry: stale DrawIndexed diagnostic isolation
 

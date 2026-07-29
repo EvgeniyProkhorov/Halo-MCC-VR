@@ -10085,6 +10085,10 @@ namespace
     // restored per eye without changing the black static-world defect. Keep
     // the resolver and scoped implementation as evidence, but do not arm it.
     constexpr bool kReachLightmapShadowIsolationEnabled = false;
+    // Headset candidate 8d7af6e suppressed the exact native SSAO callee for
+    // 3,602 calls in each eye; the black static-world defect was unchanged.
+    // Retain the proven hook and lifecycle code as evidence, but do not arm it.
+    constexpr bool kReachSsaoIsolationEnabled = false;
     bool RestoreReachNativeWeaponIkBypass();
     bool RestoreReachLightmapShadowsControl();
     bool RestoreReachThirdPersonEffectSuppression();
@@ -15661,6 +15665,7 @@ namespace
         static constexpr char kReachShadowMaskAcquireAob[] =
             "48 83 EC 38 BA 02 00 00 00 33 C9 E8 ?? ?? ?? ?? B9 0A 00 00 00";
         const bool reachSsaoProven =
+            kReachSsaoIsolationEnabled &&
             kReachSsaoBodySize == 0x567 &&
             kReachSsaoCallRva >= 8 &&
             kReachSsaoEndRva <= size &&
@@ -15684,7 +15689,13 @@ namespace
                 base, size, kReachShadowMaskAcquireRva,
                 kReachShadowMaskAcquireAob) &&
             ReachColdExecutableAddress(base + kReachSsaoRva);
-        if (!reachSsaoProven)
+        if (!kReachSsaoIsolationEnabled)
+        {
+            LOG("Reach SSAO candidate intentionally disabled after exact "
+                "owned-eye suppression was headset-rejected as the black-world "
+                "cause");
+        }
+        else if (!reachSsaoProven)
         {
             LOG("Reach SSAO candidate UNAVAILABLE and not armed: exact native "
                 "SSAO entry/call proof failed; only this feature stays stock "
