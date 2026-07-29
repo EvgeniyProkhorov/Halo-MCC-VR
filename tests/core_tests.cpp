@@ -833,6 +833,25 @@ int main()
                         0.020997375f) < 1.0e-7f,
             "Reach head translation and runtime IPD use the exact ten-foot world-unit conversion");
 
+        Check(kReachSsaoCallRva == 0x0026E81D &&
+              kReachShadowScreenspaceGateRva == 0x0026E822 &&
+              kReachSsaoCallRva + 5 == kReachShadowScreenspaceGateRva &&
+              kReachLightmapShadowsRenderCallRva < kReachSsaoCallRva &&
+              kReachSsaoRva == 0x002A13A0 &&
+              kReachSsaoEndRva == 0x002A1907 &&
+              kReachSsaoBodySize == 0x567 &&
+              kReachSsaoShadowMaskCallRvas[0] == 0x002A169A &&
+              kReachSsaoShadowMaskCallRvas[1] == 0x002A1755 &&
+              kReachSsaoShadowMaskCallRvas[0] >= kReachSsaoRva &&
+              kReachSsaoShadowMaskCallRvas[0] <
+                  kReachSsaoShadowMaskCallRvas[1] &&
+              kReachSsaoShadowMaskCallRvas[1] < kReachSsaoEndRva &&
+              kReachShadowMaskAcquireRva == 0x00252F08 &&
+              kReachShadowMaskSurfaceIndex == 2 &&
+              std::string_view(kReachSsaoBodySha256) ==
+                  "760D2BEC3AA13ABFA0AB2002E2873C9C8A9F1FEA9EE63238585C2A6C92943EE7",
+            "Reach SSAO candidate pins the exact retail caller, callee, range, and body identity");
+
         constexpr uintptr_t motionBlurTestBase = 0x10000000u;
         Check(ReachMotionBlurSlotsMatchPinnedImage(
                   motionBlurTestBase, kReachRetailImageSize,

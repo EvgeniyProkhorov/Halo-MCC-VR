@@ -10066,6 +10066,8 @@ namespace
         void* fpInterpolateTarget = nullptr;
         void* fpPaletteTarget = nullptr;
         void* fpCameraTarget = nullptr;
+        void* ssaoTarget = nullptr;
+        std::atomic<bool> ssaoIsolationActive{false};
         void* hudDrawWidgetTarget = nullptr;
         void* observerCameraTarget = nullptr;
         void* effectLocationTarget = nullptr;
@@ -10077,6 +10079,8 @@ namespace
     std::atomic<uint32_t> g_reachLightmapShadowRestoreFailures{0};
     std::atomic<uint8_t> g_reachLightmapShadowOutstandingValue{0};
     std::atomic<bool> g_reachLightmapShadowRestoreOutstanding{false};
+    std::atomic<uint32_t> g_reachSsaoSuppressedEyeCalls[2]{};
+    std::atomic<uint32_t> g_reachSsaoPassthroughCalls{0};
     // Headset candidate 839aed7 proved the exact pass can be suppressed and
     // restored per eye without changing the black static-world defect. Keep
     // the resolver and scoped implementation as evidence, but do not arm it.
@@ -10110,6 +10114,8 @@ namespace
     ReachFpPaletteFn g_reachOrigFpPalette = nullptr;
     ReachFpCameraRebuildFn g_reachOrigFpCameraRebuild = nullptr;
     ReachFpCameraUploadFn g_reachFpCameraUpload = nullptr;
+    using ReachRenderSsaoFn = void(__fastcall*)(void*);
+    ReachRenderSsaoFn g_reachOrigRenderSsao = nullptr;
     // Arguments 3 and 4 are FULL 32-bit values, not short/byte. Reach's own
     // code proves it: at 0x2DA39D it does "mov r12d, r8d" and at 0x2DA41D
     // "cmp r12d, dword ptr [rdi+4]" - a full 32-bit compare of argument 3 -
@@ -11730,6 +11736,108 @@ namespace
         __try
         {
             ReachFpCameraRebuildBody(view, firstPersonEnabled);
+        }
+        __finally
+        {
+            g_reachCamera.activeCallbacks.fetch_sub(
+                1, std::memory_order_acq_rel);
+        }
+    }
+
+    bool ReachOwnsSsaoEyeTransaction(uintptr_t returnAddress) noexcept
+    {
+        if (!ReachOwnsHudStereoTransaction() ||
+            !g_reachCamera.ssaoIsolationActive.load(
+                std::memory_order_acquire) ||
+            g_reachNestedOuterSuppressed)
+        {
+            return false;
+        }
+
+        const uintptr_t base = g_reachCamera.base;
+        const ReachFpCameraEyeScope& eyeScope = g_reachFpCameraEyeScope;
+        const ReachOwnerScope& owner = g_reachOwnerScope;
+        if (!base ||
+            returnAddress != base + kReachSsaoCallRva + 5 ||
+            eyeScope.eye > 1 ||
+            g_stereoEye.load(std::memory_order_acquire) !=
+                static_cast<int>(eyeScope.eye) ||
+            !owner.active || owner.workspace != eyeScope.workspace ||
+            owner.playerView != eyeScope.playerView ||
+            owner.preparedSerial != eyeScope.preparedSerial ||
+            !owner.renderAccess || !owner.renderAccess->active ||
+            owner.renderAccess->preparedSerial != eyeScope.preparedSerial ||
+            owner.cameraStackDepthBefore < -1 ||
+            owner.cameraStackDepthBefore >= 3)
+        {
+            return false;
+        }
+
+        uint32_t depthRaw = 0;
+        uintptr_t topWorkspace = 0;
+        uintptr_t activeView = 0;
+        uintptr_t workspaceCallback = 0;
+        uint32_t specialization = 0;
+        if (!SafeReadU32(
+                reinterpret_cast<const void*>(
+                    base + kReachCameraStackDepthRva),
+                &depthRaw) ||
+            !SafeReadPtr(
+                reinterpret_cast<const void*>(
+                    base + kReachCameraStackPointersRva +
+                    static_cast<uintptr_t>(
+                        owner.cameraStackDepthBefore + 1) *
+                        sizeof(uintptr_t)),
+                &topWorkspace) ||
+            !SafeReadPtr(
+                reinterpret_cast<const void*>(base + kReachActiveViewRva),
+                &activeView) ||
+            !SafeReadPtr(
+                reinterpret_cast<const void*>(
+                    owner.workspace + kReachRenderScopeSnapshotSize -
+                    sizeof(uintptr_t)),
+                &workspaceCallback) ||
+            !SafeReadU32(
+                reinterpret_cast<const void*>(
+                    base + kReachSelectedSpecializationRva),
+                &specialization))
+        {
+            return false;
+        }
+
+        const int32_t depth = static_cast<int32_t>(depthRaw);
+        return depth == owner.cameraStackDepthBefore + 1 &&
+            depth >= 0 && depth <= 3 &&
+            topWorkspace == owner.workspace &&
+            activeView == eyeScope.playerView &&
+            workspaceCallback == base + kReachCameraStackCallbackRva &&
+            specialization == 0;
+    }
+
+    __declspec(noinline) void __fastcall ReachRenderSsaoDetour(
+        void* ssaoDefinition)
+    {
+        const uintptr_t returnAddress =
+            reinterpret_cast<uintptr_t>(_ReturnAddress());
+        g_reachCamera.activeCallbacks.fetch_add(1, std::memory_order_acq_rel);
+        __try
+        {
+            if (ReachOwnsSsaoEyeTransaction(returnAddress))
+            {
+                const uint32_t eye = g_reachFpCameraEyeScope.eye;
+                g_reachSsaoSuppressedEyeCalls[eye].fetch_add(
+                    1, std::memory_order_relaxed);
+            }
+            else
+            {
+                ReachRenderSsaoFn original = g_reachOrigRenderSsao;
+                if (original)
+                {
+                    g_reachSsaoPassthroughCalls.fetch_add(
+                        1, std::memory_order_relaxed);
+                    original(ssaoDefinition);
+                }
+            }
         }
         __finally
         {
@@ -14242,7 +14350,7 @@ namespace
     bool ScanForReachDetourIngress(bool& busy)
     {
         static bool rangesResolved = false;
-        static ReachDetourCodeRange ranges[9]{};
+        static ReachDetourCodeRange ranges[10]{};
         if (!rangesResolved)
         {
             const void* functions[] = {
@@ -14251,6 +14359,7 @@ namespace
                 reinterpret_cast<const void*>(&ReachFpInterpolate),
                 reinterpret_cast<const void*>(&ReachFpPalette),
                 reinterpret_cast<const void*>(&ReachFpCameraRebuildDetour),
+                reinterpret_cast<const void*>(&ReachRenderSsaoDetour),
                 reinterpret_cast<const void*>(&ReachHudDrawWidgetDetour),
                 reinterpret_cast<const void*>(&ReachObserverCameraDetour),
                 reinterpret_cast<const void*>(&ReachEffectLocationDetour),
@@ -14273,6 +14382,7 @@ namespace
             g_reachCamera.fpInterpolateTarget,
             g_reachCamera.fpPaletteTarget,
             g_reachCamera.fpCameraTarget,
+            g_reachCamera.ssaoTarget,
             g_reachCamera.hudDrawWidgetTarget,
             g_reachCamera.observerCameraTarget,
             g_reachCamera.effectLocationTarget,
@@ -14284,6 +14394,7 @@ namespace
             reinterpret_cast<void*>(g_reachOrigFpInterpolate),
             reinterpret_cast<void*>(g_reachOrigFpPalette),
             reinterpret_cast<void*>(g_reachOrigFpCameraRebuild),
+            reinterpret_cast<void*>(g_reachOrigRenderSsao),
             reinterpret_cast<void*>(g_reachOrigHudDrawWidget),
             reinterpret_cast<void*>(g_reachOrigObserverCamera),
             reinterpret_cast<void*>(g_reachOrigEffectLocation),
@@ -14386,6 +14497,7 @@ namespace
             g_reachCamera.effectLocationTarget,
             g_reachCamera.observerCameraTarget,
             g_reachCamera.hudDrawWidgetTarget,
+            g_reachCamera.ssaoTarget,
             g_reachCamera.outerTarget,
             g_reachCamera.innerTarget,
             g_reachCamera.fpInterpolateTarget,
@@ -14474,6 +14586,24 @@ namespace
                 LOG("Reach crosshair cleanup: remove failed for %p (%d)",
                     g_reachCamera.hudDrawWidgetTarget,
                     static_cast<int>(status));
+            }
+        }
+        if (g_reachCamera.ssaoTarget)
+        {
+            const MH_STATUS status =
+                MH_RemoveHook(g_reachCamera.ssaoTarget);
+            if (status == MH_OK || status == MH_ERROR_NOT_CREATED)
+            {
+                g_reachCamera.ssaoIsolationActive.store(
+                    false, std::memory_order_release);
+                g_reachCamera.ssaoTarget = nullptr;
+                g_reachOrigRenderSsao = nullptr;
+            }
+            else
+            {
+                removedAll = false;
+                LOG("Reach SSAO cleanup: remove failed for %p (%d)",
+                    g_reachCamera.ssaoTarget, static_cast<int>(status));
             }
         }
         if (g_reachCamera.fpCameraTarget)
@@ -14642,6 +14772,9 @@ namespace
         g_reachCamera.fpInterpolateTarget = nullptr;
         g_reachCamera.fpPaletteTarget = nullptr;
         g_reachCamera.fpCameraTarget = nullptr;
+        g_reachCamera.ssaoTarget = nullptr;
+        g_reachCamera.ssaoIsolationActive.store(
+            false, std::memory_order_release);
         g_reachCamera.hudDrawWidgetTarget = nullptr;
         g_reachCamera.observerCameraTarget = nullptr;
         g_reachCamera.effectLocationTarget = nullptr;
@@ -14670,6 +14803,7 @@ namespace
         g_reachOrigFpPalette = nullptr;
         g_reachOrigFpCameraRebuild = nullptr;
         g_reachFpCameraUpload = nullptr;
+        g_reachOrigRenderSsao = nullptr;
         g_reachOrigHudDrawWidget = nullptr;
         g_reachFpStatus.key.store(0,std::memory_order_release);
         g_reachFpLoggedStatusKey.store(0,std::memory_order_release);
@@ -15514,6 +15648,49 @@ namespace
                 "stays stock and the Reach camera core continues");
         }
 
+        // Independent of the rejected screen-space-shadow and lightmap-shadow
+        // branches: HREK proves this is Reach's native SSAO/HDAO renderer, and
+        // the pinned retail image has one exact player-view call to it. The
+        // module-wide preflight already pins the complete image hash; these
+        // local checks additionally pin the entry ABI and call edge before an
+        // optional hook is created.
+        static constexpr char kReachSsaoEntryAob[] =
+            "48 8B C4 48 89 58 08 48 89 70 18 48 89 78 20 55 41 54 41 55 41 56 41 57 48 8D 68 A1 48 81 EC A0 00 00 00";
+        static constexpr char kReachSsaoCallContextAob[] =
+            "48 8B 04 C1 48 8D 0C 90 E8 ?? ?? ?? ?? 80 3D ?? ?? ?? ?? 00 74";
+        static constexpr char kReachShadowMaskAcquireAob[] =
+            "48 83 EC 38 BA 02 00 00 00 33 C9 E8 ?? ?? ?? ?? B9 0A 00 00 00";
+        const bool reachSsaoProven =
+            kReachSsaoBodySize == 0x567 &&
+            kReachSsaoCallRva >= 8 &&
+            kReachSsaoEndRva <= size &&
+            kReachShadowMaskAcquireRva < size &&
+            kReachSsaoShadowMaskCallRvas[0] >= kReachSsaoRva &&
+            kReachSsaoShadowMaskCallRvas[1] < kReachSsaoEndRva &&
+            ReachColdExactSignatureAt(
+                base, size, kReachSsaoRva, kReachSsaoEntryAob) &&
+            ReachColdExactSignatureAt(
+                base, size, kReachSsaoCallRva - 8,
+                kReachSsaoCallContextAob) &&
+            ReachVerifyRel32Call(
+                base, kReachSsaoCallRva, kReachSsaoRva) &&
+            ReachVerifyRel32Call(
+                base, kReachSsaoShadowMaskCallRvas[0],
+                kReachShadowMaskAcquireRva) &&
+            ReachVerifyRel32Call(
+                base, kReachSsaoShadowMaskCallRvas[1],
+                kReachShadowMaskAcquireRva) &&
+            ReachColdExactSignatureAt(
+                base, size, kReachShadowMaskAcquireRva,
+                kReachShadowMaskAcquireAob) &&
+            ReachColdExecutableAddress(base + kReachSsaoRva);
+        if (!reachSsaoProven)
+        {
+            LOG("Reach SSAO candidate UNAVAILABLE and not armed: exact native "
+                "SSAO entry/call proof failed; only this feature stays stock "
+                "and the Reach camera core continues");
+        }
+
         // Resolve the four stock camera-rebuild helpers. The preflight already
         // pinned the exact module SHA-256, so base+RVA is exact; additionally
         // cross-check the two setup call sites so a mismatched image fails open.
@@ -15599,6 +15776,19 @@ namespace
                 fpCamera,
                 reinterpret_cast<void*>(&ReachFpCameraRebuildDetour),
                 reinterpret_cast<void**>(&g_reachOrigFpCameraRebuild)) == MH_OK;
+        void* ssao = reachSsaoProven
+            ? reinterpret_cast<void*>(base + kReachSsaoRva)
+            : nullptr;
+        const bool ssaoCreated = fpCameraCreated && ssao && MH_CreateHook(
+                ssao,
+                reinterpret_cast<void*>(&ReachRenderSsaoDetour),
+                reinterpret_cast<void**>(&g_reachOrigRenderSsao)) == MH_OK;
+        if (fpCameraCreated && reachSsaoProven && !ssaoCreated)
+        {
+            LOG("Reach SSAO candidate hook create FAILED at "
+                "haloreach.dll+0x%llX; only native SSAO remains active",
+                static_cast<unsigned long long>(kReachSsaoRva));
+        }
         // Re-enabled with the corrected argument widths. Four prior crashes,
         // all 0xC0000005 at haloreach.dll+0x2ED80C, were caused by this
         // detour declaring arguments 3 and 4 as unsigned short / unsigned
@@ -15752,6 +15942,7 @@ namespace
             bool fpInterpolateRetained=fpInterpolateCreated;
             bool fpPaletteRetained=fpPaletteCreated;
             bool fpCameraRetained=fpCameraCreated;
+            bool ssaoRetained=ssaoCreated;
             bool hudDrawWidgetRetained=hudDrawWidgetCreated;
             bool observerCameraRetained=observerCameraCreated;
             bool effectLocationRetained=effectLocationCreated;
@@ -15772,6 +15963,7 @@ namespace
                           observerCameraRetained);
             removeCreated(hudDrawWidgetCreated,hudDrawWidget,
                           hudDrawWidgetRetained);
+            removeCreated(ssaoCreated,ssao,ssaoRetained);
             removeCreated(fpCameraCreated,fpCamera,fpCameraRetained);
             removeCreated(fpPaletteCreated,fpPalette,fpPaletteRetained);
             removeCreated(fpInterpolateCreated,fpInterpolate,
@@ -15784,6 +15976,7 @@ namespace
             if (!fpInterpolateRetained) g_reachOrigFpInterpolate=nullptr;
             if (!fpPaletteRetained) g_reachOrigFpPalette=nullptr;
             if (!fpCameraRetained) g_reachOrigFpCameraRebuild=nullptr;
+            if (!ssaoRetained) g_reachOrigRenderSsao=nullptr;
             if (!hudDrawWidgetRetained) g_reachOrigHudDrawWidget=nullptr;
             if (!observerCameraRetained) g_reachOrigObserverCamera=nullptr;
             if (!effectLocationRetained)
@@ -15810,6 +16003,9 @@ namespace
                     fpPaletteRetained?fpPalette:nullptr;
                 g_reachCamera.fpCameraTarget=
                     fpCameraRetained?fpCamera:nullptr;
+                g_reachCamera.ssaoTarget=ssaoRetained?ssao:nullptr;
+                g_reachCamera.ssaoIsolationActive.store(
+                    false,std::memory_order_release);
                 g_reachCamera.hudDrawWidgetTarget=
                     hudDrawWidgetRetained?hudDrawWidget:nullptr;
                 g_reachCamera.observerCameraTarget=
@@ -15845,6 +16041,9 @@ namespace
         g_reachCamera.fpInterpolateTarget = fpInterpolate;
         g_reachCamera.fpPaletteTarget = fpPalette;
         g_reachCamera.fpCameraTarget = fpCamera;
+        g_reachCamera.ssaoTarget = ssaoCreated ? ssao : nullptr;
+        g_reachCamera.ssaoIsolationActive.store(
+            false, std::memory_order_release);
         g_reachCamera.hudDrawWidgetTarget =
             hudDrawWidgetCreated ? hudDrawWidget : nullptr;
         g_reachCamera.observerCameraTarget =
@@ -15903,6 +16102,9 @@ namespace
             0, std::memory_order_relaxed);
         g_reachLightmapShadowRestoreOutstanding.store(
             false, std::memory_order_release);
+        for (auto& count : g_reachSsaoSuppressedEyeCalls)
+            count.store(0, std::memory_order_relaxed);
+        g_reachSsaoPassthroughCalls.store(0, std::memory_order_relaxed);
         g_reachCamera.nativeWeaponIkDisable = reachNativeWeaponIkDisable;
         g_reachCamera.nativeWeaponIkDisableOriginal =
             reachNativeWeaponIkDisableOriginal;
@@ -15969,6 +16171,48 @@ namespace
             "interpolation/palette + per-eye world-projection camera "
             "transactions hooked; waiting one-second fresh-camera interval "
             "before arming");
+        // Optional, feature-local candidate. Its exact return-address and
+        // thread-local/live ownership gates keep flat, nested, screenshot, and
+        // unrelated native calls on the original SSAO path. A create/enable
+        // failure never tears down the working Reach camera core.
+        if (ssaoCreated)
+        {
+            const MH_STATUS enableStatus = MH_EnableHook(ssao);
+            if (enableStatus == MH_OK)
+            {
+                g_reachCamera.ssaoIsolationActive.store(
+                    true, std::memory_order_release);
+                LOG("Reach SSAO candidate BOUND with zero samples: exact native "
+                    "SSAO/HDAO +0x%llX will be skipped only for the exact owned "
+                    "VR-eye call +0x%llX; all other calls remain stock",
+                    static_cast<unsigned long long>(kReachSsaoRva),
+                    static_cast<unsigned long long>(kReachSsaoCallRva));
+            }
+            else
+            {
+                g_reachCamera.ssaoIsolationActive.store(
+                    false, std::memory_order_release);
+                const MH_STATUS disableStatus = MH_DisableHook(ssao);
+                const MH_STATUS removeStatus = MH_RemoveHook(ssao);
+                if (removeStatus == MH_OK ||
+                    removeStatus == MH_ERROR_NOT_CREATED)
+                {
+                    g_reachCamera.ssaoTarget = nullptr;
+                    g_reachOrigRenderSsao = nullptr;
+                }
+                else
+                {
+                    LOG("Reach SSAO candidate enable failed (%d), and its "
+                        "hook disable/remove failed (%d/%d); retained for "
+                        "verified title teardown",
+                        static_cast<int>(enableStatus),
+                        static_cast<int>(disableStatus),
+                        static_cast<int>(removeStatus));
+                }
+                LOG("Reach SSAO candidate not armed; native SSAO remains active "
+                    "and the Reach camera core continues");
+            }
+        }
         // Optional and fail-open, same as the mandatory five are not: a failed
         // enable here removes only this one hook and continues, exactly like a
         // failed create above. Never RemoveReachCameraCore() for this hook.
@@ -16230,6 +16474,54 @@ namespace
             "write-failures=%u, restore-failures=%u",
             generation, suppressed, alreadyDisabled, writeFailures,
             restoreFailures);
+    }
+
+    // Worker-side proof that the behavioral candidate actually executed. The
+    // native render detour performs no logging, allocation, or locking; it only
+    // increments lock-free counters for the exact owned eye or stock pass-through.
+    void ReachSsaoLogTick()
+    {
+        static uint32_t lastGeneration = 0;
+        static uint32_t lastSuppressed = 0;
+        static uint32_t lastPassthrough = 0;
+        static uint64_t lastReportMs = 0;
+        if (!g_reachCamera.installed.load(std::memory_order_acquire) ||
+            !g_reachCamera.ssaoIsolationActive.load(
+                std::memory_order_acquire))
+        {
+            lastGeneration = 0;
+            lastSuppressed = 0;
+            lastPassthrough = 0;
+            lastReportMs = 0;
+            return;
+        }
+        if (!g_reachCamera.armed.load(std::memory_order_acquire))
+            return;
+
+        const uint32_t generation = g_reachCamera.generation;
+        const uint32_t eye0 = g_reachSsaoSuppressedEyeCalls[0].load(
+            std::memory_order_relaxed);
+        const uint32_t eye1 = g_reachSsaoSuppressedEyeCalls[1].load(
+            std::memory_order_relaxed);
+        const uint32_t suppressed = eye0 + eye1;
+        const uint32_t passthrough = g_reachSsaoPassthroughCalls.load(
+            std::memory_order_relaxed);
+        const uint64_t now = GetTickCount64();
+        const bool newGeneration = generation != lastGeneration;
+        const bool firstSuppression = suppressed != 0 && lastSuppressed == 0;
+        const bool periodic =
+            (suppressed != lastSuppressed || passthrough != lastPassthrough) &&
+            lastReportMs != 0 && now - lastReportMs >= 30000;
+        if (!newGeneration && !firstSuppression && !periodic)
+            return;
+
+        lastGeneration = generation;
+        lastSuppressed = suppressed;
+        lastPassthrough = passthrough;
+        lastReportMs = now;
+        LOG("Reach SSAO candidate EXECUTION: generation=%u, suppressed eye0=%u "
+            "eye1=%u, stock pass-through calls=%u",
+            generation, eye0, eye1, passthrough);
     }
 
     // Worker-side only. Reports what the effect-location hook actually saw, so
@@ -16794,6 +17086,7 @@ namespace
         ReachPauseColdPoll(base, size, generation, soleReachTitle);
         ReachMuzzleRetargetTick(base, size, generation, soleReachTitle);
         ReachLightmapShadowLogTick();
+        ReachSsaoLogTick();
         ReachObserverCameraLogTick();
         ReachMuzzleLogTick();
         ReachCineProbeLogTick();
@@ -16886,6 +17179,13 @@ namespace
             {
                 LOG("Reach world-shadow candidate ARMED with zero samples: "
                     "render_lightmap_shadows will be suppressed per owned eye");
+            }
+            if (g_reachCamera.ssaoIsolationActive.load(
+                    std::memory_order_acquire))
+            {
+                LOG("Reach SSAO candidate ARMED with zero suppressed-eye "
+                    "samples; the first exact owned-eye execution will be "
+                    "reported by the worker");
             }
         }
         // Parity with ODST: publish the lifecycle every tick so armed state and

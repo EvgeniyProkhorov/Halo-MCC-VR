@@ -560,9 +560,12 @@ inline constexpr uintptr_t kReachMotionBlurScaleValueRva = 0x00B44604;
 // black static-world defect unchanged. The binding remains as rejected evidence;
 // production does not arm the scoped suppression.
 //
-// This is NOT `render_shadow_screenspace` or `_surface_shadow_mask`. The latter
-// was measured 100% white in both eyes and is a rejected branch. Official HREK
-// publishes `render_lightmap_shadows` as a type-5 boolean at descriptor
+// This is NOT `render_shadow_screenspace` or native SSAO/HDAO. HREK proves
+// SSAO uses distinct `_surface_ssao*` intermediates, then composites its final
+// result into shared `_surface_shadow_mask`. The earlier center-region readback
+// and pre-player-view clear did not isolate this later producer, so it cannot
+// reject SSAO. Official HREK publishes `render_lightmap_shadows` as a type-5
+// boolean at descriptor
 // 0x02014C30 -> value 0x02056C75. HREK's player-view wrapper checks it at
 // 0x00836664 before calling the source-named lightmap-shadow renderer at
 // 0x00865910. Retail repeats that exact control flow: its sole player-view call
@@ -576,6 +579,26 @@ inline constexpr uintptr_t kReachLightmapShadowsWrapperRva = 0x0026E7B4;
 inline constexpr uintptr_t kReachLightmapShadowsCompareRva = 0x0026E7C4;
 inline constexpr uintptr_t kReachLightmapShadowsRenderCallRva = 0x0026E7E3;
 inline constexpr uintptr_t kReachLightmapShadowsRenderRva = 0x0028B3D0;
+// Reach native SSAO/HDAO. Official HREK's player-view wrapper has exactly one
+// call at 0x008366A3 to 0x007FD180 after the first-person/depth work and the
+// lightmap-shadow producer. The pinned retail image has the homologous sole
+// call below. Its body is [0x2A13A0,0x2A1907), 0x567 bytes, with SHA-256
+// 760D2BEC3AA13ABFA0AB2002E2873C9C8A9F1FEA9EE63238585C2A6C92943EE7.
+// The candidate detours the callee and returns only inside an exact owned VR
+// eye transaction; it mutates no native TLS flag and introduces no direct
+// surface write or clear.
+inline constexpr uintptr_t kReachSsaoCallRva = 0x0026E81D;
+inline constexpr uintptr_t kReachShadowScreenspaceGateRva = 0x0026E822;
+inline constexpr uintptr_t kReachSsaoRva = 0x002A13A0;
+inline constexpr uintptr_t kReachSsaoEndRva = 0x002A1907;
+inline constexpr size_t kReachSsaoBodySize =
+    kReachSsaoEndRva - kReachSsaoRva;
+inline constexpr std::array<uintptr_t, 2> kReachSsaoShadowMaskCallRvas{
+    0x002A169A, 0x002A1755};
+inline constexpr uintptr_t kReachShadowMaskAcquireRva = 0x00252F08;
+inline constexpr uint32_t kReachShadowMaskSurfaceIndex = 2;
+inline constexpr char kReachSsaoBodySha256[] =
+    "760D2BEC3AA13ABFA0AB2002E2873C9C8A9F1FEA9EE63238585C2A6C92943EE7";
 // Proven first-person production anchors. 0x2B4EB0 is the final visible body
 // palette consumer and 0x0CF1A4 publishes the live interpolation graph used by
 // body, marker, and held-object consumers. The palette decodes the render model

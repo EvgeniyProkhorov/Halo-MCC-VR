@@ -127,6 +127,37 @@ allocation, locked logging, and `fflush` in a render hot hook would knowingly
 restore a safety defect. That cleanup does not advance the accepted pointer and
 still requires the normal Halo 3 regression before a release.
 
+### HEADSET-PENDING: Reach owned-eye native SSAO/HDAO isolation - 2026-07-29
+
+This candidate is not accepted and does not advance the public pointer above.
+Its exact source, package, and artifact hashes must be recorded after packaging;
+the only acceptance result is the user's headset result with a known trigger
+(long weapon and/or nearby Ghost/Revenant).
+
+It makes exactly one behavioral change: the pinned retail native SSAO/HDAO
+callee at `haloreach.dll+0x2A13A0` returns without drawing only for an exact
+owned VR-eye invocation from the sole player-view call at `+0x26E81D`. Every
+flat, screenshot, nested, unowned, non-current-eye, and non-Reach call executes
+the original function. It does not clear depth, modify camera orientation or
+culling, toggle title TLS flags, change OpenXR submission, or provide a 2D/stock
+render fallback.
+
+This boundary was not exercised by the prior shadow-mask candidates. HREK and
+the pinned retail module prove that SSAO uses private downsample/depth/normal
+intermediates and then writes its final result to shared surface index 2,
+`_surface_shadow_mask`, after the old pre-player-view clear. The old asynchronous
+readback sampled only the centre 64x64 texels; preserved clear-off logs show
+eye-different mask contents from roughly 24% to 100% lit, disproving the stale
+claim that this surface was permanently white. The exact executable chain and
+preserved log paths are recorded in `docs/REACH-SIGNATURE-EVIDENCE.md`.
+
+The runtime proof is deliberately stronger than an “armed” line. Install pins
+the unique 35-byte callee entry, unique 21-byte caller context, exact rel32 call,
+both final output calls, and the unique surface-index-2 helper. The hot detour
+increments lock-free eye counters only; the worker logs BOUND and ARMED with
+zero samples and then reports the first actual per-eye suppression. A headset
+result is invalid if that execution line never shows both eyes advancing.
+
 ### ACCEPTED: Reach muzzle height - 2026-07-27
 
 `muzzle_height_m` raises the re-parented muzzle effect origin - the flash and

@@ -394,12 +394,18 @@ block that the existing eye transaction already refreshes and mirrors for each
 eye. The pass therefore is not reading a camera block omitted by the current
 per-eye rebuild; the direct isolation boundary is the pass itself.
 
-This is **not** the rejected `render_shadow_screenspace` /
-`_surface_shadow_mask` branch. That surface was captured after real clears and
-measured 100% lit in both eyes while the headset defect remained unchanged.
-The lightmap-shadow renderer is an earlier object-caster -> static-lightmap
-receiver path and does not use that all-white screen-space mask as its defining
-boundary.
+This is **not** native SSAO/HDAO or the later
+`render_shadow_screenspace` work. The old `_surface_shadow_mask` diagnostic
+cleared the surface before each `player_view_render`, so native SSAO could and
+did regenerate it before lighting applied it. Its asynchronous readback also
+sampled only the centre 64x64 texels, not the complete 3262x2352 surface. A
+clear-off preserved log disproves the stale blanket claim that the surface was
+always white: paired samples include 67.45%/63.03%, 27.24%/48.85%, and
+24.53%/25.21% lit. That measurement remains a valid limited observation, but it
+did not isolate or reject the later SSAO producer. Evidence:
+`out/deploy-backups/681c161-steam-before-fd6da0a-20260729-065406006Z/halo3xr.log`.
+The lightmap-shadow renderer remains a separate earlier object-caster ->
+static-lightmap receiver path.
 
 Candidate `839aed7` resolved the descriptor, name, type, value pointer,
 player-view call, wrapper compare, and renderer call exactly. For each admitted
@@ -412,6 +418,80 @@ pass as the cause; the implementation is retained but no longer armed. Evidence:
 `out/test-runs/839aed7-reach-world-black-lightmap-shadow-fail-20260729-061119`
 (log SHA-256
 `40923EF9CDD1BEBECB6D8660CAB98E9385AB5BF81FB1C48986731930051B4A96`).
+
+## Static-world black geometry: native SSAO/HDAO isolation (HEADSET-PENDING)
+
+This is one behavioral candidate, not an accepted fix. It suppresses Reach's
+exact native SSAO/HDAO callee only for the two fully owned VR-eye renders. It
+does not change the world or first-person cameras, culling, projection, depth
+buffers, OpenXR layers, title TLS flags, or shader constants, and it introduces
+no direct shared-surface write or clear. Flat, screenshot, nested, unowned, and
+non-Reach rendering calls the original function unchanged.
+
+Official HREK establishes the source-level system and its place in the render
+pipeline:
+
+- The player-view wrapper at `0x008365F0` calls native SSAO at
+  `0x008366A3 -> 0x007FD180`, after the first-person/depth work and the
+  lightmap-shadow producer and before later static lighting.
+- HREK names the `_surface_ssao*` downsampled-depth, normal, and mask
+  intermediates. HDAO samples shared scene depth; there is no object-class
+  caster filter that excludes a long first-person weapon or nearby vehicle.
+- Both final HREK paths call `0x007CB0D0` (`0x007FD5F2` and `0x007FD6F9`).
+  That helper selects surface index 2 as render target 0; the official surface
+  descriptor table maps index 2 to `_surface_shadow_mask`. SSAO therefore uses
+  its private intermediates but composites its final result into the shared mask
+  that later lighting consumes.
+
+The pinned retail module repeats the complete chain:
+
+| Evidence | Retail RVA |
+| --- | --- |
+| Sole player-view call -> native SSAO | `0x0026E81D -> 0x002A13A0` |
+| SSAO function range | `[0x002A13A0, 0x002A1907)` (`0x567` bytes) |
+| SSAO body SHA-256 | `760D2BEC3AA13ABFA0AB2002E2873C9C8A9F1FEA9EE63238585C2A6C92943EE7` |
+| Final multipass/direct output calls | `0x002A169A`, `0x002A1755` |
+| Both output calls -> surface-2 helper | `0x00252F08` |
+| Following screen-space-shadow gate | `0x0026E822` |
+
+The surface helper begins `sub rsp,38h; mov edx,2; xor ecx,ecx`, then calls the
+render-target binder. The later apply block at `0x0026E878` gates on the
+current-frame touched flag, binds surface 2, and draws it before static lighting.
+This makes the causal boundary executable evidence rather than a resource-name
+guess.
+
+The current Reach VR transaction also supplies the missing symptom link. Its
+first-person camera hook replaces the nested weapon camera with the current
+world-eye compact and derived/projection pair, then uploads that pair. The long
+weapon and nearby vehicle are therefore present in eye-specific foreground
+depth before native SSAO runs. SSAO can turn those different per-eye depth
+shapes into different mask patterns, while the later receiver paths can leave
+sky, first-person weapons, characters, and vehicles visually unaffected and
+darken authored static-world lighting. This is a mechanism selected from the
+observed receiver boundary, not a claim of headset acceptance.
+
+The production candidate pins two unique signatures (the 35-byte SSAO entry and
+the 21-byte player-view call context), verifies the exact rel32 caller edge, and
+verifies both final calls to the unique surface-2 helper. Its callee detour
+returns only when all of these live conditions agree: exact call return address,
+active Reach generation and armed core, current eye 0/1, matching stereo eye,
+matching owner/eye workspace and player view, matching prepared-frame serial,
+active render access, exact camera-stack depth/top/callback, active view, and
+specialization zero. Every mismatch calls the original SSAO function.
+
+Direct return is deliberate callee isolation, not the engine's TLS disable
+path. Retail's pre-gate `setne` byte has only three code references: that write
+and two later reads inside the same SSAO function. Skipping the whole function
+therefore omits no externally consumed state; the next stock call rewrites it
+before either read. Temporarily clearing native TLS bit `0x10` would be broader
+because the same bit gates cheap-particle spawn/update/render and would add a
+restoration hazard.
+
+The hook emits no hot-path logging, allocation, locks, file I/O, or GPU
+readback. Lock-free per-eye counters are reported by the worker. The install and
+arm logs state zero samples unconditionally, and the first actual suppression
+reports eye-0/eye-1 counts so a headset run cannot be mistaken for an executed
+candidate if its ownership gate never fired.
 
 ## Static-world black geometry: stale DrawIndexed diagnostic isolation
 
