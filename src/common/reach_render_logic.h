@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 #include <span>
 
@@ -531,6 +532,40 @@ inline constexpr uintptr_t kReachFpCameraFrustumCallRva = 0x00286DD8;
 inline constexpr uintptr_t kReachFpCameraProjectionCallRva = 0x00286DEF;
 inline constexpr uintptr_t kReachFpCameraUploadCompactLeaRva = 0x00286E4F;
 inline constexpr uintptr_t kReachFpCameraUploadJumpRva = 0x00286E6A;
+// The exact retail/HREK FP camera rebuild reads only two fields from its view
+// argument: the compact-camera source pointer at +0x08 and the weapon/AA scale
+// input at +0x10. A local proxy lets the title consume an already-separated
+// eye compact while preserving every native FP rebuild side effect. In
+// particular, Reach remains the owner of its FP FOV, weapon-dependent z-near,
+// derived blur/postprocess, and final shader-constant upload.
+inline constexpr size_t kReachFpCameraViewProxySize = 0x18;
+inline constexpr size_t kReachFpCameraViewCompactPointerOffset = 0x08;
+inline constexpr size_t kReachFpCameraViewWeaponScaleOffset = 0x10;
+static_assert(sizeof(void*) == 8);
+struct alignas(16) ReachFpCameraViewProxy
+{
+    std::array<uint8_t, kReachFpCameraViewProxySize> bytes{};
+};
+static_assert(
+    kReachFpCameraViewCompactPointerOffset + sizeof(void*) <=
+    kReachFpCameraViewProxySize);
+static_assert(
+    kReachFpCameraViewWeaponScaleOffset + sizeof(float) <=
+    kReachFpCameraViewProxySize);
+
+inline bool BuildReachFpCameraViewProxy(
+    const void* sourceView, const void* eyeCompact,
+    ReachFpCameraViewProxy& proxy) noexcept
+{
+    if (!sourceView || !eyeCompact)
+        return false;
+    std::memcpy(proxy.bytes.data(), sourceView, proxy.bytes.size());
+    std::memcpy(
+        proxy.bytes.data() + kReachFpCameraViewCompactPointerOffset,
+        &eyeCompact, sizeof(eyeCompact));
+    return true;
+}
+
 struct ReachFpCameraWrapperBody
 {
     uintptr_t rva;

@@ -52,10 +52,39 @@ at packaging time - not generated defaults.
 The published ZIP is the exact artifact that passed the second-machine test.
 Do not rebuild and republish without repeating that validation.
 
-### CANDIDATE: reject invalid Reach post-palette wrist write - 2026-07-29
+### CANDIDATE: preserve Reach's native per-eye FP camera rebuild - 2026-07-29
 
 Headset acceptance is pending; this does not advance the public pointer above.
-The candidate disables only the failed `511eb0b` post-palette write that copied
+The user's exact E490 baseline is source `9cb88d7` and DLL SHA-256
+`E4905011247978F570C17739FB7631FF91CB5F4870ADF5B42DC986E4A1585C88`.
+The failed candidates after it have been behaviorally reverted. Static review
+then found one older E490 behavior in the exact weapon-sensitive FP stage: the
+Reach FP camera detour's post-original whole-block overwrite.
+
+Official HREK and the pinned retail module prove that Reach's native FP rebuild
+copies its source compact camera from `view+0x08`, preserves the weapon scale at
+`view+0x10`, applies its FP FOV, applies the weapon-dependent `+0x64` near/AA
+adjustment, rebuilds the derived block, applies the current-blur postprocess,
+and uploads the finished ViewVS/ViewPS constants. The old detour let that full
+transaction finish, then replaced the native compact and derived blocks with a
+raw world pair and manually uploaded the replacement. That made our hook the
+last writer over the title's sniper-sensitive result.
+
+The candidate instead passes the exact eye compact to the native rebuild
+through a bounded `0x18`-byte input proxy. Reach itself now performs both the
+FP-draw rebuild and the post-draw restore for each eye. It does not disable the
+FP pass, restore a 2D viewmodel, or disconnect the hand/head separation. The
+worker reports ACTIVE only after both eyes have completed both native phases in
+one stable prepared serial. Build, core tests, and the Reach consistency gate
+must pass before packaging. Static evidence proves the overwrite is wrong but
+does not prove its FP pass contaminates the later static-lighting targets; the
+headset result remains the causal and acceptance test.
+
+### REJECTED: invalid Reach post-palette wrist write as black-world cause - 2026-07-29
+
+This result is evidence only and does not advance the public pointer above.
+Candidate `bba9f535bda36b2be64462827ac9c453f94009dd` disabled only the
+failed `511eb0b` post-palette write that copied
 an absolute-world controller wrist matrix directly into one root-relative live
 skeleton record. Reach had already performed the correct world-to-record
 conversion over the complete graph, and the visible gun had already consumed
@@ -65,10 +94,14 @@ through both later world-eye renders with no success-path restore.
 This is active-hook cleanup, not a native SSAO, shadow, depth-buffer, culling,
 camera-orientation, or rain theory. It does not restore a stock viewmodel or 2D
 path. The valid controller transform, controller-held gun/hands, per-eye camera,
-and accepted loaded-tag muzzle retarget all remain active. The exact requested
-E490 log proves the removed block was reached 118,490 times. The new worker proof
-must report a positive prevented count, zero executed writes, and the existing
-both-eye FP camera ACTIVE line before the headset result is considered valid.
+and accepted loaded-tag muzzle retarget all remained active. The exact Steam /
+SteamVR 2.17.6 / PSVR2 headset run reached 204,258 prevented invocations with
+zero executions and reported both-eye FP camera ACTIVE. The black static-world
+geometry was unchanged, conclusively rejecting this late skeleton write as its
+cause. The safety correction remains disabled. Preserved evidence:
+`out/test-runs/bba9f53-reach-world-black-wrist-write-fail-20260729-101820`
+(log SHA-256
+`950B210A9F0D267E01DD8C5FCA359D23626FE98EEB5EE1F8EEB206179CC4C993`).
 Full binding and ordering evidence is in `docs/REACH-SIGNATURE-EVIDENCE.md`.
 
 ### REJECTED: Reach black-world effect-owner gate - 2026-07-29

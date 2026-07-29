@@ -1102,6 +1102,55 @@ at `0x87C655`, gets the top again at `0x87C679`, uses `top+0x1E4` at
 This closes the static identity, ABI, nested-workspace layout, and lifetime
 proof.
 
+### Correction: the native FP rebuild owns the final per-eye state
+
+The black-static-world investigation exposed one invalid assumption in the
+accepted E490 hook shape. Halo 3 and ODST's post-rebuild copies are not an
+implementation template for Reach. Reach's exact native rebuild has additional
+title-specific work that a completed-block replacement destroys.
+
+Pinned retail `0x286C6C` and HREK `0x87C4B0` read only the compact source
+pointer at `view+0x08` and the weapon/AA scale at `view+0x10` from their view
+argument. They then:
+
+- copy the complete `0x90` compact into the active nested workspace;
+- publish `render_first_person_fov_scale` and apply it to compact `+0x28`;
+- on the first-person path, use the weapon trigger-marker AA inputs to adjust
+  compact `+0x64`, which HREK's camera assertions identify as `z_near`;
+- rebuild nested derived `+0x1E4`, then run the current-blur transform over its
+  `+0x78..+0xB8` matrix region; and
+- call the uploader, which dirties renderer constants `0x4D0000`,
+  `0x4D0004..7`, and `0x530000`.
+
+Official HREK shader metadata names buffer `0x4D` `ViewVS` and buffer `0x53`
+`ViewPS`. The global HLSL list maps those slots to `View_Projection`,
+`Camera_To_World`, and `Camera_Position_PS`; compiled terrain shaders consume
+both buffers. This is a shader-constant ownership fact, not an SSAO, shadow,
+rain, depth-buffer, or culling hypothesis.
+
+The old detour called the native rebuild first, copied the admitted eye's raw
+world compact over the finished nested compact, copied the raw world derived
+block over the finished native derived block, and manually called the uploader
+again. It therefore erased Reach's FOV, weapon-dependent near/AA, and derived
+postprocess results. The first-person single-pass draw sits immediately before
+the static-lighting transaction. The camera-stack pop does invoke the restored
+outer callback, so the evidence does **not** claim that the nested constants
+simply remain live forever; the invalid state is active during the FP pass that
+precedes and shares the render transaction with static lighting. A shared
+render-object path is proven, but shared target/stencil contamination into the
+later static-lighting receiver is not. The candidate restores engine semantics;
+the headset result determines whether this overwrite caused the black pixels.
+
+The corrected candidate uses a local `0x18`-byte proxy: it preserves the real
+view header and weapon scale, changes only `+0x08` to the exact admitted eye
+compact, and lets Reach perform its native true/false rebuild and upload once.
+The proxy has synchronous stack lifetime, the exact hashed body reads no other
+view field, and the real view is still used for the full nested-workspace,
+callback, active-view, specialization, generation, eye, and serial gate. The
+runtime proof separately requires draw and post-draw-restore masks `0b11` for
+the same prepared serial before reporting ACTIVE. Headset acceptance remains
+pending.
+
 The earlier camera-only candidate
 `6e12536ce401772876d55de0821780546af04131`, package
 `out/candidates/6e12536-reach-fp-parity-20260725-083057894Z`, exact DLL SHA-256

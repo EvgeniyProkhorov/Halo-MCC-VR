@@ -1043,11 +1043,11 @@ int main()
         Check(selectFpNested(validFpNested) == validFpNested.stackTop,
             "Reach FP camera selector accepts the exact nested workspace, callback, and view");
         const uintptr_t selectedFpNested = selectFpNested(validFpNested);
-        Check(selectedFpNested + kReachSecondaryDerivedOffset ==
-                  fpModuleBase + kReachFpCameraWorkspaceRva + 0x1E4 &&
+        Check(selectedFpNested ==
+                  fpModuleBase + kReachFpCameraWorkspaceRva &&
               kReachSecondaryDerivedOffset + kReachDerivedBlockSize <=
                   kReachFpCameraWorkspaceCallbackOffset,
-            "Reach FP camera selector targets nested+0x1E4 without crossing the callback");
+            "Reach FP camera selector identifies the exact live workspace without crossing its callback");
         Check(kReachFpCameraWorkspaceCallbackOffset + sizeof(uintptr_t) ==
                   kReachRenderScopeSnapshotSize &&
               kReachFpCameraWorkspaceRva <=
@@ -1101,6 +1101,56 @@ int main()
         Check(selectFpNested(boundaryFpNested) ==
                   std::numeric_limits<uintptr_t>::max(),
             "Reach FP camera selector accepts the last non-overflowing nested workspace");
+
+        std::array<uint8_t, kReachFpCameraViewProxySize> fpViewHeader{};
+        for (size_t index = 0; index < fpViewHeader.size(); ++index)
+            fpViewHeader[index] = static_cast<uint8_t>(0x40u + index);
+        const void* originalCompact =
+            reinterpret_cast<const void*>(uintptr_t{0x1111222233334444ull});
+        std::memcpy(
+            fpViewHeader.data() + kReachFpCameraViewCompactPointerOffset,
+            &originalCompact, sizeof(originalCompact));
+        const float weaponScale = 0.625f;
+        std::memcpy(
+            fpViewHeader.data() + kReachFpCameraViewWeaponScaleOffset,
+            &weaponScale, sizeof(weaponScale));
+        const auto fpViewHeaderBefore = fpViewHeader;
+        const void* eyeCompact =
+            reinterpret_cast<const void*>(uintptr_t{0xAAAABBBBCCCCDDDDull});
+        ReachFpCameraViewProxy fpViewProxy{};
+        const bool fpViewProxyBuilt = BuildReachFpCameraViewProxy(
+            fpViewHeader.data(), eyeCompact, fpViewProxy);
+        const void* proxiedCompact = nullptr;
+        float proxiedWeaponScale = 0.0f;
+        std::memcpy(
+            &proxiedCompact,
+            fpViewProxy.bytes.data() +
+                kReachFpCameraViewCompactPointerOffset,
+            sizeof(proxiedCompact));
+        std::memcpy(
+            &proxiedWeaponScale,
+            fpViewProxy.bytes.data() + kReachFpCameraViewWeaponScaleOffset,
+            sizeof(proxiedWeaponScale));
+        Check(fpViewProxyBuilt && proxiedCompact == eyeCompact &&
+              proxiedWeaponScale == weaponScale &&
+              std::memcmp(
+                  fpViewProxy.bytes.data(), fpViewHeader.data(),
+                  kReachFpCameraViewCompactPointerOffset) == 0 &&
+              std::memcmp(
+                  fpViewProxy.bytes.data() +
+                      kReachFpCameraViewWeaponScaleOffset,
+                  fpViewHeader.data() +
+                      kReachFpCameraViewWeaponScaleOffset,
+                  kReachFpCameraViewProxySize -
+                      kReachFpCameraViewWeaponScaleOffset) == 0 &&
+              fpViewHeader == fpViewHeaderBefore,
+            "Reach FP camera proxy replaces only +0x08 and preserves the native weapon-scale input");
+        ReachFpCameraViewProxy rejectedFpViewProxy{};
+        Check(!BuildReachFpCameraViewProxy(
+                  nullptr, eyeCompact, rejectedFpViewProxy) &&
+              !BuildReachFpCameraViewProxy(
+                  fpViewHeader.data(), nullptr, rejectedFpViewProxy),
+            "Reach FP camera proxy rejects missing source or eye camera");
 
         ReachRenderCandidateProof proof =
             CompleteReachRenderCandidateProof();

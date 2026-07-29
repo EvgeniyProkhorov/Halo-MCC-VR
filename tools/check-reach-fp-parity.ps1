@@ -46,8 +46,12 @@ $forbidden = [ordered]@{
         'scope\.workspace\s*\+\s*kReachSecondaryDerivedOffset'
     'legacy unverified FP compact-camera workspace alias' =
         'kReachFpCompactCameraRva'
-    'FP camera success published before the uploader returns' =
-        'ReachFpCameraRebuildBody[\s\S]*?PublishReachFpCameraUpload\(scope\)[\s\S]*?g_reachFpCameraUpload\(compact,\s*derived\)'
+    'post-rebuild FP compact block overwrite' =
+        'ReachFpCameraRebuildBody[\s\S]{0,2600}?memcpy\(\s*compact\s*,\s*scope\.compact'
+    'post-rebuild FP derived block overwrite' =
+        'ReachFpCameraRebuildBody[\s\S]{0,2600}?scope\.derived'
+    'manual FP camera re-upload after the native rebuild' =
+        'ReachFpCameraRebuildBody[\s\S]{0,2600}?g_reachFpCameraUpload\s*\('
     'hidden left-arm ownership admitted into the visible keep mask' =
         'const\s+uint64_t\s+keep\s*=[^;]*leftControllerOwnedSourceBranch'
     'hidden right-arm ownership admitted into the visible keep mask' =
@@ -149,7 +153,8 @@ if ($logic -notmatch 'kReachFpWeaponIkDisableValueRva' -or
 }
 if ($logic -notmatch 'kReachFpCameraRebuildAob' -or
     $logic -notmatch 'kReachFpCameraUploadAob' -or
-    $logic -notmatch 'exactFpCameraFlowEdges') {
+    $logic -notmatch 'exactFpCameraFlowEdges' -or
+    $game -notmatch 'BuildReachFpCameraViewProxy') {
     throw 'Reach FP parity gate missing: exact Reach camera rebuild/upload proof anchors.'
 }
 Write-Host 'Reach consistency check passed: no disproven Reach-only architecture reintroduced, Reach capabilities intact, evidence constants present.'
