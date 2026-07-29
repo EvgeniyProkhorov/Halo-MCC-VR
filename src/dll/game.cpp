@@ -10056,6 +10056,10 @@ namespace
         bool motionBlurResolved = false;
         bool motionBlurSuppressed = false;
         uint8_t* patchyFogFlags = nullptr;
+        // Live `render_lightmap_shadows` boolean. The owned-eye scope saves,
+        // clears, and restores it around player_view_render to isolate Reach's
+        // proven object-caster -> static-lightmap receiver pass.
+        uint8_t* lightmapShadowsEnabled = nullptr;
         uint8_t* nativeWeaponIkDisable = nullptr;
         uint8_t nativeWeaponIkDisableOriginal = 0;
         bool nativeWeaponIkBypassActive = false;
@@ -10067,10 +10071,19 @@ namespace
         void* effectLocationTarget = nullptr;
         void* rainRenderTarget = nullptr;
     } g_reachCamera;
+    std::atomic<uint32_t> g_reachLightmapShadowSuppressedEyes{0};
+    std::atomic<uint32_t> g_reachLightmapShadowAlreadyDisabledEyes{0};
+    std::atomic<uint32_t> g_reachLightmapShadowWriteFailures{0};
+    std::atomic<uint32_t> g_reachLightmapShadowRestoreFailures{0};
+    std::atomic<uint8_t> g_reachLightmapShadowOutstandingValue{0};
+    std::atomic<bool> g_reachLightmapShadowRestoreOutstanding{false};
     bool RestoreReachNativeWeaponIkBypass();
+    bool RestoreReachLightmapShadowsControl();
     bool RestoreReachThirdPersonEffectSuppression();
     void ReachMuzzleRetargetRestore();
     static_assert(std::atomic<int>::is_always_lock_free);
+    static_assert(std::atomic<bool>::is_always_lock_free);
+    static_assert(std::atomic<uint8_t>::is_always_lock_free);
     static_assert(std::atomic<uint32_t>::is_always_lock_free);
 
     // Published only after the matching eye was rendered and copied. The
@@ -11496,19 +11509,62 @@ namespace
 
     // Reach draws patchy fog as screen-aligned translucent noise sheets. In
     // sequential stereo those sheets move opposite the tracked head even while
-    // world fog and geometry are correct. Suppress only that helper for one
-    // admitted eye render, then restore only its bit so any unrelated stock
-    // flag updates survive. The per-eye __finally executes even if the stock
-    // renderer faults; unclaimed, nested, and screenshot renders never enter
-    // this scope.
-    bool ReachCallPlayerViewWithoutPatchyFog(uintptr_t playerView)
+    // world fog and geometry are correct. The same exact owned-eye boundary is
+    // also where the title's dynamic lightmap-shadow pass is suppressed. That
+    // proven object-caster -> static-lightmap receiver boundary matches the
+    // reported headset symptom and is isolated here as one candidate. Both
+    // title controls are restored in __finally. Unclaimed, nested, screenshot,
+    // and flat renders never enter this scope.
+    bool ReachCallPlayerViewWithEyeScopedSuppressions(uintptr_t playerView)
     {
         uint8_t original = 0;
         bool suppressionWritten = false;
         bool callReturned = false;
         bool restoreSucceeded = true;
+        uint8_t lightmapOriginal = 0;
+        bool lightmapChanged = false;
+        bool lightmapAlreadyDisabled = false;
+        bool lightmapRestoreSucceeded = true;
+
+        // A prior exceptional eye is never allowed to redefine zero as its
+        // entry state. Recover our outstanding write before rendering again;
+        // failure drops only this frame and the next frame will retry.
+        if (g_reachLightmapShadowRestoreOutstanding.load(
+                std::memory_order_acquire) &&
+            !RestoreReachLightmapShadowsControl())
+        {
+            g_reachLightmapShadowRestoreFailures.fetch_add(
+                1, std::memory_order_relaxed);
+            return false;
+        }
         __try
         {
+            uint8_t* const lightmap =
+                g_reachCamera.lightmapShadowsEnabled;
+            if (!lightmap)
+            {
+                // Exact proof was unavailable; only this candidate stays stock.
+            }
+            else if (SafeReadByte(lightmap, &lightmapOriginal) &&
+                     lightmapOriginal == 0)
+            {
+                lightmapAlreadyDisabled = true;
+            }
+            else if (lightmapOriginal == 1 && SafeWriteByte(lightmap, 0))
+            {
+                lightmapChanged = true;
+                g_reachLightmapShadowOutstandingValue.store(
+                    lightmapOriginal, std::memory_order_relaxed);
+                g_reachLightmapShadowRestoreOutstanding.store(
+                    true, std::memory_order_release);
+            }
+            else
+            {
+                // This feature alone stays stock for the eye. The worker-side
+                // report makes the failure loud without logging in this hook.
+                g_reachLightmapShadowWriteFailures.fetch_add(
+                    1, std::memory_order_relaxed);
+            }
             uint8_t* const flags = g_reachCamera.patchyFogFlags;
             if (flags && SafeReadByte(flags, &original) &&
                 SafeWriteByte(
@@ -11530,8 +11586,43 @@ namespace
                         flags,
                         ReachPatchyFogRestoredFlags(current, original));
             }
+            if (lightmapChanged)
+            {
+                uint8_t* const lightmap =
+                    g_reachCamera.lightmapShadowsEnabled;
+                uint8_t restored = 0;
+                lightmapRestoreSucceeded = lightmap &&
+                    SafeWriteByte(lightmap, lightmapOriginal) &&
+                    SafeReadByte(lightmap, &restored) &&
+                    restored == lightmapOriginal;
+                if (lightmapRestoreSucceeded)
+                {
+                    g_reachLightmapShadowOutstandingValue.store(
+                        0, std::memory_order_relaxed);
+                    g_reachLightmapShadowRestoreOutstanding.store(
+                        false, std::memory_order_release);
+                }
+                else
+                {
+                    g_reachLightmapShadowRestoreFailures.fetch_add(
+                        1, std::memory_order_relaxed);
+                }
+            }
         }
-        return callReturned && restoreSucceeded;
+        if (callReturned && restoreSucceeded && lightmapRestoreSucceeded)
+        {
+            if (lightmapChanged)
+            {
+                g_reachLightmapShadowSuppressedEyes.fetch_add(
+                    1, std::memory_order_relaxed);
+            }
+            else if (lightmapAlreadyDisabled)
+            {
+                g_reachLightmapShadowAlreadyDisabledEyes.fetch_add(
+                    1, std::memory_order_relaxed);
+            }
+        }
+        return callReturned && restoreSucceeded && lightmapRestoreSucceeded;
     }
 
     uintptr_t ReachFpCameraWorkspaceIfLive(const void* view) noexcept
@@ -12662,7 +12753,7 @@ namespace
                 {
                     fpCameraScope.active = true;
                     renderReturned =
-                        ReachCallPlayerViewWithoutPatchyFog(playerView);
+                        ReachCallPlayerViewWithEyeScopedSuppressions(playerView);
                 }
                 __finally
                 {
@@ -14507,6 +14598,17 @@ namespace
             return false;
         }
 
+        // The eye hook normally restores this byte in its __finally. Repeat the
+        // restoration after hook quiescence so even an exceptional last render
+        // cannot leave the title-wide development control changed.
+        if (!RestoreReachLightmapShadowsControl())
+        {
+            LOG("Reach world-shadow cleanup: render_lightmap_shadows could not "
+                "be restored after hook quiescence; retaining the exact title "
+                "module and ownership record for retry");
+            return false;
+        }
+
         const bool restoreReachBlur = g_reachCamera.motionBlurSuppressed;
         if (!ReachRestoreMotionBlurValues())
         {
@@ -14550,6 +14652,11 @@ namespace
         g_reachCamera.motionBlurResolved = false;
         g_reachCamera.motionBlurSuppressed = false;
         g_reachCamera.patchyFogFlags = nullptr;
+        g_reachCamera.lightmapShadowsEnabled = nullptr;
+        g_reachLightmapShadowOutstandingValue.store(
+            0, std::memory_order_relaxed);
+        g_reachLightmapShadowRestoreOutstanding.store(
+            false, std::memory_order_release);
         g_reachCamera.nativeWeaponIkDisable = nullptr;
         g_reachCamera.nativeWeaponIkDisableOriginal = 0;
         g_reachCamera.nativeWeaponIkBypassActive = false;
@@ -14603,6 +14710,78 @@ namespace
         const uintptr_t next=first+1;
         const uintptr_t end=base+size;
         return next>=end || sig::Find(next,static_cast<size_t>(end-next),pattern)==0;
+    }
+
+    bool ResolveReachLightmapShadowsControl(
+        uintptr_t base, size_t size, uint8_t*& slot, uint8_t& original)
+    {
+        static constexpr char kExpectedName[] =
+            "render_lightmap_shadows";
+        slot = nullptr;
+        original = 0;
+        const auto fits = [size](uintptr_t rva, size_t bytes)
+        {
+            return rva < size && bytes <= size - rva;
+        };
+        if (!fits(kReachLightmapShadowsNameRva, sizeof(kExpectedName)) ||
+            !fits(kReachLightmapShadowsEntryRva, 24) ||
+            !fits(kReachLightmapShadowsValueRva, 1) ||
+            !fits(kReachLightmapShadowsPlayerCallRva, 5) ||
+            !fits(kReachLightmapShadowsCompareRva, 7) ||
+            !fits(kReachLightmapShadowsRenderCallRva, 5))
+        {
+            return false;
+        }
+
+        const auto* entry = reinterpret_cast<const uint8_t*>(
+            base + kReachLightmapShadowsEntryRva);
+        uintptr_t entryName = 0;
+        uint64_t entryType = 0;
+        uintptr_t entryValue = 0;
+        memcpy(&entryName, entry, sizeof(entryName));
+        memcpy(&entryType, entry + 8, sizeof(entryType));
+        memcpy(&entryValue, entry + 16, sizeof(entryValue));
+        if (memcmp(
+                reinterpret_cast<const void*>(
+                    base + kReachLightmapShadowsNameRva),
+                kExpectedName, sizeof(kExpectedName)) != 0 ||
+            entryName != base + kReachLightmapShadowsNameRva ||
+            entryType != kReachDebugBooleanType ||
+            entryValue != base + kReachLightmapShadowsValueRva)
+        {
+            return false;
+        }
+
+        const auto* compare = reinterpret_cast<const uint8_t*>(
+            base + kReachLightmapShadowsCompareRva);
+        if (compare[0] != 0x80 || compare[1] != 0x3D ||
+            compare[6] != 0x00)
+        {
+            return false;
+        }
+        int32_t displacement = 0;
+        memcpy(&displacement, compare + 2, sizeof(displacement));
+        const uintptr_t compareTarget = static_cast<uintptr_t>(
+            static_cast<intptr_t>(base + kReachLightmapShadowsCompareRva + 7) +
+            displacement);
+        if (compareTarget != base + kReachLightmapShadowsValueRva ||
+            !ReachVerifyRel32Call(
+                base, kReachLightmapShadowsPlayerCallRva,
+                kReachLightmapShadowsWrapperRva) ||
+            !ReachVerifyRel32Call(
+                base, kReachLightmapShadowsRenderCallRva,
+                kReachLightmapShadowsRenderRva) ||
+            !ReachColdExecutableAddress(
+                base + kReachLightmapShadowsRenderRva))
+        {
+            return false;
+        }
+
+        auto* const resolved = reinterpret_cast<uint8_t*>(entryValue);
+        if (!SafeReadByte(resolved, &original) || original > 1)
+            return false;
+        slot = resolved;
+        return true;
     }
 
     bool ResolveReachNativeWeaponIkControl(
@@ -15060,6 +15239,32 @@ namespace
         return true;
     }
 
+    bool RestoreReachLightmapShadowsControl()
+    {
+        if (!g_reachLightmapShadowRestoreOutstanding.load(
+                std::memory_order_acquire))
+        {
+            return true;
+        }
+        uint8_t* const slot = g_reachCamera.lightmapShadowsEnabled;
+        const uint8_t original =
+            g_reachLightmapShadowOutstandingValue.load(
+                std::memory_order_relaxed);
+        uint8_t current = 0;
+        if (!slot || original > 1 || !SafeReadByte(slot, &current) ||
+            current > 1 ||
+            !SafeWriteByte(slot, original) ||
+            !SafeReadByte(slot, &current) || current != original)
+        {
+            return false;
+        }
+        g_reachLightmapShadowOutstandingValue.store(
+            0, std::memory_order_relaxed);
+        g_reachLightmapShadowRestoreOutstanding.store(
+            false, std::memory_order_release);
+        return true;
+    }
+
     struct ReachHrekChudMatchSet
     {
         uintptr_t candidate = 0;
@@ -15288,6 +15493,19 @@ namespace
             LOG("Reach FP install: exact native weapon-IK disable proof failed; "
                 "stock Reach remains active");
             return false;
+        }
+
+        uint8_t* reachLightmapShadowsEnabled = nullptr;
+        uint8_t reachLightmapShadowsOriginal = 0;
+        const bool reachLightmapShadowsResolved =
+            ResolveReachLightmapShadowsControl(
+                base, size, reachLightmapShadowsEnabled,
+                reachLightmapShadowsOriginal);
+        if (!reachLightmapShadowsResolved)
+        {
+            LOG("Reach world-shadow candidate UNAVAILABLE and not armed: "
+                "exact render_lightmap_shadows proof failed; only this feature "
+                "stays stock and the Reach camera core continues");
         }
 
         // Resolve the four stock camera-rebuild helpers. The preflight already
@@ -15665,6 +15883,20 @@ namespace
         g_reachCamera.motionBlurResolved = true;
         g_reachCamera.motionBlurSuppressed = false;
         g_reachCamera.patchyFogFlags = reachPatchyFogFlags;
+        g_reachCamera.lightmapShadowsEnabled =
+            reachLightmapShadowsEnabled;
+        g_reachLightmapShadowSuppressedEyes.store(
+            0, std::memory_order_relaxed);
+        g_reachLightmapShadowAlreadyDisabledEyes.store(
+            0, std::memory_order_relaxed);
+        g_reachLightmapShadowWriteFailures.store(
+            0, std::memory_order_relaxed);
+        g_reachLightmapShadowRestoreFailures.store(
+            0, std::memory_order_relaxed);
+        g_reachLightmapShadowOutstandingValue.store(
+            0, std::memory_order_relaxed);
+        g_reachLightmapShadowRestoreOutstanding.store(
+            false, std::memory_order_release);
         g_reachCamera.nativeWeaponIkDisable = reachNativeWeaponIkDisable;
         g_reachCamera.nativeWeaponIkDisableOriginal =
             reachNativeWeaponIkDisableOriginal;
@@ -15821,6 +16053,14 @@ namespace
             static_cast<unsigned long long>(kReachPatchyFogTargetRva),
             static_cast<unsigned long long>(kReachPatchyFogFlagsRva),
             static_cast<unsigned>(kReachPatchyFogSkipMask));
+        if (reachLightmapShadowsResolved)
+        {
+            LOG("Reach world-shadow candidate BOUND with zero samples: exact "
+                "render_lightmap_shadows control +0x%llX (authored %u) will be "
+                "disabled only inside each owned VR eye render",
+                static_cast<unsigned long long>(kReachLightmapShadowsValueRva),
+                static_cast<unsigned>(reachLightmapShadowsOriginal));
+        }
 
         return true;
     }
@@ -15933,6 +16173,59 @@ namespace
         }
         return published;
     }
+    // Worker-side only. This reports both the unconditional zero-sample armed
+    // state and the first real eye suppression immediately. Later movement is
+    // rate-limited to 30 seconds. The hot render hook only updates atomics.
+    void ReachLightmapShadowLogTick()
+    {
+        static uint32_t lastGeneration = 0;
+        static uint32_t lastTotal = 0;
+        static uint64_t lastReportMs = 0;
+        if (!g_reachCamera.installed.load(std::memory_order_acquire))
+        {
+            lastGeneration = 0;
+            lastTotal = 0;
+            lastReportMs = 0;
+            return;
+        }
+        if (!g_reachCamera.armed.load(std::memory_order_acquire))
+            return;
+        if (!g_reachCamera.lightmapShadowsEnabled)
+            return;
+
+        const uint32_t generation = g_reachCamera.generation;
+        const uint32_t suppressed =
+            g_reachLightmapShadowSuppressedEyes.load(
+                std::memory_order_relaxed);
+        const uint32_t alreadyDisabled =
+            g_reachLightmapShadowAlreadyDisabledEyes.load(
+                std::memory_order_relaxed);
+        const uint32_t writeFailures =
+            g_reachLightmapShadowWriteFailures.load(
+                std::memory_order_relaxed);
+        const uint32_t restoreFailures =
+            g_reachLightmapShadowRestoreFailures.load(
+                std::memory_order_relaxed);
+        const uint32_t total = suppressed + alreadyDisabled + writeFailures +
+            restoreFailures;
+        const uint64_t now = GetTickCount64();
+        const bool newGeneration = generation != lastGeneration;
+        const bool firstActivity = total != 0 && lastTotal == 0;
+        const bool periodic = total != lastTotal && lastReportMs != 0 &&
+            now - lastReportMs >= 30000;
+        if (!newGeneration && !firstActivity && !periodic)
+            return;
+
+        lastGeneration = generation;
+        lastTotal = total;
+        lastReportMs = now;
+        LOG("Reach world-shadow candidate: generation=%u, "
+            "suppressed-eye-renders=%u, already-disabled-eye-renders=%u, "
+            "write-failures=%u, restore-failures=%u",
+            generation, suppressed, alreadyDisabled, writeFailures,
+            restoreFailures);
+    }
+
     // Worker-side only. Reports what the effect-location hook actually saw, so
     // one short headset run decides the muzzle mechanism instead of a fourth
     // guess. Silent until something happens, then rate-limited to 30 s.
@@ -16494,6 +16787,7 @@ namespace
         ReachCineProbeColdPoll(base, size, generation, soleReachTitle);
         ReachPauseColdPoll(base, size, generation, soleReachTitle);
         ReachMuzzleRetargetTick(base, size, generation, soleReachTitle);
+        ReachLightmapShadowLogTick();
         ReachObserverCameraLogTick();
         ReachMuzzleLogTick();
         ReachCineProbeLogTick();
@@ -16582,6 +16876,11 @@ namespace
             LOG("Reach camera core armed: proven five-hook per-eye stereo + "
                 "camera/FP transaction is live; failed owned eyes "
                 "are revoked and never published");
+            if (g_reachCamera.lightmapShadowsEnabled)
+            {
+                LOG("Reach world-shadow candidate ARMED with zero samples: "
+                    "render_lightmap_shadows will be suppressed per owned eye");
+            }
         }
         // Parity with ODST: publish the lifecycle every tick so armed state and
         // capabilities stay current for shared features. Without this Reach's

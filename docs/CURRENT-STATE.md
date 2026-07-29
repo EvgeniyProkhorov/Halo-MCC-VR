@@ -74,6 +74,33 @@ defect was identical, broad effect-matrix re-parenting is rejected as the
 black-world cause. The behavior is disabled in the following revert commit
 before any new candidate.
 
+### UNTESTED: Reach static-world lightmap-shadow isolation - 2026-07-29
+
+This candidate does not advance the accepted pointer above. Its only behavioral
+change is to disable Reach's exact `render_lightmap_shadows` pass while stock
+`player_view_render` executes each admitted VR eye, restoring the title boolean
+in `__finally`. Flat, screenshot, nested, and unclaimed renders remain stock.
+
+This path matches the headset receiver boundary directly: HREK proves it
+enumerates object casters and applies their dynamic shadows to static world
+lightmaps before static lighting. Retail repeats the complete HREK chain through
+the type-5 descriptor at `0x00B41080`, live boolean `0x00B4444D`, player-view
+wrapper `0x0026E7B4`, renderer `0x0028B3D0`, and apply block `0x0026E878`.
+Characters, weapons, vehicles, sky, grass/decorators, and other dynamic geometry
+are not its receivers. This is separate from the rejected all-white
+`_surface_shadow_mask` path.
+
+The runtime verifies the name, descriptor type/value pointer, wrapper compare,
+and both call edges before enabling this candidate; failure leaves this feature
+stock without denying the existing Reach camera core. Worker-side counters
+separate completed `1 -> 0 -> 1` eye scopes from an already-disabled title byte
+and must show zero write/restore failures before the headset visual result is
+interpreted. The acceptance target is the exact known trigger:
+the longest first-person weapon or a nearby Ghost/Revenant must no longer paint
+different black regions onto each eye's static world geometry. The packaged
+source and artifact hashes will be recorded after the candidate is built; until
+then this section is implementation evidence only.
+
 ### ACCEPTED: Reach muzzle height - 2026-07-27
 
 `muzzle_height_m` raises the re-parented muzzle effect origin - the flash and

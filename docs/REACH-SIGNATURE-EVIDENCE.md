@@ -337,6 +337,81 @@ candidate. Evidence:
 (log SHA-256
 `E6BA52C4671C03002C003D7FF3BAEEA2CF125283E605D6BDC6F5976B6E9C1CFF`).
 
+## Static-world black geometry: lightmap-shadow isolation candidate (UNTESTED)
+
+The headset boundary is unusually specific. Large first-person weapons and
+nearby vehicles trigger hard black regions on authored terrain and other static
+world surfaces. The caster itself, characters, vehicles, first-person weapons,
+sky, grass blades, and instanced rocks stay lit. The regions differ between the
+two eyes but remain attached to world depth. This is the exact receiver/caster
+boundary of Reach's dynamic lightmap-shadow renderer.
+
+Official HREK establishes the system rather than merely naming a retail debug
+byte:
+
+- HREK contains the source/assert path `render_lightmap_shadows.cpp`, the
+  profile names `lightmap shadow generate` and `lightmap shadow apply`, and the
+  object-tag fields `lightmap shadow mode` / `does not cast shadow`.
+- HREK `player_view_render` calls the lightmap-shadow wrapper at
+  `0x00834CC3 -> 0x008365F0`. The wrapper checks the official
+  `render_lightmap_shadows` boolean at `0x02056C75` from instruction
+  `0x00836664`, then calls the source-named renderer at `0x00865910`.
+- Immediately afterward, HREK's `apply_lightmap_shadows_to_single_pass` path
+  at `0x00834D1A-0x00834E0C` applies the generated surfaces before the
+  source-named `render_static_lighting` call at `0x00834E31`.
+- The official type-5 boolean descriptor is at `0x02014C30`; its live value is
+  `0x02056C75` and its authored value is one.
+
+The pinned retail module has the same complete control-flow chain:
+
+| Evidence | Retail RVA |
+| --- | --- |
+| Name `render_lightmap_shadows` | `0x009EB120` |
+| Type-5 descriptor -> live value | `0x00B41080 -> 0x00B4444D` |
+| Player-view call -> wrapper | `0x0026CB8F -> 0x0026E7B4` |
+| Wrapper compare of live boolean | `0x0026E7C4` |
+| Enabled call -> shadow renderer | `0x0026E7E3 -> 0x0028B3D0` |
+| Apply call -> optimized apply block | `0x0026CBA9 -> 0x0026E878` |
+
+The disabled branch cannot feed a prior-eye or prior-frame surface into the
+later apply. Retail wrapper `0x0026E7BD` first sets untouched sentinel
+`0x04E38908 = 1`; false branch `0x0026E7D4` skips the renderer. Every producer
+that actually acquires shadow surface 2 goes through helper `0x00252F08`, which
+conditionally clears the current surface through `0x002511C4` and then zeros
+the sentinel at `0x00252F5D`. Apply gate `0x0026E893-0x0026E89D` skips when the
+surface remains untouched. HREK repeats the same protocol at wrapper
+`0x00836654`, surface helper `0x007CB0D0`, and apply gate
+`0x00834D0A-0x00834D14`. Disabling generation therefore means either no apply,
+or application of a surface cleared and touched by another current-frame
+producer; stale reuse has no path.
+
+Retail `0x0028B3D0` and descendant `0x0028BAB4` enumerate object casters and
+render their lightmap shadows. Its explicit camera-derived read at
+`0x0028E171` uses the camera-stack workspace selected through global
+`0x00C878A8`. Every field it consumes is inside the secondary-derived `0xC4`
+block that the existing eye transaction already refreshes and mirrors for each
+eye. The pass therefore is not reading a camera block omitted by the current
+per-eye rebuild; the direct isolation boundary is the pass itself.
+
+This is **not** the rejected `render_shadow_screenspace` /
+`_surface_shadow_mask` branch. That surface was captured after real clears and
+measured 100% lit in both eyes while the headset defect remained unchanged.
+The lightmap-shadow renderer is an earlier object-caster -> static-lightmap
+receiver path and does not use that all-white screen-space mask as its defining
+boundary.
+
+The untested candidate resolves the descriptor, name, type, value pointer,
+player-view call, wrapper compare, and renderer call exactly. For each admitted
+VR eye it saves the title boolean, clears it immediately around stock
+`player_view_render`, and restores it in `__finally`. Flat, screenshot, nested,
+and unclaimed renders remain stock. Hot-path diagnostics are atomic counters;
+the worker reports the zero-sample armed state, completed `1 -> 0 -> 1` eye
+scopes, already-disabled entry states, and all write/restore failures. A failed
+binding leaves only this feature stock; a failed scoped restoration drops that
+frame and retains an ownership record until restoration succeeds. This exact
+pass is a receiver-boundary candidate, not yet a proven root cause. No depth,
+Z-camera, SSAO, global shader, or generic postprocess behavior changes.
+
 The same `0x121083` caller, entry
 `haloreach.dll+0x120FDC` through `+0x1210D3`. Its exact entry signature is:
 

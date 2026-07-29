@@ -554,6 +554,29 @@ inline constexpr uintptr_t kReachMotionBlurMaxEntryRva = 0x00B3A1C8;
 inline constexpr uintptr_t kReachMotionBlurScaleEntryRva = 0x00B3A1E0;
 inline constexpr uintptr_t kReachMotionBlurMaxValueRva = 0x00B44600;
 inline constexpr uintptr_t kReachMotionBlurScaleValueRva = 0x00B44604;
+// Reach's object lightmap-shadow pass writes dynamic caster shadows specifically
+// onto static world lightmaps. That receiver boundary matches the headset fault:
+// large first-person weapons or a nearby vehicle trigger hard black regions on
+// world geometry while the reported caster, characters, decorators, sky, and
+// first-person presentation remain lit. It remains an isolation candidate until
+// this exact behavior is tested in the headset.
+//
+// This is NOT `render_shadow_screenspace` or `_surface_shadow_mask`. The latter
+// was measured 100% white in both eyes and is a rejected branch. Official HREK
+// publishes `render_lightmap_shadows` as a type-5 boolean at descriptor
+// 0x02014C30 -> value 0x02056C75. HREK's player-view wrapper checks it at
+// 0x00836664 before calling the source-named lightmap-shadow renderer at
+// 0x00865910. Retail repeats that exact control flow: its sole player-view call
+// at 0x0026CB8F enters wrapper 0x0026E7B4, the compare at 0x0026E7C4 reads the
+// live descriptor value below, and 0x0026E7E3 calls the retail renderer.
+inline constexpr uintptr_t kReachLightmapShadowsNameRva = 0x009EB120;
+inline constexpr uintptr_t kReachLightmapShadowsEntryRva = 0x00B41080;
+inline constexpr uintptr_t kReachLightmapShadowsValueRva = 0x00B4444D;
+inline constexpr uintptr_t kReachLightmapShadowsPlayerCallRva = 0x0026CB8F;
+inline constexpr uintptr_t kReachLightmapShadowsWrapperRva = 0x0026E7B4;
+inline constexpr uintptr_t kReachLightmapShadowsCompareRva = 0x0026E7C4;
+inline constexpr uintptr_t kReachLightmapShadowsRenderCallRva = 0x0026E7E3;
+inline constexpr uintptr_t kReachLightmapShadowsRenderRva = 0x0028B3D0;
 // Proven first-person production anchors. 0x2B4EB0 is the final visible body
 // palette consumer and 0x0CF1A4 publishes the live interpolation graph used by
 // body, marker, and held-object consumers. The palette decodes the render model
