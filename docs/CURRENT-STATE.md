@@ -130,9 +130,17 @@ still requires the normal Halo 3 regression before a release.
 ### HEADSET-PENDING: Reach owned-eye native SSAO/HDAO isolation - 2026-07-29
 
 This candidate is not accepted and does not advance the public pointer above.
-Its exact source, package, and artifact hashes must be recorded after packaging;
-the only acceptance result is the user's headset result with a known trigger
+The only acceptance result is the user's headset result with a known trigger
 (long weapon and/or nearby Ghost/Revenant).
+
+| Identity | Value |
+| --- | --- |
+| Source | `8d7af6e25418c2d2c86aa518d8d8f199a6e7080d` |
+| Candidate package | `out/candidates/8d7af6e-reach-fp-parity-20260729-140858597Z` |
+| `halo3xr.dll` SHA-256 | `99693E1488ACA887DEEA09BA4D438EC5D4C446FF5911A9ED04060342D0F7E7A6` |
+| `halo3xr_launcher.exe` SHA-256 | `EB9EE3FFEE013D14EB44D7911FCC051921D7136A0704F0440791BE7C093D0843` |
+| Deployment | Independently hash-verified in both Steam and Store `Halo_MCC_VR` folders; MCC was not launched and config was unchanged |
+| Headset result | Pending |
 
 It makes exactly one behavioral change: the pinned retail native SSAO/HDAO
 callee at `haloreach.dll+0x2A13A0` returns without drawing only for an exact

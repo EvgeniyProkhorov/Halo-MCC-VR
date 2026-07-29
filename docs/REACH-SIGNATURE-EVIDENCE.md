@@ -493,6 +493,14 @@ arm logs state zero samples unconditionally, and the first actual suppression
 reports eye-0/eye-1 counts so a headset run cannot be mistaken for an executed
 candidate if its ownership gate never fired.
 
+Packaged headset-pending identity: source
+`8d7af6e25418c2d2c86aa518d8d8f199a6e7080d`, candidate
+`out/candidates/8d7af6e-reach-fp-parity-20260729-140858597Z`, DLL SHA-256
+`99693E1488ACA887DEEA09BA4D438EC5D4C446FF5911A9ED04060342D0F7E7A6`.
+The exact DLL hash was independently verified after automatic installation to
+both Steam and Microsoft Store editions. MCC was not launched and the existing
+configuration was not changed.
+
 ## Static-world black geometry: stale DrawIndexed diagnostic isolation
 
 The exact E490 baseline and failed `839aed7` log both contain the July 26
