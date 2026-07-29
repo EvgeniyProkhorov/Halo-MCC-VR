@@ -99,6 +99,38 @@ depth/stencil surface with the lighting accumulation target. The failed headset
 result proves that preserving the native FP camera rebuild did not correct the
 reported pixels; the shared attachment fact must not be promoted to a cause.
 
+### CANDIDATE: commit each rebuilt Reach outer eye before world rendering - 2026-07-29
+
+Headset acceptance is pending; this does not advance the public pointer above.
+This candidate matches one existing Halo 3/ODST behavior that Reach uniquely
+omitted: after rebuilding the current eye's CPU camera, commit that exact eye to
+the title's renderer before entering the world render.
+
+The paired same-scene screenshots supplied by the user are the controlling
+runtime evidence: with the sniper selected, exact static rock/terrain surfaces
+are solid black; after switching weapons, those surfaces render normally while
+the sky and HUD remain correct. The user also reports that the black surfaces
+retain geometry/depth and differ between eyes. This candidate does not label
+that as projection, SSAO, shadow, rain, or missing geometry.
+
+Pinned retail and official HREK close a missing state-commit edge. Reach's stock
+outer camera-stack push invokes callback `haloreach+0x26BFD4`; it rebinds the
+viewport/scissor state and uploads the active `player_view+0x490` camera bank to
+ViewVS/ViewPS. Our inner stereo hook rebuilt `player_view+0x490` for each eye
+after that stock centre-camera push, but entered `player_view_render` without
+invoking the callback again. The first later per-eye camera upload was inside
+the weapon-dependent nested first-person stage. Halo 3 and ODST already perform
+their equivalent upload/preparation before each eye render.
+
+The candidate invokes the exact no-argument outer callback once after each
+eye's camera-state/matrix rebuild and before `player_view_render`. The callback
+is identity-gated by a unique loaded-image AOB and complete body hash, and the
+worker reports ACTIVE only after one complete two-eye render/copy transaction
+returns with both callback bits for one stable prepared serial. Projection
+math, FP camera rebuild behavior, culling
+policy, SSAO, shadows, depth handling, and controller/head separation are
+unchanged.
+
 ### REJECTED: invalid Reach post-palette wrist write as black-world cause - 2026-07-29
 
 This result is evidence only and does not advance the public pointer above.

@@ -443,6 +443,9 @@ inline constexpr uint32_t kReachPlayerViewCount = 4;
 inline constexpr uintptr_t kReachDefaultWorkspaceRva = 0x00C9FAE0;
 inline constexpr size_t kReachRenderScopeSnapshotSize = 0x02B0;
 inline constexpr uintptr_t kReachCameraStackCallbackRva = 0x0026BFD4;
+inline constexpr size_t kReachCameraStackCallbackBodySize = 0x006C;
+inline constexpr char kReachCameraStackCallbackBodySha256[] =
+    "6E2A249710A53498ADE7AFB12EE7414099D16315B2F06D90D8EC01D185E6B0C4";
 inline constexpr uintptr_t kReachActiveViewRva = 0x04E389A8;
 inline constexpr uintptr_t kReachCameraStackDepthRva = 0x00B43ABC;
 inline constexpr uintptr_t kReachCameraStackPointersRva = 0x00C878A8;
@@ -1401,6 +1404,25 @@ inline constexpr std::array<uint8_t, 69> kReachPlayerViewRenderAob{
     0x81, 0xA4, 0x03, 0x00, 0x00,
 };
 
+inline constexpr std::array<uint8_t, 28> kReachCameraStackCallbackAob{
+    0x40, 0x53, 0x48, 0x83, 0xEC, 0x20, 0x4C, 0x8B,
+    0x15, 0x00, 0x00, 0x00, 0x00, 0x48, 0x8B, 0x1D,
+    0x00, 0x00, 0x00, 0x00, 0x4D, 0x8B, 0xCA, 0x4C,
+    0x89, 0x54, 0x24, 0x30,
+};
+
+inline constexpr auto kReachCameraStackCallbackAobMask = []
+{
+    std::array<uint8_t, kReachCameraStackCallbackAob.size()> mask{};
+    for (auto& byte : mask)
+        byte = 0xFF;
+    for (size_t index = 9; index <= 12; ++index)
+        mask[index] = 0;
+    for (size_t index = 16; index <= 19; ++index)
+        mask[index] = 0;
+    return mask;
+}();
+
 inline constexpr auto kReachPlayerViewRenderAobMask = []
 {
     std::array<uint8_t, kReachPlayerViewRenderAob.size()> mask{};
@@ -1475,6 +1497,9 @@ struct ReachRenderCandidateProof
     uint32_t playerViewRenderMatchCount = 0;
     bool playerViewRenderAtExpectedRva = false;
     bool playerViewRenderBodyHash = false;
+    uint32_t cameraStackCallbackMatchCount = 0;
+    bool cameraStackCallbackAtExpectedRva = false;
+    bool cameraStackCallbackBodyHash = false;
     uint32_t frustumHelperMatchCount = 0;
     bool frustumHelperAtExpectedRva = false;
     bool frustumHelperExecutableRange = false;
@@ -1501,6 +1526,9 @@ inline bool ReachRenderCandidateProofComplete(
         proof.playerViewRenderMatchCount == 1 &&
         proof.playerViewRenderAtExpectedRva &&
         proof.playerViewRenderBodyHash &&
+        proof.cameraStackCallbackMatchCount == 1 &&
+        proof.cameraStackCallbackAtExpectedRva &&
+        proof.cameraStackCallbackBodyHash &&
         proof.frustumHelperMatchCount == 1 &&
         proof.frustumHelperAtExpectedRva &&
         proof.frustumHelperExecutableRange &&

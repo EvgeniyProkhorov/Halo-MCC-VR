@@ -52,6 +52,9 @@ namespace
         proof.playerViewRenderMatchCount = 1;
         proof.playerViewRenderAtExpectedRva = true;
         proof.playerViewRenderBodyHash = true;
+        proof.cameraStackCallbackMatchCount = 1;
+        proof.cameraStackCallbackAtExpectedRva = true;
+        proof.cameraStackCallbackBodyHash = true;
         proof.frustumHelperMatchCount = 1;
         proof.frustumHelperAtExpectedRva = true;
         proof.frustumHelperExecutableRange = true;
@@ -816,14 +819,18 @@ int main()
     {
         static_assert(kReachMainRenderViewAob.size() == 32);
         static_assert(kReachPlayerViewRenderAob.size() == 69);
+        static_assert(kReachCameraStackCallbackAob.size() == 28);
         static_assert(kReachFrustumHelperAob.size() == 25);
         Check(std::string_view(kReachMainRenderViewBodySha256) ==
                   "95DF3EFFF9AC6EE29887D1272CCA8D7BF3E58F87041BAD8032107825B733FE89" &&
               std::string_view(kReachPlayerViewRenderBodySha256) ==
                   "2628D1189621EACED7C95A1F295815D70E7783054F1C3CBA46799F838CC33C60" &&
+              std::string_view(kReachCameraStackCallbackBodySha256) ==
+                  "6E2A249710A53498ADE7AFB12EE7414099D16315B2F06D90D8EC01D185E6B0C4" &&
               kReachMainRenderViewBodySize == 515 &&
-              kReachPlayerViewRenderBodySize == 2314,
-            "Reach render candidate pins both exact body identities");
+              kReachPlayerViewRenderBodySize == 2314 &&
+              kReachCameraStackCallbackBodySize == 0x6C,
+            "Reach render candidate pins the renderer and outer-camera callback identities");
 
         constexpr float kReachTestIpdMeters = 0.064f;
         Check(std::isfinite(kReachWorldUnitsPerMeter) &&
@@ -955,6 +962,27 @@ int main()
                   kReachPlayerViewRenderAobMask.data(),
                   kReachPlayerViewRenderAob.size()) == 0,
             "Reach inner signature rejects a changed non-cookie byte");
+
+        auto outerCameraCallbackEntry = kReachCameraStackCallbackAob;
+        for (size_t index = 9; index <= 12; ++index)
+            outerCameraCallbackEntry[index] = static_cast<uint8_t>(index * 7);
+        for (size_t index = 16; index <= 19; ++index)
+            outerCameraCallbackEntry[index] = static_cast<uint8_t>(index * 11);
+        Check(CountReachMaskedPattern(
+                  outerCameraCallbackEntry.data(),
+                  outerCameraCallbackEntry.size(),
+                  kReachCameraStackCallbackAob.data(),
+                  kReachCameraStackCallbackAobMask.data(),
+                  kReachCameraStackCallbackAob.size()) == 1,
+            "Reach outer-camera callback signature masks only its two RIP-relative globals");
+        outerCameraCallbackEntry[20] ^= 1;
+        Check(CountReachMaskedPattern(
+                  outerCameraCallbackEntry.data(),
+                  outerCameraCallbackEntry.size(),
+                  kReachCameraStackCallbackAob.data(),
+                  kReachCameraStackCallbackAobMask.data(),
+                  kReachCameraStackCallbackAob.size()) == 0,
+            "Reach outer-camera callback signature rejects a changed fixed byte");
 
         auto frustumEntry = kReachFrustumHelperAob;
         std::array<uint8_t, kReachFrustumHelperAob.size()> frustumMask{};
@@ -1121,6 +1149,10 @@ int main()
               proofRejects([](auto& p) { p.playerViewRenderMatchCount = 2; }) &&
               proofRejects([](auto& p) { p.playerViewRenderAtExpectedRva = false; }) &&
               proofRejects([](auto& p) { p.playerViewRenderBodyHash = false; }) &&
+              proofRejects([](auto& p) { p.cameraStackCallbackMatchCount = 0; }) &&
+              proofRejects([](auto& p) { p.cameraStackCallbackMatchCount = 2; }) &&
+              proofRejects([](auto& p) { p.cameraStackCallbackAtExpectedRva = false; }) &&
+              proofRejects([](auto& p) { p.cameraStackCallbackBodyHash = false; }) &&
               proofRejects([](auto& p) { p.frustumHelperMatchCount = 0; }) &&
               proofRejects([](auto& p) { p.frustumHelperMatchCount = 2; }) &&
                proofRejects([](auto& p) { p.frustumHelperAtExpectedRva = false; }) &&

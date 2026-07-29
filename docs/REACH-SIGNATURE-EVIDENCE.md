@@ -1176,6 +1176,64 @@ The preserved log is
 `ACCABA6DED2F9B9507D9F7711EC2814F9D93AE4A1F856012F42E25BB086907F7`).
 The candidate behavior is reverted before any subsequent candidate.
 
+### Outer eye camera commit before world rendering
+
+Halo 3's headset-confirmed behavior being matched is precise: after rebuilding
+each eye camera, the hook uploads/prepares that eye through the engine before
+calling the eye's world renderer. Halo 3 does so at `game.cpp`'s
+`g_fpCameraUpload` / `g_prepareView` edge; ODST performs the homologous
+`fpCameraUpload` / `prepareView` edge. Reach's inner stereo path rebuilt its
+compact, derived, `player_view+0x3B0`, and `player_view+0x490` CPU blocks but
+previously entered `player_view_render` without an equivalent renderer commit.
+
+The pinned retail outer camera-stack callback is
+`haloreach.dll+0x0026BFD4..0x0026C040` (`0x6C` bytes, SHA-256
+`6E2A249710A53498ADE7AFB12EE7414099D16315B2F06D90D8EC01D185E6B0C4`).
+Its 28-byte entry signature, wildcarding only the two RIP-relative global
+displacements, has exactly one executable match at that RVA. The stock push at
+`0x251C08` stores the callback in workspace `+0x2A8` and invokes it at
+`0x251C44`; pop invokes the newly exposed top callback at `0x251C7E`.
+
+The callback reads the active player view, calls `0x2505B0` at `0x26C028`, then
+loads active `player_view+0x490`, sets the bank selector to true, and tail-jumps
+to `0x282CA8` at `0x26C03B`. Static inspection of `0x2505B0` and its official
+HREK homolog shows an idempotent viewport/scissor rebind and dirty-state update,
+not a temporal-frame advance. `0x282CA8` uploads ViewVS `0x4D0000/0x4D0004`
+and ViewPS `0x530000` from that current matrix bank.
+
+Official HREK independently exposes the same outer transaction. Both normal
+`main_render_view` paths install callback `0x837140` and push it through
+`0x7E6E60`; the callback calls the viewport/scissor path at `0x7C4900` and the
+ViewVS/ViewPS uploader at `0x856500` with active `player_view+0x490`. Its
+camera-stack design explicitly makes it a state-rebind callback safe to invoke
+whenever the active stack camera changes.
+
+The pre-candidate hook order was therefore:
+
+1. stock outer push commits the head-centre camera;
+2. the hook rebuilds the first eye's CPU camera and current-matrix bank;
+3. `player_view_render` begins without committing that eye;
+4. only the later, weapon-dependent nested FP rebuild uploads an eye camera;
+5. the hook restores CPU blocks between eyes without a renderer commit, then
+   repeats the omission for the second eye.
+
+The user-provided paired screenshots show the same scene and pose with exact
+static rock/terrain receivers black under the selected sniper and normal after
+a weapon switch, while sky and HUD remain intact. The user reports retained
+geometry/depth and a different pattern per eye. Those observations do not by
+themselves prove which renderer state is wrong; they establish the acceptance
+symptom. The missing native commit above is a code fact and the candidate under
+test, not yet a headset-confirmed cause.
+
+The candidate adds exactly one behavioral edge: after each per-eye
+camera-state/matrix rebuild and before `player_view_render`, invoke the verified
+no-argument outer callback. It does not alter compact-camera values, projection,
+culling policy, first-person rebuilds, depth/stencil modes, SSAO, shadows, or
+head/controller transforms. A preallocated atomic status records generation,
+prepared serial, and eye mask; the cold worker reports both-eye ACTIVE, including
+the armed-but-zero-sample install state, without logging or locking in the
+render hook. Headset acceptance remains pending.
+
 The earlier camera-only candidate
 `6e12536ce401772876d55de0821780546af04131`, package
 `out/candidates/6e12536-reach-fp-parity-20260725-083057894Z`, exact DLL SHA-256

@@ -619,6 +619,9 @@ bool ReachRender_RunLoadedImagePreflight(
             image, kReachPlayerViewRenderRva,
             kReachPlayerViewRenderBodySize) ||
         !ExecutableContains(
+            image, kReachCameraStackCallbackRva,
+            kReachCameraStackCallbackBodySize) ||
+        !ExecutableContains(
             image, kReachFrustumHelperRva,
             kReachFrustumHelperAob.size()) ||
         !ExecutableContains(
@@ -647,6 +650,10 @@ bool ReachRender_RunLoadedImagePreflight(
         image, kReachPlayerViewRenderAob.data(),
         kReachPlayerViewRenderAobMask.data(),
         kReachPlayerViewRenderAob.size());
+    const PatternResult cameraStackCallback = ScanExecutable(
+        image, kReachCameraStackCallbackAob.data(),
+        kReachCameraStackCallbackAobMask.data(),
+        kReachCameraStackCallbackAob.size());
     const PatternResult frustum = ScanExecutable(
         image, kReachFrustumHelperAob.data(), frustumMask.data(),
         kReachFrustumHelperAob.size());
@@ -663,6 +670,10 @@ bool ReachRender_RunLoadedImagePreflight(
     result.proof.playerViewRenderMatchCount = player.count;
     result.proof.playerViewRenderAtExpectedRva =
         player.first == moduleBase + kReachPlayerViewRenderRva;
+    result.proof.cameraStackCallbackMatchCount = cameraStackCallback.count;
+    result.proof.cameraStackCallbackAtExpectedRva =
+        cameraStackCallback.first ==
+            moduleBase + kReachCameraStackCallbackRva;
     result.proof.frustumHelperMatchCount = frustum.count;
     result.proof.frustumHelperAtExpectedRva =
         frustum.first == moduleBase + kReachFrustumHelperRva;
@@ -672,10 +683,12 @@ bool ReachRender_RunLoadedImagePreflight(
     result.proof.fpCameraUploadMatchCount = fpUpload.count;
     result.proof.fpCameraUploadAtExpectedRva =
         fpUpload.first == moduleBase + kReachFpCameraUploadRva;
-    if (main.count != 1 || player.count != 1 || frustum.count != 1 ||
+    if (main.count != 1 || player.count != 1 ||
+        cameraStackCallback.count != 1 || frustum.count != 1 ||
         fpCamera.count != 1 || fpUpload.count != 1 ||
         !result.proof.mainRenderViewAtExpectedRva ||
         !result.proof.playerViewRenderAtExpectedRva ||
+        !result.proof.cameraStackCallbackAtExpectedRva ||
         !result.proof.frustumHelperAtExpectedRva ||
         !result.proof.fpCameraRebuildAtExpectedRva ||
         !result.proof.fpCameraUploadAtExpectedRva)
@@ -694,6 +707,11 @@ bool ReachRender_RunLoadedImagePreflight(
             moduleBase + kReachPlayerViewRenderRva),
         kReachPlayerViewRenderBodySize,
         kReachPlayerViewRenderBodySha256);
+    result.proof.cameraStackCallbackBodyHash = HashBytes(
+        reinterpret_cast<const void*>(
+            moduleBase + kReachCameraStackCallbackRva),
+        kReachCameraStackCallbackBodySize,
+        kReachCameraStackCallbackBodySha256);
     result.proof.fpCameraRebuildBodyHash = HashBytes(
         reinterpret_cast<const void*>(
             moduleBase + kReachFpCameraRebuildRva),
@@ -715,6 +733,7 @@ bool ReachRender_RunLoadedImagePreflight(
     }
     if (!result.proof.mainRenderViewBodyHash ||
         !result.proof.playerViewRenderBodyHash ||
+        !result.proof.cameraStackCallbackBodyHash ||
         !result.proof.fpCameraRebuildBodyHash ||
         !result.proof.fpCameraUploadBodyHash ||
         !result.proof.fpCameraWrapperBodyHashes)

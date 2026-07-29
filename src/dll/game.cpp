@@ -9839,6 +9839,7 @@ namespace
     using ReachCameraStateUpdaterFn = void(__fastcall*)(void*, void*);
     using ReachMatrixBuilderFn =
         void(__fastcall*)(void*, void*, void*, void*, void*);
+    using ReachCameraStackCallbackFn = void(__fastcall*)();
     using ReachFpCameraRebuildFn = void(__fastcall*)(void*, bool);
     using ReachFpCameraUploadFn = void(__fastcall*)(void*, void*);
 
@@ -9848,9 +9849,11 @@ namespace
         ReachProjectionBuilderFn projection = nullptr;
         ReachCameraStateUpdaterFn cameraState = nullptr;
         ReachMatrixBuilderFn matrix = nullptr;
+        ReachCameraStackCallbackFn commitOuterCamera = nullptr;
         bool Ready() const
         {
-            return frustum && projection && cameraState && matrix;
+            return frustum && projection && cameraState && matrix &&
+                commitOuterCamera;
         }
     };
     ReachRenderHelpers g_reachHelpers;
@@ -10097,6 +10100,7 @@ namespace
     static_assert(std::atomic<bool>::is_always_lock_free);
     static_assert(std::atomic<uint8_t>::is_always_lock_free);
     static_assert(std::atomic<uint32_t>::is_always_lock_free);
+    static_assert(std::atomic<uint64_t>::is_always_lock_free);
 
     // Published only after the matching eye was rendered and copied. The
     // release/acquire serial binds each pair of projection scales to the exact
@@ -11457,6 +11461,26 @@ namespace
     } g_reachFpCameraUploadStatus;
     std::atomic<uint32_t> g_reachFpCameraLoggedGeneration{0};
 
+    struct ReachOuterCameraCommitStatus
+    {
+        std::atomic<uint64_t> preparedSerial{0};
+        std::atomic<uint32_t> generation{0};
+        std::atomic<uint32_t> eyeMask{0};
+    } g_reachOuterCameraCommitStatus;
+    std::atomic<uint32_t> g_reachOuterCameraCommitLoggedGeneration{0};
+
+    void PublishReachOuterCameraCommitPair(
+        uint32_t generation, uint64_t preparedSerial,
+        uint32_t eyeMask) noexcept
+    {
+        g_reachOuterCameraCommitStatus.generation.store(
+            generation, std::memory_order_relaxed);
+        g_reachOuterCameraCommitStatus.eyeMask.store(
+            eyeMask, std::memory_order_relaxed);
+        g_reachOuterCameraCommitStatus.preparedSerial.store(
+            preparedSerial, std::memory_order_release);
+    }
+
     void ReachBeginFpPairScope(uint32_t generation, uint64_t preparedSerial,
                                const FpExplicitPoseTargets& targets);
     void ReachEndFpPairScope();
@@ -12754,6 +12778,7 @@ namespace
         bool completed = false;
         bool transactionValid = true;
         uint32_t capturedEyes = 0;
+        uint32_t committedOuterCameraEyes = 0;
         __try
         {
             for (uint32_t pass = 0; pass < 2; ++pass)
@@ -12843,6 +12868,13 @@ namespace
                     compact + kReachCompactRenderBoundsOffset,
                     reinterpret_cast<void*>(
                         playerView + kReachPlayerViewProjectionOffsetPairOffset));
+                // The stock outer camera-stack push committed only the centre
+                // camera. Commit this rebuilt eye through Reach's exact native
+                // outer callback before any world/material draw can consume
+                // stale ViewVS/ViewPS state from the centre, previous eye, or
+                // later weapon-dependent nested first-person pass.
+                g_reachHelpers.commitOuterCamera();
+                committedOuterCameraEyes |= uint32_t{1} << policy.eye;
 
                 if (policy.writeLastWindow)
                     *reinterpret_cast<uint8_t*>(
@@ -12908,7 +12940,14 @@ namespace
                            savedPv, kReachPvSnapshotBytes);
                 }
             }
-            completed = transactionValid && capturedEyes == 2;
+            completed = transactionValid && capturedEyes == 2 &&
+                (committedOuterCameraEyes & 0x3u) == 0x3u;
+            if (completed)
+            {
+                PublishReachOuterCameraCommitPair(
+                    g_reachCamera.generation.load(std::memory_order_relaxed),
+                    access.preparedSerial, committedOuterCameraEyes);
+            }
         }
         __finally
         {
@@ -14719,6 +14758,14 @@ namespace
             0, std::memory_order_relaxed);
         g_reachFpCameraLoggedGeneration.store(
             0, std::memory_order_release);
+        g_reachOuterCameraCommitStatus.preparedSerial.store(
+            0, std::memory_order_release);
+        g_reachOuterCameraCommitStatus.generation.store(
+            0, std::memory_order_relaxed);
+        g_reachOuterCameraCommitStatus.eyeMask.store(
+            0, std::memory_order_relaxed);
+        g_reachOuterCameraCommitLoggedGeneration.store(
+            0, std::memory_order_release);
         g_aimSeen.store(false, std::memory_order_release);
         g_camValid.store(false, std::memory_order_release);
         g_baseCamValid.store(false, std::memory_order_release);
@@ -14821,6 +14868,14 @@ namespace
         g_reachFpCameraUploadStatus.eyeMask.store(
             0, std::memory_order_relaxed);
         g_reachFpCameraLoggedGeneration.store(
+            0, std::memory_order_release);
+        g_reachOuterCameraCommitStatus.preparedSerial.store(
+            0, std::memory_order_release);
+        g_reachOuterCameraCommitStatus.generation.store(
+            0, std::memory_order_relaxed);
+        g_reachOuterCameraCommitStatus.eyeMask.store(
+            0, std::memory_order_relaxed);
+        g_reachOuterCameraCommitLoggedGeneration.store(
             0, std::memory_order_release);
         g_reachHelpers = {};
         if (moduleReference)
@@ -16046,6 +16101,9 @@ namespace
             base + kReachCameraStateUpdaterRva);
         g_reachHelpers.matrix = reinterpret_cast<ReachMatrixBuilderFn>(
             base + kReachProjectionMatrixBuilderRva);
+        g_reachHelpers.commitOuterCamera =
+            reinterpret_cast<ReachCameraStackCallbackFn>(
+                base + kReachCameraStackCallbackRva);
         g_reachCamera.base = base;
         g_reachCamera.size = size;
         g_reachCamera.generation = generation;
@@ -16137,6 +16195,14 @@ namespace
         g_reachFpCameraUploadStatus.eyeMask.store(
             0, std::memory_order_relaxed);
         g_reachFpCameraLoggedGeneration.store(
+            0, std::memory_order_release);
+        g_reachOuterCameraCommitStatus.preparedSerial.store(
+            0, std::memory_order_release);
+        g_reachOuterCameraCommitStatus.generation.store(
+            0, std::memory_order_relaxed);
+        g_reachOuterCameraCommitStatus.eyeMask.store(
+            0, std::memory_order_relaxed);
+        g_reachOuterCameraCommitLoggedGeneration.store(
             0, std::memory_order_release);
         g_aimSeen.store(false, std::memory_order_release);
         g_camValid.store(false, std::memory_order_release);
@@ -16326,6 +16392,10 @@ namespace
                 static_cast<unsigned long long>(kReachLightmapShadowsValueRva),
                 static_cast<unsigned>(reachLightmapShadowsOriginal));
         }
+        LOG("Reach per-eye outer camera commit BOUND with zero samples: exact "
+            "native callback +0x%llX will rebind each rebuilt eye before "
+            "player_view_render",
+            static_cast<unsigned long long>(kReachCameraStackCallbackRva));
 
         return true;
     }
@@ -16359,6 +16429,37 @@ namespace
         LOG("Reach per-eye FP camera ACTIVE: both eyes uploaded world compact "
             "+ derived projection through the dedicated nested workspace "
             "(viewmodel depth uncrushed)");
+    }
+
+    void LogReachOuterCameraCommitIfReady()
+    {
+        const uint64_t serialBefore =
+            g_reachOuterCameraCommitStatus.preparedSerial.load(
+                std::memory_order_acquire);
+        if (!serialBefore)
+            return;
+        const uint32_t generation =
+            g_reachOuterCameraCommitStatus.generation.load(
+                std::memory_order_relaxed);
+        const uint32_t eyeMask =
+            g_reachOuterCameraCommitStatus.eyeMask.load(
+                std::memory_order_acquire);
+        const uint64_t serialAfter =
+            g_reachOuterCameraCommitStatus.preparedSerial.load(
+                std::memory_order_acquire);
+        if (serialBefore != serialAfter ||
+            generation != g_reachCamera.generation ||
+            (eyeMask & 0x3u) != 0x3u ||
+            generation == g_reachOuterCameraCommitLoggedGeneration.load(
+                std::memory_order_relaxed))
+        {
+            return;
+        }
+        g_reachOuterCameraCommitLoggedGeneration.store(
+            generation, std::memory_order_release);
+        LOG("Reach per-eye outer camera commit ACTIVE: both rebuilt eyes "
+            "committed through the native camera-stack callback before "
+            "player_view_render");
     }
 
     void LogReachFpStatusIfNew()
@@ -17140,6 +17241,7 @@ namespace
         ReachMuzzleLogTick();
         ReachWorldWristWriteLogTick();
         ReachCineProbeLogTick();
+        LogReachOuterCameraCommitIfReady();
         LogReachFpCameraUploadIfReady();
         LogReachFpStatusIfNew();
         const bool installed =

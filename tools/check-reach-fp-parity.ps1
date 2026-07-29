@@ -152,4 +152,9 @@ if ($logic -notmatch 'kReachFpCameraRebuildAob' -or
     $logic -notmatch 'exactFpCameraFlowEdges') {
     throw 'Reach FP parity gate missing: exact Reach camera rebuild/upload proof anchors.'
 }
+if ($logic -notmatch 'kReachCameraStackCallbackAob' -or
+    $logic -notmatch 'kReachCameraStackCallbackBodySha256' -or
+    $logic -notmatch 'cameraStackCallbackBodyHash') {
+    throw 'Reach camera evidence gate missing: exact outer-camera callback proof anchors.'
+}
 Write-Host 'Reach consistency check passed: no disproven Reach-only architecture reintroduced, Reach capabilities intact, evidence constants present.'
