@@ -137,24 +137,21 @@ namespace
     // long enough to need scrolling. A category is a plain row in a list, so
     // adding a settings area later costs one enum entry and one row.
     // ===================================================================
-    //  THE WELCOME MESSAGE. Edit the text below; it is the whole message.
-    //  Keep it SHORT -- this page is the first thing a player sees and a
-    //  wall of text does not get read. Blank lines separate paragraphs.
-    //  Do NOT hand-wrap prose: the page wraps to the panel width, so a
-    //  manual break would fight that and leave ragged short lines. The
-    //  indented setting lines below are deliberately short enough not to
-    //  wrap, which is what keeps them looking like a list.
+    //  THE WELCOME MESSAGE -- the author's note to players. This is the
+    //  whole message; edit the lines below and nothing else.
+    //
+    //  One line here is one line on screen. Lines still soft-wrap if the
+    //  panel is made narrow with the grab handle, so a long sentence stays
+    //  readable rather than being cut off.
     // ===================================================================
     constexpr const char* kWelcomeMessage =
-        "An alpha fan project. Not made by or endorsed by Microsoft or 343.\n"
-        "\n"
-        "Set these in MCC's own settings first:\n"
-        "    Frame rate 120, V-Sync off\n"
-        "    Halo 3 field of view 120\n"
-        "    MCC's FSR off - this mod does its own upscaling\n"
-        "\n"
-        "Launch from the Halo MCC VR launcher and choose the anti-cheat disabled "
-        "option. Campaign and custom games work; matchmaking does not.";
+        "Hi everyone, pancreations here!\n"
+        "Thank you for taking the time to get this up and running.\n"
+        "If you have any issues please reach out and let me know.\n"
+        "Expect the rest of the collection to be added over time";
+
+    constexpr const char* kWelcomeCloseHint =
+        "Press L3+R3 (Both Analog Sitcks) to close menu";
 
     enum MenuCategory
     {
@@ -514,26 +511,21 @@ namespace
 
         if (g_activeCategory == Cat_Welcome)
         {
-        // Wrapped to the pane instead of hand-broken with \n, so the message
-        // reflows when the grab handle resizes the panel.
-        ImGui::PushTextWrapPos(0.0f);
-        ImGui::TextUnformatted(kWelcomeMessage);
-        ImGui::PopTextWrapPos();
-        ImGui::Spacing();
-        ImGui::Separator();
-        // Short commit, not the full 40-char SHA: enough to identify a build in
-        // a report without reading as noise on the first page a player sees.
-        ImGui::TextDisabled("Build %.7s", HALOMCCVR_BUILD_COMMIT);
-        ImGui::Spacing();
         bool dontShow = !g_config.show_welcome;
-        if (ImGui::Checkbox("Don't show this again", &dontShow))
+        if (ImGui::Checkbox("Never show again", &dontShow))
         {
             g_config.show_welcome = !dontShow;
             changed = true;
         }
         ImGui::Spacing();
-        if (ImGui::Button("Accept"))
-            Menu_Toggle();
+        ImGui::TextUnformatted(kWelcomeCloseHint);
+        ImGui::Separator();
+        ImGui::Spacing();
+        ImGui::PushTextWrapPos(0.0f);
+        ImGui::TextUnformatted(kWelcomeMessage);
+        ImGui::PopTextWrapPos();
+        ImGui::Spacing();
+        ImGui::Separator();
         }
 
         if (g_activeCategory == Cat_Status)
