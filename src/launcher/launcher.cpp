@@ -135,23 +135,6 @@ static bool ProcessRunning(const wchar_t* exeName)
     return FindProcessId(exeName) != 0;
 }
 
-// The launcher is the user-started foreground application, so Windows permits
-// it to pass foreground-activation rights to the exact MCC process it starts.
-// The DLL consumes that one-time permission after MCC has created its real game
-// window. Failure is non-fatal: VR remains usable and the user can still click
-// the game exactly as before.
-static constexpr bool kStartupFocusCandidateEnabled = false;
-
-static void GrantGameForegroundPermission(DWORD pid)
-{
-    if (AllowSetForegroundWindow(pid))
-        LauncherLog("foreground: granted activation permission to game pid %lu", pid);
-    else
-        LauncherLog("foreground: could not grant activation permission to game pid %lu "
-                    "(error %lu); startup focus will remain best-effort",
-                    pid, GetLastError());
-}
-
 // Poll for a process by name. Used only on the Store path, where the game is
 // started by Windows rather than by us, so we cannot create it suspended and
 // must instead claim it as soon as it exists. The poll is deliberately tight:
@@ -469,8 +452,6 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
         }
         LauncherLog("game process created, pid %lu", pi.dwProcessId);
 
-        if (kStartupFocusCandidateEnabled)
-            GrantGameForegroundPermission(pi.dwProcessId);
         injected = InjectDll(pi.hProcess, dllPath, failWhy);
         if (!injected)
         {
@@ -544,8 +525,6 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
             return 1;
         }
         LauncherLog("game process appeared, pid %lu", gamePid);
-        if (kStartupFocusCandidateEnabled)
-            GrantGameForegroundPermission(gamePid);
 
         // The process exists but its loader may not have populated the module
         // list yet. Injecting into that window is what makes CreateRemoteThread
