@@ -1,12 +1,11 @@
 # Current state
 
-Authoritative as of 2026-07-29. This file is the only active accepted-build
+Authoritative as of 2026-07-30. This file is the only active accepted-build
 pointer. Detailed pre-cleanup experiments remain available in Git history; they
 are evidence, not instructions.
 
-> **Start here: "PUBLIC RELEASE: MCC VR Alpha 0.3.0 - 2026-07-27" below is the
-> current accepted state**, and the first public release containing Halo: Reach.
-> Everything dated earlier is history.
+> **Start here: "PUBLIC RELEASE: MCC VR Alpha 0.3.1 - 2026-07-30" below is the
+> current accepted state.** Everything dated earlier is history.
 > Several older sections describe Reach features as impossible, mandatory, or
 > not yet built that have since been built and headset-confirmed - in
 > particular the authored crosshair, which older text calls unimplementable in
@@ -19,13 +18,49 @@ are evidence, not instructions.
 > instead of checked. If a comment or doc says a title cannot do something,
 > verify it against the code before building on it.
 
-> **CURRENT HEADSET-ACCEPTED DEVELOPMENT BUILD:** source
-> `081002cdf85ae40151b657101a1101930083cad8`, DLL SHA-256
-> `EA7D114CFED85D3E0A5EB2993422CA0918FC2850549680F3976A058B7D43FB66`.
-> This is the accepted cumulative universal-cutscene-theatre build with ODST's
-> title-native free-look exclusion and the L3+R3 VR-space recenter/menu chord.
-> The public distribution release remains Alpha 0.3.0 below; do not confuse its
-> older DLL with the current headset-accepted development artifact.
+## PUBLIC RELEASE: MCC VR Alpha 0.3.1 - 2026-07-30
+
+**The public known-good product is now `MCC_VR_ALPHA_0.3.1`, a hotfixes update
+over 0.3.0.** It supersedes `MCC_VR_ALPHA_0.3.0`.
+
+| Identity | Value |
+| --- | --- |
+| Runtime source | `60f3929f63474459e51ce3d641fc14dc5d49529b` |
+| Build | Release x64, preset `release`, ODST ON, Reach ON, ReachRender ON |
+| Candidate package | `out/candidates/60f3929-reach-fp-parity-20260730-104312277Z` |
+| `halo3xr.dll` SHA-256 | `5B4A852C3175021AD433373BACB825BCC5D0EDFC52AF620A26C8A2C55F00BA64` |
+| `halo3xr_launcher.exe` SHA-256 | `9F510506981B882BD571E892B88AD26951CA08948C7DADB031088060E918824A` |
+| `halomccvr.cfg` SHA-256 | `5847BF57E18133954C172103CD13F65560896AC198A119CC4BA1BE1202F36C2D` |
+| ZIP SHA-256 | `D139C7E7D507E114EB8F54A10D4FD1DAAC797D4722D9E5C29ADB969DBBB9B2AF` |
+| Title coverage | Halo 3, Halo 3: ODST, Halo: Reach |
+| Installed editions | Steam and Microsoft Store; hashes verified independently in both `Halo_MCC_VR` folders after install |
+| Accepted runtime | Steam edition, SteamVR/OpenXR 2.17.6, Meta Quest 3 via Meta Link/Air Link at 120 Hz |
+| Headset result | Accepted. Game boots into VR on both editions; ALVR double-vision fix confirmed stable; the room-fixed cutscene theatre entered correctly on a Halo 3 cutscene with real 3D depth on this exact build. |
+
+This release folds in everything accepted on `fix/halo3-theatre-fov-06e76a2`
+since the 0.3.1 hotfix was first staged: Game Pass/Store support and the ALVR
+double-vision fix (both already staged), the universal cutscene theatre
+(including the native-FOV two-view projection path now headset-accepted on
+Quest 3 - see `docs/CUTSCENE-THEATRE-EVIDENCE.md`), the Reach sniper
+black-world fix, Reach native vehicle controls, the L3+R3 recenter/menu chord,
+the Y+B pause chord in ODST and Reach, and the rebuilt sidebar F1 menu with
+welcome page.
+
+**Known gap:** the PSVR2 regression for the current theatre projection path is
+not yet re-run against this exact build. The prior PSVR2 result was against an
+earlier theatre implementation and does not carry over automatically.
+
+Two policies from 0.3.0 continue to apply: the ZIP ships the maintainer's own
+live, headset-tuned `halomccvr.cfg` and users are told to replace their old one
+(no config migration exists); and this exact published ZIP is the tested
+artifact - do not rebuild and republish without repeating headset verification,
+since the DLL embeds its compile timestamp and a rebuild is never byte-identical.
+
+## Development milestones folded into 0.3.1
+
+The two results below were headset-accepted ahead of the 0.3.1 release above
+and are now part of its shipped bytes; they are kept here as their own
+evidence entries rather than merged into the release block.
 
 ### ACCEPTED: L3+R3 VR-space recenter/menu chord - 2026-07-29
 
@@ -60,10 +95,11 @@ pending look freedom publishes `PlayerControlled`; only proven zero freedom
 retains `AuthoredLocked`. Missing proof falls back only this feature to
 immersive VR.
 
-## PUBLIC RELEASE: MCC VR Alpha 0.3.0 - 2026-07-27
+## PUBLIC RELEASE: MCC VR Alpha 0.3.0 - 2026-07-27 (superseded, rollback baseline)
 
-**The public known-good product is now `MCC_VR_ALPHA_0.3.0`, the first release
-to include Halo: Reach.** It supersedes `MCC_VR_ALPHA_0.2.2` (Halo 3 + ODST).
+**`MCC_VR_ALPHA_0.3.0` was the first release to include Halo: Reach.** It
+superseded `MCC_VR_ALPHA_0.2.2` (Halo 3 + ODST) and is now itself superseded by
+`MCC_VR_ALPHA_0.3.1` above. Kept here as the rollback baseline.
 Everything below this section is development history.
 
 | Identity | Value |

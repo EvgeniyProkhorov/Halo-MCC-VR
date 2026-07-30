@@ -1,67 +1,72 @@
 ### REACH/3/ODST Now Playable in VR 
 ### Work on HALO 4 will begin SOON after these hotfixes release. Yes Halo 1/2 will be in the collection eventually!
-### GAMEPASS / XBOX APP IS NOW SUPPORTED in 0.3.1 — no renaming any game files
-### ALVR double vision is FIXED in 0.3.1. Default SteamVR branch is being looked into
-### HALO REACH HOTFIX OTW 
 
+## 🆕 What's new in 0.3.1
+
+1. **Microsoft Store / Xbox App (Game Pass) support** — the same download now
+   works on both MCC editions, and you do not rename any game file.
+2. **ALVR / Virtual Desktop (VDXR) / Meta Link support fixed** — the doubled,
+   overlapping image some streaming setups showed is gone.
+3. **3D Cutscene Theatre Mode** — cutscenes play on a room-fixed screen with
+   real stereo depth instead of riding your head, with a depth slider in the
+   F1 menu (`cutscene_theater_depth`).
+4. **New launch page and a rebuilt F1 menu** — a one-time welcome page, plus a
+   sidebar-organized, locked F1 panel with a grab handle.
 
 ## 🚧 What I'm working on RN
 | Feature                                            | Status         |
 | -------------------------------------------------- | -------------- |
-| ALVR Support (double vision fix)                   | ✅ Fixed in 0.3.1 |
-| Halo: Reach Visual/UI Fixes                        | 🟡 In Progress |
-| Space-Sky Bloom Bug Fix (Halo Reach)               | 🟡 In Progress |
 | Xbox App / Game Pass Support                       | ✅ Added in 0.3.1 |
-| SMAA T2X Support                                   | 🟡 In Progress |
-| Optional 2D Theater Mode for Cutscenes             | 🟡 In Progress |
+| ALVR / Virtual Desktop / Meta Link Support         | ✅ Fixed in 0.3.1 |
+| Cutscene 3d Theater Mode                           | ✅ Added in 0.3.1 |
+| Complete F1 Menu UI Restructure and Reorganization | ✅ Added in 0.3.1 |
+| Reach: black-world fix on sniper                   | ✅ Fixed in 0.3.1 |
+| SMAA T2X Support                                   | not possilbe atm |
 | Gamepad support/Head-Aiming Mode                   | 🟡 In Progress |
-|  Scopes and weapon zoom fixes                                                  | 🟡 In Progress |
-| Complete F1 Menu UI Restructure and Reorganization | 🟡 In Progress |
-
-> **Note:** The optional 2D theater mode will be enabled by default for cutscenes, but players will be able to disable it.
+| Scopes and weapon zoom fixes                       | 🟡 In Progress |
+| Theater mode subtitles                              | 🟡 In Progress |
 
 > **DO NOT ACCEPT FIXES FOR THIS MOD FROM OUTSIDE SOURCES. WE DON'T KNOW WHAT'S
 > IN THEM.**
 >
-> **Two things are required:**
+> [Quad-Views-Foveated](https://github.com/mbucchia/Quad-Views-Foveated) is
+> **optional and no longer required** — try it only if you want a GPU
+> performance boost.
 >
-> 1. **The SteamVR Beta.** A user reported that it fixes the double vision.
-> 2. **SteamVR set as your default OpenXR runtime.**
+> **Steam VR players: use the SteamVR Beta branch**, with SteamVR set as your
+> default OpenXR runtime — that's what makes Virtual Desktop's VDXR mode work.
+>
+> **WINSTORE/XBOX APP: do not rename your game .exe to the Steam version.** The
+> launcher now looks for the real Game Pass executable — if you renamed
+> `MCCWinStore-Win64-Shipping.exe` in a previous update, rename it back.
 >
 > Compatibility across headsets may vary. If it doesn't work, try a different
-> way to connect if you can — but follow the two requirements above and you
-> should be good.
+> way to connect if you can. or leave an issue with your spec set up. I'll try to find a play tester with your headset.
 >
 > **Let me know in the [issues](https://github.com/pancreations/Halo-MCC-VR/issues)
-> if your headset is not working** and someone or I can help you.
+> ** and someone or I can help you.
 >
-> For a GPU performance boost, try
-> [Quad-Views-Foveated](https://github.com/mbucchia/Quad-Views-Foveated).
->
-> **Please list your specs if you're having issues.** It's a guessing game over
-> here.
+> **Please list your specs if you're having issues.** Saves me a bit of time
 
 # Halo MCC VR
 
 > **Hi, I'm [pancreations](https://www.instagram.com/pancreations/)** — a 3D
 > animator. I really don't like AI art, but I also really want to play MCC in
 > VR, so I'm taking one for the team. Follow me on Instagram if you like silly
-> animations made by humans in Blender. ([Expect me to quit at any
-> moment.](https://www.youtube.com/watch?v=GFl3_wPFvdA))
+> animations made by humans in Blender. 
 >
-> Living Fray is starting his MCC VR mod back up — if you'd rather run unsigned
-> code made by a human, wait for his.
-
+>
 A native OpenXR VR mod for Halo 3, Halo 3: ODST and Halo: Reach in Halo: The
 Master Chief Collection — both the Steam edition and the Microsoft Store / Xbox
 app (Game Pass) edition.
 
 The current known-good release is
 [MCC VR Alpha 0.3.1](https://github.com/pancreations/Halo-MCC-VR/releases/tag/MCC_VR_ALPHA_0.3.1),
-a hotfix over 0.3.0 that adds **Microsoft Store / Xbox app (Game Pass) support**
-and fixes **double vision on ALVR**. It is an alpha: use it at your own risk,
-launch only without anti-cheat, and expect incomplete hardware and gameplay
-coverage.
+a hotfixes update over 0.3.0 that adds **Microsoft Store / Xbox app (Game Pass)
+support**, fixes **double vision on ALVR**, adds a **room-fixed 3D cutscene
+theatre** to all three games, and fixes Halo: Reach's sniper-triggered
+black-world bug. It is an alpha: use it at your own risk, launch only without
+anti-cheat, and expect incomplete hardware and gameplay coverage.
 
 ## What works
 
@@ -75,9 +80,19 @@ coverage.
 - ODST stereo, controls, weapons/hands, native HUD, cutscenes, vibration,
   death/respawn recovery, and one tested drivable car.
 - Halo: Reach stereo, controls, weapon aim, hands/gun, HUD, cutscenes and
-  vibration. Reach is new in 0.3.0 and is the earliest of the three titles.
+  vibration, plus native vehicle controls and a fix for sniper-triggered black
+  static-world geometry, both new in 0.3.1. Reach is new in 0.3.0 and is the
+  earliest of the three titles.
 - Both MCC editions from one download: Steam, and Microsoft Store / Xbox app
   (Game Pass). All three titles work on either, and no game file is renamed.
+- A room-fixed 3D cutscene theatre for all three games, new in 0.3.1: cutscenes
+  play on a screen that stays put in the room instead of riding your head, with
+  the authored cinematic framing and field of view preserved. Controlled by
+  `cutscene_theater_depth` and Flip Depth in the F1 menu.
+- L3+R3 recenters VR space and toggles the F1 menu; Y+B is the pause chord in
+  ODST and Reach. Both new in 0.3.1.
+- A rebuilt F1 menu: sidebar categories, a locked panel with a grab handle, and
+  a one-time welcome page. New in 0.3.1.
 
 On Reach the left trigger and X are swapped compared to Halo 3 and ODST, so
 grenades sit on X.
@@ -91,6 +106,7 @@ Known limitations:
 - ODST brightness stays at the game default.
 - On Reach, character tags and navpoints are misplaced in 3D, and the
   `hud_curvature` and `hud_vertical_offset` settings have no effect.
+- The right stick still turns you while the F1 menu is open.
 - **Microsoft Store / Game Pass only: MCC freezes for about nine seconds on the
   first loading screen. It has not crashed — wait it out.** See below.
 - Broader ODST and Reach weapon, turret, passenger-gun, vehicle, co-op, headset,
@@ -188,9 +204,9 @@ build folder as an installation source.
 Release `0.3.1` hashes:
 
 ```text
-ZIP      BE1C084F3F2D40CA95A22B66DF4644DF4A3576F7D2D70E001FB11B50AB4C6922
-DLL      CE43FC67A72D14B6D1D9508C4BB6D8461A7733A303CC94B5784BA0274CE64E9F
-Launcher 0433A47883AAA9516C25F1830F8DC33EB15098CABDC04EDC223250B1EFBF25F0
+ZIP      D139C7E7D507E114EB8F54A10D4FD1DAAC797D4722D9E5C29ADB969DBBB9B2AF
+DLL      5B4A852C3175021AD433373BACB825BCC5D0EDFC52AF620A26C8A2C55F00BA64
+Launcher 9F510506981B882BD571E892B88AD26951CA08948C7DADB031088060E918824A
 ```
 
 Windows security software may flag or quarantine unsigned injection-based VR

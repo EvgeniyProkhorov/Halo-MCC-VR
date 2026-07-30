@@ -1,0 +1,76 @@
+{
+  "schema_version": 1,
+  "release": "MCC_VR_ALPHA_0.3.1",
+  "release_url": "https://github.com/pancreations/Halo-MCC-VR/releases/tag/MCC_VR_ALPHA_0.3.1",
+  "supersedes": "MCC_VR_ALPHA_0.3.0",
+  "tag_commit": null,
+  "runtime_source_commit": "60f3929f63474459e51ce3d641fc14dc5d49529b",
+  "build": {
+    "architecture": "x64",
+    "configuration": "Release",
+    "HALOMCCVR_EXPERIMENTAL_ODST_BRINGUP": true,
+    "HALOMCCVR_EXPERIMENTAL_REACH_BRINGUP": true,
+    "HALOMCCVR_EXPERIMENTAL_REACH_RENDER_CANDIDATE": true
+  },
+  "titles": [
+    "Halo 3",
+    "Halo 3: ODST",
+    "Halo: Reach"
+  ],
+  "published_artifacts": {
+    "zip": {
+      "name": "MCC_VR_ALPHA_0.3.1.zip",
+      "download_url": "https://github.com/pancreations/Halo-MCC-VR/releases/download/MCC_VR_ALPHA_0.3.1/MCC_VR_ALPHA_0.3.1.zip",
+      "sha256": "D139C7E7D507E114EB8F54A10D4FD1DAAC797D4722D9E5C29ADB969DBBB9B2AF",
+      "contents": [
+        "halo3xr.dll",
+        "halo3xr_launcher.exe",
+        "halomccvr.cfg",
+        "LICENSE",
+        "MANUAL-README.txt"
+      ]
+    },
+    "halo3xr.dll": {
+      "sha256": "5B4A852C3175021AD433373BACB825BCC5D0EDFC52AF620A26C8A2C55F00BA64"
+    },
+    "halo3xr_launcher.exe": {
+      "sha256": "9F510506981B882BD571E892B88AD26951CA08948C7DADB031088060E918824A"
+    },
+    "halomccvr.cfg": {
+      "sha256": "5847BF57E18133954C172103CD13F65560896AC198A119CC4BA1BE1202F36C2D"
+    }
+  },
+  "changes": [
+    "Microsoft Store / Xbox app (Game Pass) MCC is now supported by the same download as Steam, with no game file renamed: the launcher starts the Store app the way Windows does instead of a plain CreateProcess, which always self-exited in a fifth of a second.",
+    "Halo: Reach no longer stays stock on the Microsoft Store edition: its file-identity check previously verified only the Steam signature, even though the two editions run byte-identical game code.",
+    "The log now records the MCC edition, the OpenXR runtime, the headset model, and the streaming host (ALVR / Virtual Desktop / Steam Link / Meta Link) a session ran on.",
+    "ALVR double vision is fixed: the mod now submits the runtime's exact per-eye field of view instead of a symmetric raster cover, so compositors that do not re-project to the layer's own FOV no longer draw a doubled image.",
+    "Cutscenes in Halo 3, ODST and Reach now play on a room-fixed theatre screen instead of riding the player's head, preserving each title's authored cinematic framing and FOV. cutscene_theater_depth and Flip Depth in the F1 menu control the stereo separation.",
+    "ODST's locked drop-pod opening stays in the theatre through the clouds reveal while its player-controllable shots remain immersive VR.",
+    "Halo: Reach: fixed exact static-world rock/terrain surfaces rendering solid black when the sniper rifle was selected, differently in each eye. Reach was the only title that did not commit each rebuilt eye's camera to the renderer before the world render; it now does, matching Halo 3 and ODST.",
+    "Halo: Reach: vehicles now use the game's native controller layout instead of the on-foot mapping.",
+    "New input: L3+R3 recenters VR space and toggles the F1 menu. New input: Y+B is the pause chord in ODST and Reach.",
+    "The F1 menu is reorganized into sidebar categories, the panel is locked in place with a grab handle, it is themed in Chief green, and a one-time welcome page is shown at the start of each launch (show_welcome)."
+  ],
+  "config_policy": {
+    "ships_config": true,
+    "instruction": "Replace halomccvr.cfg; do not keep the previous file.",
+    "reason": "config.cpp parses config_version but performs no migration, so any key an older config lacks silently falls back to a built-in default instead of the shipped value. fit_desktop_window in particular defaults to false while the shipped config sets it to 1, which can reintroduce the desktop-window frame-rate cap. 0.3.1 also adds new menu_*_m and show_welcome keys with no equivalent in older configs.",
+    "shipped_config_source": "The maintainer's live, headset-tuned halomccvr.cfg, copied verbatim at packaging time."
+  },
+  "known_issues": [
+    "Game Pass: MCC freezes for about nine seconds on the first loading screen, every launch. MCC's own loop, not the mod; not a crash.",
+    "The right stick still turns the player while the F1 menu is open.",
+    "Reach: character tags and navpoints are misplaced in 3D.",
+    "Reach: hud_curvature and hud_vertical_offset have no effect.",
+    "ODST: the first captioned opening cutscene can be black; skip that scene once.",
+    "MCC can retain multiple title modules after switching games; fully restart MCC if a level returns to the menu.",
+    "ODST brightness stays at the game default."
+  ],
+  "dependencies": {
+    "OpenXR-SDK": "5267613edf3d937e3d77556a106a65c2f82b25c6",
+    "MinHook": "c3fcafdc10146beb5919319d0683e44e3c30d537",
+    "Dear ImGui": "8936b58fe26e8c3da834b8f60b06511d537b4c63"
+  },
+  "rebuild_note": "Source rebuilds are not byte-identical because the DLL embeds compile date/time and toolchain output can differ. The published ZIP is the exact bytes the maintainer ran on Steam and Microsoft Store, both editions hash-verified after install; do not rebuild and republish without repeating that verification."
+}

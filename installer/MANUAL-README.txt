@@ -2,8 +2,11 @@ HALO MCC VR - MANUAL SETUP
 ===========================
 
 Supports Halo 3, Halo 3: ODST and Halo: Reach. Reach is new in 0.3.0.
-Microsoft Store / Xbox app (Game Pass) support is new in 0.3.1, along with a
-fix for double vision on ALVR.
+0.3.1 adds Microsoft Store / Xbox app (Game Pass) support, fixes double vision
+on ALVR, adds a room-fixed cutscene theatre to all three games, fixes Reach's
+black-world bug on the sniper rifle, gives Reach native vehicle controls, adds
+an L3+R3 VR-space recenter/menu chord and a Y+B pause chord (ODST/Reach), and
+rebuilds the F1 menu into a sidebar layout.
 
 On Reach the left trigger and X are swapped compared to Halo 3 and ODST, so
 grenades sit on X.
@@ -92,7 +95,8 @@ is no migration step: any setting your old file is missing silently falls back t
 built-in default instead of the shipped value. The most visible casualty is
 fit_desktop_window, whose built-in default is off while the shipped config turns
 it on - keeping an old config can therefore cap your headset frame rate.
-Sharpening, HUD and weapon-alignment values regress the same way.
+Sharpening, HUD and weapon-alignment values regress the same way. 0.3.1 adds new
+menu and cutscene-theatre settings that older config files do not have at all.
 
 If you want your own tuning back, copy your old halomccvr.cfg somewhere safe
 first, install the new one, then re-apply your preferences through F1.

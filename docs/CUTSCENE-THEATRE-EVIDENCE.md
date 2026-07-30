@@ -89,9 +89,25 @@ a new allocation path. The behavior was disabled in standalone revert
 `f26cf70953948c56ae908738b834d340b1d9de9d`. The fatal result does not identify
 which fact caused the failure, and neither is promoted to a finding.
 
-#### Pending: direct native-FOV two-view projection
+#### ACCEPTED: direct native-FOV two-view projection - 2026-07-30
 
-The next candidate removes both failed dependencies. It uses the existing
+Source `60f3929f63474459e51ce3d641fc14dc5d49529b`, DLL SHA-256
+`5B4A852C3175021AD433373BACB825BCC5D0EDFC52AF620A26C8A2C55F00BA64`, headset
+result: **accepted**. Steam edition, SteamVR/OpenXR 2.17.6, headset reported as
+`SteamVR/OpenXR : oculus` (Meta Quest 3) at 120 Hz through Meta Link / Air Link.
+The user watched a Halo 3 cutscene enter the room-fixed theatre and confirmed
+the screen has real 3D depth. The exact log records the build stamp matching
+this source and compile timestamp, and `cutscene theatre: native-FOV two-view
+projection active; no eye-selective layers or private theatre swapchain`
+immediately after each `entered room-fixed stereo presentation` line.
+
+This clears the Quest 3 acceptance this path was pending on. The two rejected
+predecessors above (`387e5e3` projection-space compositor, `89b6ac9`
+slice-zero atlas) remain rejected evidence and must not be resurrected. The
+required PSVR2 regression for this exact path is still open; do not assume
+PSVR2 parity from this result alone.
+
+This candidate removed both failed dependencies. It uses the existing
 array-size-2 world swapchain and submits one ordinary two-view
 `XrCompositionLayerProjection`. Each view uses the runtime's current native eye
 pose and FOV, a full existing swapchain slice, and no `XrEyeVisibility` field.
@@ -107,8 +123,7 @@ no full-size texture or extra draw beyond the two normal eye outputs.
 Non-default IQ modes retain their existing resolve/AA/sharpen chain and allocate
 the two private resolved images only while needed. Missing resources fall back
 only theatre to the prior quad path; a failed claimed frame is dropped without
-disarming the title camera core or OpenXR session. Quest 3 acceptance and the
-required PSVR2 regression are pending.
+disarming the title camera core or OpenXR session.
 The compositor also requires a separate fresh, generation-tagged authored
 projection aspect. It double-reads the cinematic-control publication around
 that projection read, so a title transition or camera-control handoff cannot
