@@ -23,7 +23,7 @@ publication freshness window is 500 ms. Capability loss, title transitions,
 module unload, a missing detector, or a failed read therefore return only this
 feature to immersive presentation.
 
-### Quest flat-theatre result and projection presentation
+### Quest flat-theatre result and presentation experiments
 
 The exact source `23ed3cef9da9c8bb610ca1c2a540d3cbb98a3f83`, DLL
 SHA-256 `828CD701FD4559E24F225FB72ABF0AAAD29918620A0D8AF16E3F2E843F9C88EE`,
@@ -56,8 +56,7 @@ Flip Depth swaps the two resolved source eyes before projection.
 If private projection resources cannot be created, only theatre falls back
 loudly to the prior core quad presentation. If a claimed projection frame does
 not complete, that frame is dropped and the immersive camera/session remain
-armed. The replacement remains headset-pending on Quest and requires a PSVR2
-regression before acceptance.
+armed. The headset result below rejected this replacement.
 
 #### Rejected: projection-space theatre compositor
 
@@ -83,6 +82,26 @@ The projection-space compositor is disabled before any further experiment.
 Its code remains inert as negative evidence. Theatre returns to the prior
 core eye-selective quad path; this restores the pre-candidate behavior but does
 not claim to fix Quest depth.
+
+#### Pending: side-by-side slice-0 eye delivery
+
+The next experiment changes only the unresolved array-slice variable. It keeps
+the original room-fixed `XrCompositionLayerQuad` geometry, pose, size,
+`XrEyeVisibility`, title eye cameras, depth scale, and fade lifecycle. Instead
+of selecting left and right from array slices 0 and 1, both title eyes are
+written side by side into one ordinary array-size-1 swapchain. Each physical-eye
+quad selects its own half through `imageRect` and always uses
+`imageArrayIndex=0`. Flip Depth swaps the title eye images during upload, not
+the quad geometry.
+
+This path has no headset name, vendor, runtime, IPD constant, or runtime branch.
+It performs the same two eye-image resolves and one swapchain acquire/wait as
+the stable array path, and adds no projection-space redraw. The rejected
+projection compositor remains disabled. If the slice-0 atlas cannot be created,
+only theatre falls back to the stable array-quad path. If a per-frame eye
+delivery cannot complete, that theatre frame is dropped; the camera core and
+OpenXR session remain armed. The result is headset-pending on Quest 3 and needs
+the required Halo 3/PSVR2 regression if Quest accepts it.
 
 The compositor also requires a separate fresh, generation-tagged authored
 projection aspect. It double-reads the cinematic-control publication around
