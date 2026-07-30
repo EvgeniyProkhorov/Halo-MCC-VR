@@ -31,6 +31,8 @@
 #include "title_registry.h"
 #include "title_runtime_state.h"
 
+#include <authored_reticle_logic.h>
+
 namespace
 {
     int g_failures = 0;
@@ -131,6 +133,42 @@ namespace
 
 int main()
 {
+    {
+        AuthoredReticleRefreshState state{};
+        Check(!ShouldUploadAuthoredReticle(
+                  AuthoredReticleRefreshPolicy::IdentityAfterSettle,
+                  true, true, 7, 100, 1, state), __FUNCTION__);
+        Check(!ShouldUploadAuthoredReticle(
+                  AuthoredReticleRefreshPolicy::IdentityAfterSettle,
+                  true, true, 7, 123, 1, state), __FUNCTION__);
+        Check(ShouldUploadAuthoredReticle(
+                  AuthoredReticleRefreshPolicy::IdentityAfterSettle,
+                  true, true, 7, 124, 1, state), __FUNCTION__);
+        MarkAuthoredReticleUploaded(state, 7, 124);
+        Check(!ShouldUploadAuthoredReticle(
+                  AuthoredReticleRefreshPolicy::IdentityAfterSettle,
+                  true, true, 7, 200, 1, state), __FUNCTION__);
+        Check(!ShouldUploadAuthoredReticle(
+                  AuthoredReticleRefreshPolicy::IdentityAfterSettle,
+                  true, true, 8, 201, 1, state), __FUNCTION__);
+        Check(ShouldUploadAuthoredReticle(
+                  AuthoredReticleRefreshPolicy::IdentityAfterSettle,
+                  true, true, 8, 225, 1, state), __FUNCTION__);
+        Check(ShouldUploadAuthoredReticle(
+                  AuthoredReticleRefreshPolicy::BoundedAnimation,
+                  true, true, 7, 130, 1, state), __FUNCTION__);
+        Check(!ShouldUploadAuthoredReticle(
+                  AuthoredReticleRefreshPolicy::IdentityAfterSettle,
+                  true, true, 0, 300, 1, state), __FUNCTION__);
+        Check(!AuthoredReticleLayerHasContent(true, false) &&
+                  AuthoredReticleLayerHasContent(true, true) &&
+                  AuthoredReticleLayerHasContent(false, false), __FUNCTION__);
+        Check(!ShouldUploadAuthoredReticle(
+                  AuthoredReticleRefreshPolicy::IdentityAfterSettle,
+                  true, true, 9, 400, 2, state) &&
+                  state.ownerEpoch == 2 && state.lastPublishedKey == 0,
+              __FUNCTION__);
+    }
     {
         constexpr std::array<uint8_t, 6> repeatedPattern{
             0xAA, 0xBB, 0xCC, 0xAA, 0xBB, 0xCC
