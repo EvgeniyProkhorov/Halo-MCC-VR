@@ -213,14 +213,6 @@ namespace
     uint32_t g_stereoW = 0, g_stereoH = 0;
     std::vector<ID3D11Texture2D*> g_stereoImages;
     std::vector<std::array<ID3D11RenderTargetView*, 2>> g_stereoRtvs;
-    // Theatre keeps the accepted eye-selective quad presentation, but packs
-    // the two title-rendered eyes side by side in one ordinary array-size-1
-    // swapchain. Both quads therefore use slice 0 and differ only by imageRect.
-    XrSwapchain g_theaterStereoChain = XR_NULL_HANDLE;
-    uint32_t g_theaterStereoW = 0, g_theaterStereoH = 0;
-    std::vector<ID3D11Texture2D*> g_theaterStereoImages;
-    std::vector<ID3D11RenderTargetView*> g_theaterStereoRtvs;
-    bool g_theaterStereoChainFailed = false;
     ID3D11Texture2D* g_eyeCache[2] = {nullptr, nullptr};
     ID3D11RenderTargetView* g_eyeCacheRtvs[2] = {nullptr, nullptr};
     D3D11_TEXTURE2D_DESC g_eyeCacheDesc{};
@@ -1812,8 +1804,7 @@ float4 ps_rcas(VSOut i) : SV_Target
     // function always owns the eye resolve; missing prerequisites fail loudly.
     bool BlitImageQuality(ID3D11Texture2D* src, const D3D11_TEXTURE2D_DESC& srcDesc,
                           ID3D11Texture2D* dst, uint32_t dstW, uint32_t dstH,
-                          ID3D11RenderTargetView* dstRtv,
-                          uint32_t dstOffsetX = 0)
+                          ID3D11RenderTargetView* dstRtv)
     {
         const bool xrSrgb = IsSrgb((DXGI_FORMAT)g_xrFormat);
         const bool finalPerceptual = !xrSrgb;
@@ -1926,9 +1917,7 @@ float4 ps_rcas(VSOut i) : SV_Target
             p.aaStrength = fxaaStrong ? 1.0f : 0.0f;
             g_context->UpdateSubresource(g_iqCb, 0, nullptr, &p, 0, 0);
             g_context->OMSetRenderTargets(1, &out, nullptr);
-            const float viewportX = out == dstRtv
-                ? static_cast<float>(dstOffsetX) : 0.0f;
-            D3D11_VIEWPORT vp{viewportX, 0, (float)outW, (float)outH, 0, 1};
+            D3D11_VIEWPORT vp{0, 0, (float)outW, (float)outH, 0, 1};
             g_context->RSSetViewports(1, &vp);
             g_context->VSSetShader(vs, nullptr, 0);
             g_context->PSSetShader(ps, nullptr, 0);
@@ -2569,39 +2558,6 @@ float4 ps_scope_linearize(VSOut i):SV_Target { return paint(i.uv,true); }
             }
         }
         LOG("M2: stereo eye swapchains ready (projection submission held until per-eye rendering is ready)");
-        return true;
-    }
-
-    bool EnsureTheaterStereoChain()
-    {
-        if (g_theaterStereoChainFailed)
-            return false;
-        if (!g_stereoW || !g_stereoH ||
-            g_stereoW > std::numeric_limits<uint32_t>::max() / 2)
-            return false;
-        const uint32_t atlasWidth = g_stereoW * 2;
-        if (g_theaterStereoChain != XR_NULL_HANDLE &&
-            g_theaterStereoW == atlasWidth &&
-            g_theaterStereoH == g_stereoH)
-        {
-            return true;
-        }
-        DestroyChain(g_theaterStereoChain, g_theaterStereoImages,
-                     g_theaterStereoRtvs);
-        g_theaterStereoW = atlasWidth;
-        g_theaterStereoH = g_stereoH;
-        if (!CreateChain(
-                g_theaterStereoW, g_theaterStereoH,
-                g_theaterStereoChain, g_theaterStereoImages,
-                g_theaterStereoRtvs, "theatre stereo slice-0 atlas"))
-        {
-            g_theaterStereoChainFailed = true;
-            LOG("cutscene theatre: slice-0 stereo atlas unavailable; "
-                "keeping the stable array-quad presentation");
-            return false;
-        }
-        LOG("cutscene theatre: side-by-side slice-0 stereo atlas ready; "
-            "one acquire/wait and the stable quad geometry are retained");
         return true;
     }
 
@@ -6805,8 +6761,6 @@ float4 ps_scope_linearize(VSOut i):SV_Target { return paint(i.uv,true); }
                     theaterTransition.active && g_haveCenter;
                 bool theaterProjectionAttempted = false;
                 bool theaterProjectionReady = false;
-                bool theaterStereoAtlasAvailable = false;
-                bool theaterStereoAtlasReady = false;
                 if (stereo)
                 {
 #if HALOMCCVR_EXPERIMENTAL_REACH_RENDER_CANDIDATE
@@ -6857,110 +6811,6 @@ float4 ps_scope_linearize(VSOut i):SV_Target { return paint(i.uv,true); }
                         theaterPresentation &&
                         projection.viewCount == 2 &&
                         EnsureTheaterProjectionResources(g_stereoW, g_stereoH);
-                    theaterStereoAtlasAvailable =
-                        theaterPresentation && EnsureTheaterStereoChain();
-                    if (theaterStereoAtlasAvailable)
-                    {
-                        XrResult theaterAtlasFailure = XR_SUCCESS;
-                        const XrResult acquireResult =
-                            xrAcquireSwapchainImage(
-                                g_theaterStereoChain, &ai, &idx);
-                        const bool acquired = acquireResult == XR_SUCCESS;
-                        if (!acquired)
-                        {
-                            theaterAtlasFailure = acquireResult;
-                            g_theaterStereoChainFailed = true;
-                        }
-                        bool waited = false;
-                        if (acquired)
-                        {
-                            const XrResult waitResult =
-                                xrWaitSwapchainImage(
-                                    g_theaterStereoChain, &swi);
-                            waited = waitResult == XR_SUCCESS;
-                            if (!waited)
-                            {
-                                theaterAtlasFailure = waitResult;
-                                g_theaterStereoChainFailed = true;
-                            }
-                        }
-                        bool everyEyeUploaded = acquired && waited &&
-                            idx < g_theaterStereoImages.size();
-                        if (everyEyeUploaded)
-                        {
-                            ID3D11Texture2D* destination =
-                                g_theaterStereoImages[idx];
-                            ID3D11RenderTargetView* destinationRtv =
-                                GetRtv(g_theaterStereoImages,
-                                       g_theaterStereoRtvs, idx);
-                            for (uint32_t targetEye = 0;
-                                 targetEye < 2; ++targetEye)
-                            {
-                                const uint32_t sourceEye =
-                                    CutsceneTheaterImageIndex(
-                                        targetEye,
-                                        g_config.cutscene_theater_flip_depth);
-                                const bool haveImage = reachImages ||
-                                    (!reachTitle &&
-                                     g_eyeHasImage[sourceEye]);
-                                ID3D11Texture2D* source = reachImages
-                                    ? reachAccess.eyes[sourceEye]
-                                    : (reachTitle
-                                           ? nullptr
-                                           : g_eyeCache[sourceEye]);
-                                const D3D11_TEXTURE2D_DESC& sourceDesc =
-                                    reachImages
-                                        ? g_reachCaptureDesc
-                                        : g_eyeCacheDesc;
-                                const bool uploaded = haveImage && source &&
-                                    destination && destinationRtv &&
-                                    BlitImageQuality(
-                                        source, sourceDesc, destination,
-                                        g_stereoW, g_stereoH,
-                                        destinationRtv,
-                                        targetEye * g_stereoW);
-                                everyEyeUploaded =
-                                    everyEyeUploaded && uploaded;
-                            }
-                        }
-                        bool released = false;
-                        if (acquired && waited)
-                        {
-                            const XrResult releaseResult =
-                                xrReleaseSwapchainImage(
-                                    g_theaterStereoChain, &ri);
-                            released = releaseResult == XR_SUCCESS;
-                            if (!released)
-                            {
-                                theaterAtlasFailure = releaseResult;
-                                g_theaterStereoChainFailed = true;
-                            }
-                        }
-                        theaterStereoAtlasReady =
-                            everyEyeUploaded && released;
-                        if (reachTitle)
-                            reachStereoUploadComplete =
-                                reachImages && theaterStereoAtlasReady;
-                        if (!theaterStereoAtlasReady)
-                        {
-                            static uint64_t lastTheaterAtlasSkipLogMs = 0;
-                            const uint64_t nowMs = GetTickCount64();
-                            if (nowMs - lastTheaterAtlasSkipLogMs >= 2000)
-                            {
-                                lastTheaterAtlasSkipLogMs = nowMs;
-                                LOG("cutscene theatre frame skipped: slice-0 "
-                                    "stereo-atlas delivery did not complete "
-                                    "(%s); "
-                                    "immersive VR and the camera core remain "
-                                    "armed",
-                                    theaterAtlasFailure == XR_SUCCESS
-                                        ? "source/upload unavailable"
-                                        : XrStr(theaterAtlasFailure));
-                            }
-                        }
-                    }
-                    else
-                    {
                     const XrResult stereoAcquire =
                         xrAcquireSwapchainImage(g_stereoChain, &ai, &idx);
                     const bool stereoAcquired = reachTitle
@@ -7061,7 +6911,6 @@ float4 ps_scope_linearize(VSOut i):SV_Target { return paint(i.uv,true); }
                                 everyReachEyeUploaded && stereoReleased &&
                                 (!theaterProjectionAttempted ||
                                  theaterProjectionReady);
-                    }
                     }
 
                     // A Reach frame that cannot expose a complete stereo pair
@@ -7345,60 +7194,16 @@ float4 ps_scope_linearize(VSOut i):SV_Target { return paint(i.uv,true); }
                                 reachTitle, reachStereoUploadComplete,
                                 authoredUploadFailed,
                                 liveReachOwnerAfterUpload);
-                        const bool theaterDeliveryAdmitted =
-                            !theaterPresentation ||
-                            !theaterStereoAtlasAvailable ||
-                            theaterStereoAtlasReady;
                         const bool reticleOwnerAdmitted =
                             reticleTitleAdmitted &&
                             // Reach shows its crosshair only alongside its own
                             // admitted world projection.
                             (!reachTitle || reachProjectionAdmitted);
-                        if (reachProjectionAdmitted &&
-                            theaterDeliveryAdmitted)
+                        if (reachProjectionAdmitted)
                         {
                             if (theaterPresentation)
                             {
-                                if (theaterStereoAtlasAvailable)
-                                {
-                                    for (uint32_t eye = 0; eye < 2; ++eye)
-                                    {
-                                        theaterQuads[eye] = MakeQuad(
-                                            g_theaterStereoChain,
-                                            static_cast<int32_t>(g_stereoW),
-                                            static_cast<int32_t>(g_stereoH),
-                                            g_config.cutscene_theater_width_m,
-                                            g_config.cutscene_theater_distance_m,
-                                            0.0f, 0, false);
-                                        theaterQuads[eye].eyeVisibility = eye == 0
-                                            ? XR_EYE_VISIBILITY_LEFT
-                                            : XR_EYE_VISIBILITY_RIGHT;
-                                        theaterQuads[eye].subImage.imageArrayIndex = 0;
-                                        theaterQuads[eye].subImage.imageRect = {
-                                            {static_cast<int32_t>(
-                                                 eye * g_stereoW), 0},
-                                            {static_cast<int32_t>(g_stereoW),
-                                             static_cast<int32_t>(g_stereoH)}};
-                                        theaterQuads[eye].size.height =
-                                            CutsceneTheaterHeightFromAspect(
-                                                g_config.cutscene_theater_width_m,
-                                                g_cutsceneTheaterAuthoredAspect);
-                                        layers.push_back(
-                                            reinterpret_cast<
-                                                XrCompositionLayerBaseHeader*>(
-                                                &theaterQuads[eye]));
-                                    }
-                                    static bool loggedStereoAtlasTheater = false;
-                                    if (!loggedStereoAtlasTheater)
-                                    {
-                                        loggedStereoAtlasTheater = true;
-                                        LOG("cutscene theatre: stereo depth uses "
-                                            "one slice-0 side-by-side image "
-                                            "with two eye-selective crops; "
-                                            "stable theatre geometry retained");
-                                    }
-                                }
-                                else if (theaterProjectionReady)
+                                if (theaterProjectionReady)
                                 {
                                     layers.push_back(
                                         reinterpret_cast<XrCompositionLayerBaseHeader*>(
