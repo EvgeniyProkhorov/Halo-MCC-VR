@@ -11,7 +11,6 @@
 #include <string>
 #include <string_view>
 #include <windows.h>
-#include <authored_reticle_logic.h>
 
 #include "config.h"
 #include "cutscene_theater_logic.h"
@@ -132,24 +131,6 @@ namespace
 
 int main()
 {
-    Check(ShouldUploadAuthoredReticle(
-              AuthoredReticleRefreshPolicy::IdentityChange,
-              true, true, 7, false, false), __FUNCTION__);
-    Check(!ShouldUploadAuthoredReticle(
-               AuthoredReticleRefreshPolicy::IdentityChange,
-               true, true, 7, true, false), __FUNCTION__);
-    Check(ShouldUploadAuthoredReticle(
-              AuthoredReticleRefreshPolicy::BoundedAnimation,
-              true, true, 7, true, false), __FUNCTION__);
-    Check(!ShouldUploadAuthoredReticle(
-               AuthoredReticleRefreshPolicy::BoundedAnimation,
-               true, true, 7, true, true), __FUNCTION__);
-    Check(!ShouldUploadAuthoredReticle(
-               AuthoredReticleRefreshPolicy::IdentityChange,
-               true, true, 0, false, false), __FUNCTION__);
-    Check(!AuthoredReticleLayerHasContent(true, false) &&
-              AuthoredReticleLayerHasContent(true, true) &&
-              AuthoredReticleLayerHasContent(false, false), __FUNCTION__);
     {
         constexpr std::array<uint8_t, 6> repeatedPattern{
             0xAA, 0xBB, 0xCC, 0xAA, 0xBB, 0xCC

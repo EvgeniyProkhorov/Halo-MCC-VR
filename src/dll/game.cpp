@@ -18467,23 +18467,11 @@ bool Game_IsCameraOnlyBringup()
 // art it had already captured.
 bool Game_TitleCapturesAuthoredCrosshair()
 {
-    const GameTitle activeTitle = TitleAdapter_GetActiveTitle();
 #if HALOMCCVR_EXPERIMENTAL_REACH_RENDER_CANDIDATE
-    if (activeTitle == GameTitle::HaloReach)
+    if (TitleAdapter_GetActiveTitle() == GameTitle::HaloReach)
         return g_reachOrigHudDrawWidget != nullptr;
 #endif
-#if HALOMCCVR_EXPERIMENTAL_ODST_BRINGUP
-    if (activeTitle == GameTitle::Halo3ODST)
-    {
-        return g_odstCamera.installed.load(std::memory_order_acquire) &&
-            g_odstCamera.crosshairClassGatePatched &&
-            g_realHudCrosshairVisible != nullptr &&
-            g_realHudDrawWidget != nullptr;
-    }
-#endif
-    return activeTitle == GameTitle::Halo3 &&
-        g_realHudCrosshairVisible != nullptr &&
-        g_realHudDrawWidget != nullptr;
+    return g_realHudDrawWidget != nullptr;
 }
 
 
