@@ -151,7 +151,7 @@ namespace
         "Expect the rest of the collection to be added over time";
 
     constexpr const char* kWelcomeCloseHint =
-        "Press L3+R3 (Both Analog Sitcks) to close menu";
+        "Press L3+R3 (both analog sticks) to recenter and close the menu";
 
     enum MenuCategory
     {
@@ -582,7 +582,7 @@ namespace
                     VR_IsPausePresentation() ? "head-locked 2D" : "immersive 3D");
         ImGui::Separator();
         ImGui::Spacing();
-        ImGui::TextDisabled("L3+R3 or F1 closes this menu.");
+        ImGui::TextDisabled("L3+R3 recenters and closes this menu; F1 only closes it.");
         }
 
         if (g_activeCategory == Cat_Comfort)
@@ -699,7 +699,7 @@ namespace
                 VR_SetGameHaptics(0.0f);
             changed = true;
         }
-        ImGui::TextDisabled("L3+R3 toggles this menu; the right trigger clicks the VR pointer.");
+        ImGui::TextDisabled("L3+R3 recenters and toggles this menu; the right trigger clicks the VR pointer.");
         }
 
         if (g_activeCategory == Cat_WeaponAim)
@@ -1079,7 +1079,7 @@ namespace
         }
 
         ImGui::Separator();
-        ImGui::TextDisabled("F1 or L3+R3 closes this menu. Settings save to halomccvr.cfg automatically.");
+        ImGui::TextDisabled("L3+R3 recenters and closes this menu; F1 only closes it. Settings save automatically.");
         ImGui::End();
     }
 } // namespace

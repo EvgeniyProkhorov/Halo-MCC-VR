@@ -4017,9 +4017,9 @@ int main()
     Check(!chordResult.toggled, "One stick click does not toggle the menu");
     chordResult = chord.Update(1249, true, true);
     Check(chordResult.toggled && chordResult.consumeClicks,
-        "L3+R3 toggles inside the 250 ms window and consumes both clicks");
+        "L3+R3 emits one shared menu-toggle/recenter edge and consumes both clicks");
     Check(!chord.Update(1300, true, true).toggled,
-        "A held chord toggles only once");
+        "A held chord cannot repeat the shared menu-toggle/recenter action");
     Check(chord.Update(1350, false, true).consumeClicks,
         "Chord clicks stay consumed until both are released");
     chord.Update(1400, false, false);

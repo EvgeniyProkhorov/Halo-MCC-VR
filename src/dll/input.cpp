@@ -78,7 +78,15 @@ namespace
         const MenuChordResult chord =
             g_menuChord.Update(GetTickCount64(), pad.clickL, pad.clickR);
         if (chord.toggled)
+        {
+            // The same one-shot chord edge owns both actions. Game_Recenter
+            // resets every title's immersive camera reference and the OpenXR
+            // room-fixed origin used by theatre; opening F1 on that edge then
+            // places its head-locked panel from the newly centered pose.
+            Game_Recenter();
             Menu_Toggle();
+            LOG("L3+R3: recentered immersive/theatre space and toggled F1 menu");
+        }
 
         // The universal scope owns R3 while it is available. Passing that click
         // into Halo enters native zoom state, which hides the normal VR gun and
