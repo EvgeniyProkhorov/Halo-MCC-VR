@@ -26,7 +26,6 @@
 #include "AreaTex.h"
 #include "SearchTex.h"
 #include "title_adapter.h"
-#include <../common/authored_reticle_logic.h>
 #ifndef HALOMCCVR_EXPERIMENTAL_REACH_RENDER_CANDIDATE
 #define HALOMCCVR_EXPERIMENTAL_REACH_RENDER_CANDIDATE 0
 #endif
@@ -178,9 +177,6 @@ namespace
     uint64_t g_authoredReticleSerial = 0;
     uint64_t g_authoredReticleUploadedSerial = 0;
     bool g_reticleContainsAuthored = false;
-    // The swapchain is shared, but its pixels belong to one title presentation.
-    // A detach revokes both the held image and the publishing cadence.
-    std::atomic<uint64_t> g_reticleOwnerEpoch{1};
     struct ReticleCaptureState
     {
         ID3D11RenderTargetView* rtvs[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT]{};
@@ -7168,8 +7164,9 @@ float4 ps_scope_linearize(VSOut i):SV_Target { return paint(i.uv,true); }
                         // identical to the one already in the swapchain. Skip it
                         // while the captured art's identity is unchanged; the
                         // released image stays valid and the quad keeps showing
-                        // it. The refresh policy below is title-specific.
-                        static AuthoredReticleRefreshState s_refreshState{};
+                        // it. Halo 3 and ODST are untouched.
+                        static uint64_t s_lastUploadedReachKey = 0;
+                        static uint64_t s_lastUploadFrame = 0;
                         static uint64_t s_uploadsDone = 0;
                         static uint64_t s_uploadsSkipped = 0;
                         static uint64_t s_lastUploadLogMs = 0;
@@ -7177,42 +7174,84 @@ float4 ps_scope_linearize(VSOut i):SV_Target { return paint(i.uv,true); }
                         // swapchain upload for art that almost never changes.
                         const bool titleCapturesArt =
                             Game_TitleCapturesAuthoredCrosshair();
-                        const uint64_t authoredCrosshairKey =
+                        const uint64_t reachCrosshairKey =
                             titleCapturesArt ? Game_GetAuthoredCrosshairKey() : 0;
-                        const GameTitle reticleTitle =
-                            TitleAdapter_GetActiveTitle();
-                        const AuthoredReticleRefreshPolicy refreshPolicy =
-                            reticleTitle == GameTitle::Halo3
-                                ? AuthoredReticleRefreshPolicy::IdentityAfterSettle
-                                : AuthoredReticleRefreshPolicy::BoundedAnimation;
-                        // Reach and ODST retain their working bounded cadence.
-                        // Halo 3 is different: the identity appears before the
-                        // widget has finished fading in, so wait 24 frames and
-                        // publish one settled snapshot. That prevents a frozen
-                        // blank first capture while retaining zero steady-state
-                        // swapchain work. The VR scope has its own pipeline and
-                        // is not a reticle refresh trigger.
-                        const uint64_t reticleOwnerEpoch =
-                            g_reticleOwnerEpoch.load(std::memory_order_acquire);
+                        // Measured: publishing the art costs ~4-5ms of the
+                        // render window, which is the difference between
+                        // fitting a 120Hz budget (8.33ms) and missing it and
+                        // halving to 60. The art is static between weapon and
+                        // state changes, so an unchanged key means the image
+                        // already in the swapchain is still correct.
+                        //
+                        // The frame cap is a floor on that saving: even if the
+                        // key were to churn, the blocking swapchain wait can
+                        // then happen at most once every few frames instead of
+                        // every single one.
+                        constexpr uint64_t kReachUploadMinFrameGap = 6;
+                        const bool reachKeyUnchanged =
+                            titleCapturesArt && reachCrosshairKey != 0 &&
+                            reachCrosshairKey == s_lastUploadedReachKey;
+                        const bool reachUploadTooSoon =
+                            titleCapturesArt && s_lastUploadFrame != 0 &&
+                            g_preparedFrame.serial >= s_lastUploadFrame &&
+                            g_preparedFrame.serial - s_lastUploadFrame <
+                                kReachUploadMinFrameGap;
+                        // key 0 means this frame's capture contained no
+                        // crosshair widgets at all. Uploading then publishes a
+                        // blank image over good art, which is what made the
+                        // crosshair flash: the capture texture is cleared every
+                        // frame, so any frame whose capture was empty would
+                        // blank the swapchain until the next upload.
+                        const bool reachCaptureEmpty =
+                            titleCapturesArt && reachCrosshairKey == 0;
+                        // Deliberately NOT gated on the key being unchanged.
+                        // Doing that uploaded once and never again, and if that
+                        // single upload caught the capture texture before its
+                        // widgets had been drawn it published nothing and there
+                        // was no second chance - perfect frame rate, no art.
+                        // The key's job here is to prove the capture HAS
+                        // content; the frame gap keeps the cost bounded. A
+                        // steady low-rate refresh also keeps state changes
+                        // (enemy/friendly colour, zoom) live.
+                        // Steady state does no upload at all: the art only
+                        // changes on a weapon swap, zoom or reticle-state
+                        // change, and the key changes with it. The frame gap
+                        // remains only as a floor so a churning key can never
+                        // reintroduce a per-frame blocking swapchain wait.
+                        // The key describes WHICH widgets drew, not how they
+                        // look. Reach animates its crosshair, tints it red on
+                        // an enemy and green on a hit, and fades it in and out
+                        // - none of which change the key. Skipping the upload
+                        // on an unchanged key therefore froze one snapshot
+                        // forever: no animation, no colour states, and if the
+                        // snapshot happened to be taken while the crosshair
+                        // was faded out, a permanently blank crosshair. That
+                        // is the headset blackout, proven 2026-07-27: at the
+                        // moment the crosshair was gone, every gate was open
+                        // (authoredThisFrame=1, quad SUBMITTED, heldArt=1) and
+                        // the key sat frozen at DFFEE7EAB8A8F81F for the rest
+                        // of the session. The art was being captured and shown
+                        // the whole time - it was blank.
+                        //
+                        // Refresh on the frame gap instead. That keeps the
+                        // measured cost bounded (the blocking swapchain
+                        // acquire/wait/copy is ~4-5ms, so it must never run
+                        // every frame at 120Hz) while letting animation,
+                        // colour state and fade recovery through. (void) on
+                        // reachKeyUnchanged: kept computed so the reasoning
+                        // above stays legible next to it.
+                        (void)reachKeyUnchanged;
+                        const bool reachArtAlreadyPublished =
+                            reachCaptureEmpty || reachUploadTooSoon;
                         const bool shouldUploadAuthoredReticle =
-                            ShouldUploadAuthoredReticle(
-                                refreshPolicy,
-                                authoredReticleThisFrame,
-                                reticleUploadAdmitted,
-                                authoredCrosshairKey,
-                                g_preparedFrame.serial,
-                                reticleOwnerEpoch,
-                                s_refreshState);
-                        const bool authoredArtAlreadyPublished =
                             authoredReticleThisFrame && reticleUploadAdmitted &&
-                            !shouldUploadAuthoredReticle;
+                            !reachArtAlreadyPublished;
                         bool authoredUploadFailed = false;
                         if (shouldUploadAuthoredReticle &&
                             UploadAuthoredReticle(false))
                         {
-                            MarkAuthoredReticleUploaded(
-                                s_refreshState, authoredCrosshairKey,
-                                g_preparedFrame.serial);
+                            s_lastUploadedReachKey = reachCrosshairKey;
+                            s_lastUploadFrame = g_preparedFrame.serial;
                             ++s_uploadsDone;
                         }
                         else if (shouldUploadAuthoredReticle)
@@ -7235,7 +7274,7 @@ float4 ps_scope_linearize(VSOut i):SV_Target { return paint(i.uv,true); }
                         }
                         if (reachTitle)
                         {
-                            if (authoredArtAlreadyPublished)
+                            if (reachArtAlreadyPublished)
                                 ++s_uploadsSkipped;
                             const uint64_t nowMs = GetTickCount64();
                             if (nowMs - s_lastUploadLogMs >= 2000)
@@ -7248,7 +7287,7 @@ float4 ps_scope_linearize(VSOut i):SV_Target { return paint(i.uv,true); }
                                     static_cast<unsigned long long>(
                                         s_uploadsSkipped),
                                     static_cast<unsigned long long>(
-                                        authoredCrosshairKey));
+                                        reachCrosshairKey));
                                 s_uploadsDone = 0;
                                 s_uploadsSkipped = 0;
                             }
@@ -7341,15 +7380,7 @@ float4 ps_scope_linearize(VSOut i):SV_Target { return paint(i.uv,true); }
                                         &projection));
                             }
                         }
-                        // Capture-capable titles have no visible procedural
-                        // fallback in this chain. Do not submit transparent or
-                        // previous-title pixels while the first settled authored
-                        // image is still waiting to be published.
-                        const bool reticleChainAdmitted =
-                            reticleUploadAdmitted &&
-                            AuthoredReticleLayerHasContent(
-                                titleCapturesArt,
-                                g_reticleContainsAuthored);
+                        const bool reticleChainAdmitted = reticleUploadAdmitted;
                         const bool reticleQuadSubmitted =
                             reticleOwnerAdmitted && g_config.crosshair &&
                             haveAim && reticleChainAdmitted && !theaterPresentation;
@@ -8325,15 +8356,6 @@ void VR_DetachGamePresentation()
     g_cutsceneTheaterWasQualified = false;
     g_cutsceneTheaterEntryBlocked = false;
     g_cutsceneTheaterAuthoredAspect = 0.0f;
-    // The reticle chain outlives individual title adapters. Revoke its pixels
-    // and cadence so no engine can inherit another engine's held CHUD art.
-    g_authoredReticleReady = false;
-    g_authoredReticleSerial = 0;
-    g_authoredReticleUploadedSerial = 0;
-    g_reticleContainsAuthored = false;
-    g_reticlePaintedOpacity = -1.0f;
-    Game_ResetAuthoredCrosshairKey();
-    g_reticleOwnerEpoch.fetch_add(1, std::memory_order_acq_rel);
     if (g_stereoEnabled.load())
         VR_ToggleStereo();
     else
@@ -9133,14 +9155,12 @@ static bool BeginAuthoredReticleCaptureInternal(
         captureViewport.MinDepth = 0.0f;
         captureViewport.MaxDepth = 1.0f;
     }
-    // The outer quad still uses the universal crosshair_size_deg setting. Halo
-    // 3's headset result shows its authored widget is materially smaller than
-    // the Reach/ODST result, so this candidate compensates inside the capture
-    // only; it does not touch weapon zoom or the separate VR-scope pipeline.
-    const float authoredCaptureScale =
-        TitleAdapter_GetActiveTitle() == GameTitle::Halo3 ? 4.0f : 2.0f;
-    captureViewport.Width *= authoredCaptureScale;
-    captureViewport.Height *= authoredCaptureScale;
+    // Preserve Halo's screen-pixel authored proportions while cropping around
+    // screen center. A 2x viewport zoom makes the stock reticles legible in
+    // the angular-size range previously used by the procedural VR reticle.
+    constexpr float kCaptureZoom = 2.0f;
+    captureViewport.Width *= kCaptureZoom;
+    captureViewport.Height *= kCaptureZoom;
     captureViewport.TopLeftX =
         (static_cast<float>(kReticleSize) - captureViewport.Width) * 0.5f;
     captureViewport.TopLeftY =

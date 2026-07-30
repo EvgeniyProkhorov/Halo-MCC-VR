@@ -222,15 +222,14 @@ The user confirmed that this frees the shotgun left arm. The removed synthetic p
   predicate and returning false. Reach has no such predicate, which is why it
   redirects the render target instead.
 
-## Authored crosshair publishing (all titles, updated 2026-07-30)
+## Authored crosshair publishing (all titles, 2026-07-27)
 
 - The aim quad renders `g_reticleChain`; `UploadAuthoredReticle` is the only
   writer of captured art into it.
 - That upload is a blocking OpenXR swapchain acquire/wait/copy/release. Doing
   it every frame costs ~4-5ms of `renderWindow` - measured, and the entire
   difference between fitting a 120Hz budget (8.33ms) and missing it and halving
-  to 60. Reach retains a bounded refresh because its pixels animate without an
-  identity change. The other engines require their own measured policy.
+  to 60. It is now gated on the captured art's identity changing.
 - The procedural reticle and the authored art share one swapchain. For a title
   that captures, the procedural reticle is fully transparent, so repainting it
   ERASES the captured widget. Once the swapchain holds authored art it must be
@@ -239,31 +238,3 @@ The user confirmed that this frees the shotgun left arm. The removed synthetic p
   actually installed. Use it rather than a title list: the previous hardcoded
   lists went stale for both Reach and ODST and each time produced an opaque
   procedural crosshair painted over art the title had already captured.
-
-### Halo 3 settled publish candidate (2026-07-30)
-
-- Candidate `ec3c981` fixed the native HUD and removed Halo 3's recurring
-  authored-reticle upload. The headset result reported nearly double the frame
-  rate, but the CHUD crosshair disappeared after level load and was too small
-  when visible. This is a failed candidate and was reverted by `a54e51c` before
-  the next experiment.
-- Its exact preserved log is
-  `out/test-runs/ec3c981-halo3-crosshair-identity-fail-20260730/halo3xr.log`,
-  SHA-256 `7313F4F3E46DB00B0BC06884592667960FA87AA7EE55C7B4A3347AFF8FBAEB92`.
-  It proves capture and layer admission remained live: immediately after the
-  gameplay transition the heartbeat reported `authoredThisFrame=1`; shortly
-  afterward it reported `heldArt=1`, and key `79DE5D3F35797F24` then remained
-  fixed. A later title reload reset ownership and acquired fixed key
-  `D9C19B0511F878E4`, again with `heldArt=1`. The headset still showed no art.
-- The key identifies which widgets drew; it does not describe their alpha or
-  final pixels. The working diagnosis is therefore that Halo 3 published its
-  first identity-bearing capture while the widget was still transparent, then
-  correctly but permanently held that transparent snapshot. The next candidate
-  waits 24 displayed frames of stable identity before its single publish. It
-  performs no recurring Halo 3 upload, leaves Reach and ODST cadence unchanged,
-  and does not use scope/weapon zoom as a refresh signal.
-- `crosshair_size_deg` already controls the same outer OpenXR quad for every
-  title. The headset size mismatch is inside Halo 3's 512-square authored
-  capture, so the candidate doubles Halo 3's internal capture scale while
-  leaving the universal size and distance sliders, Reach/ODST capture, and the
-  separate VR scope unchanged. This calibration remains headset-pending.
