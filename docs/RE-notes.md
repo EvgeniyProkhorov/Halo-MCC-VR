@@ -233,6 +233,11 @@ The user confirmed that this frees the shotgun left arm. The removed synthetic p
   is identity plus discrete colour-state edges. ODST's title-native key already
   folds widget identity and its alternate-path state, so the 2026-07-30
   candidate uses the same identity-held policy without a recurring upload.
+  The follow-up candidate also stops ODST's offscreen widget redirect/draw on
+  steady frames: after valid art is held, it samples one complete native CHUD
+  frame every 30 OpenXR frames, immediately publishes a changed identity, and
+  keeps submitting the prior valid quad between samples. Halo 3 and Reach retain
+  their existing capture cadence.
 - The procedural reticle and the authored art share one swapchain. For a title
   that captures, the procedural reticle is fully transparent, so repainting it
   ERASES the captured widget. Once the swapchain holds authored art it must be

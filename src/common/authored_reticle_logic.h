@@ -39,6 +39,7 @@ inline uint32_t ClassifyAuthoredReticleColorOrdering(const float channel[4])
 enum class AuthoredReticleRefreshPolicy : uint8_t
 {
     IdentityAndColorState,
+    IdentityImmediate,
     BoundedAnimation,
 };
 
@@ -82,6 +83,8 @@ inline bool ShouldUploadAuthoredReticle(
 
     if (policy == AuthoredReticleRefreshPolicy::BoundedAnimation)
         return true;
+    if (policy == AuthoredReticleRefreshPolicy::IdentityImmediate)
+        return capturedKey != state.lastPublishedKey;
 
     // Once Halo 3 has published a settled widget, a categorical CHUD colour
     // transition is safe to publish immediately. It costs one upload per real

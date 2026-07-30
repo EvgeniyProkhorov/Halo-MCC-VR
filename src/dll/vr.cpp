@@ -7186,7 +7186,9 @@ float4 ps_scope_linearize(VSOut i):SV_Target { return paint(i.uv,true); }
                         const AuthoredReticleRefreshPolicy refreshPolicy =
                             reticleTitle == GameTitle::HaloReach
                                 ? AuthoredReticleRefreshPolicy::BoundedAnimation
-                                : AuthoredReticleRefreshPolicy::IdentityAndColorState;
+                                : reticleTitle == GameTitle::Halo3ODST
+                                    ? AuthoredReticleRefreshPolicy::IdentityImmediate
+                                    : AuthoredReticleRefreshPolicy::IdentityAndColorState;
                         // Halo 3 publishes after an identity settles, then only
                         // on a discrete authored blue/green/red state edge.
                         // ODST's proven identity key also folds its native
@@ -9152,6 +9154,34 @@ static bool BeginAuthoredReticleCaptureInternal(
     g_context->RSSetScissorRects(1, &captureScissor);
     saved.active = true;
     return true;
+}
+
+bool VR_ShouldCaptureOdstAuthoredReticle()
+{
+    if (TitleAdapter_GetActiveTitle() != GameTitle::Halo3ODST ||
+        !g_reticleContainsAuthored)
+        return true;
+
+    // ODST's captured quad remains valid after release. Sample its native
+    // CHUD only often enough to discover a weapon/state change; on all other
+    // frames the title predicate hides the flat widget without redirecting a
+    // render target or drawing any authored crosshair pixels. Re-admit every
+    // class-2 piece during the selected frame so compound reticles stay whole.
+    constexpr uint64_t kOdstCaptureSampleGapFrames = 30;
+    static std::atomic<uint64_t> lastSampleSerial{0};
+    const uint64_t serial = g_preparedFrame.serial;
+    uint64_t last = lastSampleSerial.load(std::memory_order_relaxed);
+    for (;;)
+    {
+        if (serial == last)
+            return true;
+        if (serial > last && serial - last < kOdstCaptureSampleGapFrames)
+            return false;
+        if (lastSampleSerial.compare_exchange_weak(
+                last, serial, std::memory_order_relaxed,
+                std::memory_order_relaxed))
+            return true;
+    }
 }
 
 bool VR_BeginAuthoredReticleCapture()
