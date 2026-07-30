@@ -140,6 +140,8 @@ static bool ProcessRunning(const wchar_t* exeName)
 // The DLL consumes that one-time permission after MCC has created its real game
 // window. Failure is non-fatal: VR remains usable and the user can still click
 // the game exactly as before.
+static constexpr bool kStartupFocusCandidateEnabled = false;
+
 static void GrantGameForegroundPermission(DWORD pid)
 {
     if (AllowSetForegroundWindow(pid))
@@ -467,7 +469,8 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
         }
         LauncherLog("game process created, pid %lu", pi.dwProcessId);
 
-        GrantGameForegroundPermission(pi.dwProcessId);
+        if (kStartupFocusCandidateEnabled)
+            GrantGameForegroundPermission(pi.dwProcessId);
         injected = InjectDll(pi.hProcess, dllPath, failWhy);
         if (!injected)
         {
@@ -541,7 +544,8 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
             return 1;
         }
         LauncherLog("game process appeared, pid %lu", gamePid);
-        GrantGameForegroundPermission(gamePid);
+        if (kStartupFocusCandidateEnabled)
+            GrantGameForegroundPermission(gamePid);
 
         // The process exists but its loader may not have populated the module
         // list yet. Injecting into that window is what makes CreateRemoteThread

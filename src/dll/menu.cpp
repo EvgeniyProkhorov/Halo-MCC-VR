@@ -247,6 +247,7 @@ namespace
     // own (UI) thread, where touching window size/position is safe.
     constexpr UINT kFitGameWindowMsg = WM_APP + 0x37;
     constexpr UINT kActivateGameWindowMsg = WM_APP + 0x38;
+    constexpr bool kStartupFocusCandidateEnabled = false;
 
     // Consume the exact-process foreground permission granted by the launcher
     // once MCC's real UI window exists. Running on the owner thread also makes
@@ -338,7 +339,7 @@ namespace
             FitGameWindow(hwnd);
             return 0;
         }
-        if (msg == kActivateGameWindowMsg)
+        if (kStartupFocusCandidateEnabled && msg == kActivateGameWindowMsg)
         {
             ActivateGameWindow(hwnd);
             return 0;
@@ -1167,7 +1168,8 @@ bool Menu_Init(HWND gameWindow, ID3D11Device* device, ID3D11DeviceContext* conte
     // runs on the UI thread.
     if (D3D_FitActive())
         PostMessageW(gameWindow, kFitGameWindowMsg, 0, 0);
-    PostMessageW(gameWindow, kActivateGameWindowMsg, 0, 0);
+    if (kStartupFocusCandidateEnabled)
+        PostMessageW(gameWindow, kActivateGameWindowMsg, 0, 0);
 
     g_ready = true;
     LOG("menu ready (F1 to toggle)");
