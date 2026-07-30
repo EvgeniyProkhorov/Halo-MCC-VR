@@ -188,6 +188,23 @@ int main()
         Check(ShouldUploadAuthoredReticle(
                   AuthoredReticleRefreshPolicy::BoundedAnimation,
                   true, true, 7, 0, 230, 1, state), "bounded title cadence");
+        AuthoredReticleRefreshState odstState{};
+        Check(!ShouldUploadAuthoredReticle(
+                  AuthoredReticleRefreshPolicy::IdentityAndColorState,
+                  true, true, 21, 0, 300, 1, odstState), __func__);
+        Check(ShouldUploadAuthoredReticle(
+                  AuthoredReticleRefreshPolicy::IdentityAndColorState,
+                  true, true, 21, 0, 324, 1, odstState), __func__);
+        MarkAuthoredReticleUploaded(odstState, 21, 0, 324);
+        Check(!ShouldUploadAuthoredReticle(
+                  AuthoredReticleRefreshPolicy::IdentityAndColorState,
+                  true, true, 21, 0, 400, 1, odstState), __func__);
+        Check(!ShouldUploadAuthoredReticle(
+                  AuthoredReticleRefreshPolicy::IdentityAndColorState,
+                  true, true, 22, 0, 400, 1, odstState), __func__);
+        Check(ShouldUploadAuthoredReticle(
+                  AuthoredReticleRefreshPolicy::IdentityAndColorState,
+                  true, true, 22, 0, 424, 1, odstState), __func__);
         Check(!AuthoredReticleLayerHasContent(true, false) &&
                   AuthoredReticleLayerHasContent(true, true) &&
                   AuthoredReticleLayerHasContent(false, false),

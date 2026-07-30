@@ -7172,8 +7172,9 @@ float4 ps_scope_linearize(VSOut i):SV_Target { return paint(i.uv,true); }
                         static uint64_t s_uploadsDone = 0;
                         static uint64_t s_uploadsSkipped = 0;
                         static uint64_t s_lastUploadLogMs = 0;
-                        // Halo 3 and ODST pay this same per-frame blocking
-                        // swapchain upload for art that almost never changes.
+                        // Every authored title would pay a blocking swapchain
+                        // upload here unless its refresh policy proves the held
+                        // image is still current.
                         const bool titleCapturesArt =
                             Game_TitleCapturesAuthoredCrosshair();
                         const uint64_t authoredCrosshairKey =
@@ -7183,12 +7184,15 @@ float4 ps_scope_linearize(VSOut i):SV_Target { return paint(i.uv,true); }
                         const GameTitle reticleTitle =
                             TitleAdapter_GetActiveTitle();
                         const AuthoredReticleRefreshPolicy refreshPolicy =
-                            reticleTitle == GameTitle::Halo3
-                                ? AuthoredReticleRefreshPolicy::IdentityAndColorState
-                                : AuthoredReticleRefreshPolicy::BoundedAnimation;
+                            reticleTitle == GameTitle::HaloReach
+                                ? AuthoredReticleRefreshPolicy::BoundedAnimation
+                                : AuthoredReticleRefreshPolicy::IdentityAndColorState;
                         // Halo 3 publishes after an identity settles, then only
                         // on a discrete authored blue/green/red state edge.
-                        // Reach and ODST retain their working bounded cadence.
+                        // ODST's proven identity key also folds its native
+                        // alternate-path state, so it publishes only when that
+                        // key changes and has no steady blocking upload. Reach
+                        // retains its working bounded animation cadence.
                         // Scope zoom is a separate pipeline and is not a trigger.
                         const uint64_t reticleOwnerEpoch =
                             g_reticleOwnerEpoch.load(std::memory_order_acquire);
@@ -9127,10 +9131,13 @@ static bool BeginAuthoredReticleCaptureInternal(
         captureViewport.MaxDepth = 1.0f;
     }
     // The outer quad retains the universal crosshair_size_deg and distance
-    // sliders. The headset-confirmed Halo 3 calibration needs twice the
-    // internal art occupancy used by Reach/ODST; scope zoom remains separate.
+    // sliders. Halo 3 and ODST share 4x internal authored-art occupancy so the
+    // same slider values produce matching apparent size. Reach retains its
+    // independently calibrated 2x occupancy; scope zoom remains separate.
+    const GameTitle captureTitle = TitleAdapter_GetActiveTitle();
     const float authoredCaptureScale =
-        TitleAdapter_GetActiveTitle() == GameTitle::Halo3 ? 4.0f : 2.0f;
+        captureTitle == GameTitle::Halo3 ||
+        captureTitle == GameTitle::Halo3ODST ? 4.0f : 2.0f;
     captureViewport.Width *= authoredCaptureScale;
     captureViewport.Height *= authoredCaptureScale;
     captureViewport.TopLeftX =

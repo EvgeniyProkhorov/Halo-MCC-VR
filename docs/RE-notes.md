@@ -229,9 +229,10 @@ The user confirmed that this frees the shotgun left arm. The removed synthetic p
 - That upload is a blocking OpenXR swapchain acquire/wait/copy/release. Doing
   it every frame costs ~4-5ms of `renderWindow` - measured, and the entire
   difference between fitting a 120Hz budget (8.33ms) and missing it and halving
-  to 60. Reach and ODST use a bounded animation cadence. Halo 3 candidate
-  publishing is identity plus discrete colour-state edges, with no periodic
-  upload in steady state.
+  to 60. Reach retains a bounded animation cadence. Halo 3 candidate publishing
+  is identity plus discrete colour-state edges. ODST's title-native key already
+  folds widget identity and its alternate-path state, so the 2026-07-30
+  candidate uses the same identity-held policy without a recurring upload.
 - The procedural reticle and the authored art share one swapchain. For a title
   that captures, the procedural reticle is fully transparent, so repainting it
   ERASES the captured widget. Once the swapchain holds authored art it must be
@@ -274,7 +275,7 @@ The user confirmed that this frees the shotgun left arm. The removed synthetic p
   changed nonzero colour class with a six-frame minimum gap. There is no
   recurring Halo 3 upload and VR scope state is not a trigger.
 - Apparent-size parity remains headset-pending: all three titles use the same
-  `crosshair_size_deg` and distance-controlled outer quad; Halo 3 uses a 4x
-  internal authored-art occupancy while Reach/ODST retain 2x. Do not call the
-  cross-title visual calibration accepted until the same slider value has been
-  compared in all three headsets sessions.
+  `crosshair_size_deg` and distance-controlled outer quad. Halo 3 and the
+  2026-07-30 ODST candidate use 4x internal authored-art occupancy; Reach
+  retains 2x. Do not call the cross-title visual calibration accepted until the
+  same slider value has been compared in all three headset sessions.
