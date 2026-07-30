@@ -29,7 +29,7 @@ that projection read, so a title transition or camera-control handoff cannot
 combine state and aspect from different samples. Missing or invalid projection
 metadata keeps the frame immersive rather than guessing an aspect.
 
-## Halo 3 and ODST common cinematic state
+## Halo 3 and ODST
 
 Both engines expose the same uniquely matched
 `cinematic_in_progress` leaf getter. It reads the title's TLS cinematic-globals
@@ -42,46 +42,11 @@ current scene/shot state:
 | Halo 3 | `TLS+0x90` |
 | ODST | `TLS+0xA0` |
 
-This state is sufficient for Halo 3. The common classifier reports
-`AuthoredLocked` only when the globals object is present, its cinematic-active
-byte is nonzero, and the title-specific shot-state object is readable. An
-inactive cinematic byte reports `PlayerControlled`. A missing or non-unique
-signature, missing object, read fault, stale generation, or title unload
-reports `Unknown` and masks the capability.
-
-## ODST player-camera ownership
-
-The first ODST headset pass disproved cinematic-active plus shot-state as a
-complete camera-lock test: the first mission's drop-pod sequence entered
-theatre even though right-stick camera look remained available. Its compact
-camera's first-person blend is also zero, the same value used by locked
-cinematics, vehicles, death cameras, and this controllable pod. Blend and camera
-motion are therefore not qualification evidence.
-
-H3ODSTEK supplies the missing semantic evidence. Its HaloScript external
-`player_camera_control` is described as globally enabling/disabling player
-camera control and leads to the implementation in `player_control.cpp`. That
-implementation iterates four player slots at a `0x30` stride and changes bit 0
-of the flags dword at slot `+0x18`: enabling player camera control clears the
-bit; disabling it sets the bit.
-
-The pinned retail ODST module
-`5BB20976EFDFD9E1CE59C589339804725FEC239021027C8D65B2733EAB94829A`
-retains the `player_camera_control` descriptor at file offset `0x82CC48`; its
-implementation pointer resolves to the unique function at
-`halo3odst+0x224944`. The function resolves the same TLS-index global as the
-cinematic getter, reads ODST's own player-control array from `TLS+0xD8`, and
-uses the same four-slot `0x30` stride, flags `+0x18`, and bit-0 clear/set
-semantics. The candidate signature covers that complete dataflow, reads the TLS
-member offset from the instruction, and cross-checks the resolved TLS-index
-address against the independently resolved cinematic getter.
-
-ODST now retains `AuthoredLocked` only when the common cinematic/shot proof is
-active **and** slot 0's player-camera-disabled bit is set. A readable clear bit
-publishes `PlayerControlled`, keeping the pod and every other controllable
-sequence immersive. Missing, ambiguous, unreadable, or mismatched ownership
-proof publishes `Unknown` and masks only ODST's theatre capability; it does not
-disarm ODST VR or alter the camera core.
+The adapter reports `AuthoredLocked` only when the globals object is present,
+its cinematic-active byte is nonzero, and the title-specific shot-state object
+is readable. An inactive cinematic byte reports `PlayerControlled`. A missing
+or non-unique signature, missing object, read fault, stale generation, or title
+unload reports `Unknown` and masks the capability.
 
 Halo 3's pristine compact camera stores its authored horizontal/vertical
 projection tangents at `+0x28/+0x2C`. ODST's title-evidenced camera layout stores
@@ -106,9 +71,8 @@ derived projection's X/Y scales to a 0.95 tangent-space copy of the authored
 framing. Applying the same scale to both axes preserves the authored aspect.
 When theatre is inactive, projection and visibility both receive the exact
 existing OpenXR tangents. ODST and Reach do not call this Halo 3 policy. This
-follow-up was reported good in the same pass that exposed the ODST controllable
-pod false positive. The accepted-build pointer still remains unchanged until
-the universal theatre candidate passes the remaining ODST qualification check.
+follow-up remains headset-pending; the static boundary and isolation are
+evidence, not a claim that the visible culling result has passed.
 
 ## Reach
 

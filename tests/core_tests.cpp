@@ -2379,23 +2379,7 @@ int main()
                   CinematicControlState::Unknown &&
               ClassifyHalo3FamilyCinematicControl(true, true, false) ==
                   CinematicControlState::Unknown,
-            "Halo 3-family authored state requires both the cinematic flag and shot-state proof");
-        Check(ClassifyOdstCinematicControl(
-                  CinematicControlState::AuthoredLocked, true, true) ==
-                  CinematicControlState::AuthoredLocked &&
-              ClassifyOdstCinematicControl(
-                  CinematicControlState::AuthoredLocked, true, false) ==
-                  CinematicControlState::PlayerControlled &&
-              ClassifyOdstCinematicControl(
-                  CinematicControlState::AuthoredLocked, false, false) ==
-                  CinematicControlState::Unknown &&
-              ClassifyOdstCinematicControl(
-                  CinematicControlState::PlayerControlled, false, true) ==
-                  CinematicControlState::PlayerControlled &&
-              ClassifyOdstCinematicControl(
-                  CinematicControlState::Unknown, true, true) ==
-                  CinematicControlState::Unknown,
-            "ODST theatre additionally requires its proven player-camera-disabled bit");
+            "Halo 3 and ODST require both their cinematic flag and shot-state proof");
         Check(ClassifyReachCinematicControl(true, 1) ==
                   CinematicControlState::AuthoredLocked &&
               ClassifyReachCinematicControl(true, 0) ==
