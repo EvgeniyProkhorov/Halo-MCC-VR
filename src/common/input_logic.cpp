@@ -99,6 +99,12 @@ bool PausePresentationInputAllowed(bool sharedGameplayOwner)
     return sharedGameplayOwner;
 }
 
+bool PauseToggleInputAllowed(
+    bool sharedGameplayOwner, bool titleSpecificPauseOwner)
+{
+    return sharedGameplayOwner || titleSpecificPauseOwner;
+}
+
 bool UpdateTwoHandHold(bool wasEngaged, bool gripHeld, bool inGrabZone)
 {
     return gripHeld && (wasEngaged || inGrabZone);

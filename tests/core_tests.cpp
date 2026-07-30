@@ -3223,6 +3223,12 @@ int main()
               !ReachShouldSwapLeftHandActions(false, false) &&
               !ReachShouldSwapLeftHandActions(false, true),
             "Reach swaps LT/X only on foot and restores the native layout in every proven vehicle");
+        Check(PauseToggleInputAllowed(true, false),
+            "Halo 3 ownership admits the Y+B pause fallback");
+        Check(PauseToggleInputAllowed(false, true),
+            "ODST or Reach ownership admits the Y+B pause fallback");
+        Check(!PauseToggleInputAllowed(false, false),
+            "Y+B cannot inject Start without supported title ownership");
         Check(OdstMustClearForeignPause(true, true, false) &&
                   OdstMustClearForeignPause(true, false, true),
             "private ODST entry clears either pending or active foreign pause state");

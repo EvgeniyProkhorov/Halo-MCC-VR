@@ -110,7 +110,7 @@ namespace
         }
 
         MenuChordResult pauseChord{};
-        if (PausePresentationInputAllowed(sharedGameplayInput))
+        if (Game_AllowsPauseToggleInput())
         {
             pauseChord =
                 g_pauseChord.Update(GetTickCount64(), pad.y, pad.b);
@@ -490,7 +490,7 @@ namespace
 
 void Input_RequestPauseToggle()
 {
-    if (!PausePresentationInputAllowed(Game_AllowsSharedGameplayFeatures()))
+    if (!Game_AllowsPauseToggleInput())
         return;
     const bool paused = !VR_IsPausePresentationTarget();
     // Hold Start long enough to cross MCC's input polling boundary, then let

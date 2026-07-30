@@ -64,6 +64,13 @@ uint32_t NormalizeVirtualXInputSetStateResult(
 // Halo 3 gameplay owner may use its edge to change VR pause presentation.
 bool PausePresentationInputAllowed(bool sharedGameplayOwner);
 
+// The Y+B fallback may inject Start for either Halo 3's shared gameplay path or
+// a title-specific ODST/Reach owner. This is deliberately separate from
+// PausePresentationInputAllowed: ODST and Reach follow their proven native pause
+// flags instead of guessing presentation state from the controller edge.
+bool PauseToggleInputAllowed(
+    bool sharedGameplayOwner, bool titleSpecificPauseOwner);
+
 // Reach's on-foot VR layout trades the physical left trigger and X button so
 // armour ability stays on the trigger and grenade moves to X. Vehicles must
 // receive Reach's native layout instead. `playerInVehicleProven` is deliberately

@@ -18650,6 +18650,19 @@ bool Game_AllowsSharedControllerInput()
         activeTitle, resolvedOwnerAllowsControllerInput, cameraOnlyOwned,
         allowAmbiguousFrontend, explicitTitleAllowsControllerInput);
 }
+bool Game_AllowsPauseToggleInput()
+{
+    bool titleSpecificPauseOwner = false;
+#if HALOMCCVR_EXPERIMENTAL_ODST_BRINGUP
+    titleSpecificPauseOwner = OdstCameraOnlyContext();
+#endif
+#if HALOMCCVR_EXPERIMENTAL_REACH_RENDER_CANDIDATE
+    titleSpecificPauseOwner = titleSpecificPauseOwner ||
+        TitleAdapter_GetActiveTitle() == GameTitle::HaloReach;
+#endif
+    return PauseToggleInputAllowed(
+        Game_AllowsSharedGameplayFeatures(), titleSpecificPauseOwner);
+}
 bool Game_HasTitleCapability(uint32_t requiredCapabilities)
 {
     if (!requiredCapabilities ||
@@ -18783,17 +18796,28 @@ bool Game_HasAuthoritativePauseState()
 {
     if (g_enginePauseValidated.load(std::memory_order_acquire))
         return true;
-#if HALOMCCVR_EXPERIMENTAL_ODST_BRINGUP
     const GameTitle activeTitle = TitleAdapter_GetActiveTitle();
     const TitleAdapterRuntimeSnapshot runtime =
         RuntimeSnapshot(GetTickCount64());
-    return (activeTitle == GameTitle::Halo3ODST ||
-            (runtime.runtime.owner == GameTitle::Halo3ODST &&
-             runtime.runtime.qualifyingOwnerCount == 1)) &&
-        g_odstNativePauseFlag.load(std::memory_order_acquire) != 0;
-#else
-    return false;
+#if HALOMCCVR_EXPERIMENTAL_ODST_BRINGUP
+    if ((activeTitle == GameTitle::Halo3ODST ||
+         (runtime.runtime.owner == GameTitle::Halo3ODST &&
+          runtime.runtime.qualifyingOwnerCount == 1)) &&
+        g_odstNativePauseFlag.load(std::memory_order_acquire) != 0)
+    {
+        return true;
+    }
 #endif
+#if HALOMCCVR_EXPERIMENTAL_REACH_RENDER_CANDIDATE
+    if ((activeTitle == GameTitle::HaloReach ||
+         (runtime.runtime.owner == GameTitle::HaloReach &&
+          runtime.runtime.qualifyingOwnerCount == 1)) &&
+        g_reachNativePauseFlag.load(std::memory_order_acquire) != 0)
+    {
+        return true;
+    }
+#endif
+    return false;
 }
 
 // HUD layout (F1 menu): manual rescan + status. The scan normally starts itself

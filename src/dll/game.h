@@ -58,6 +58,9 @@ void Game_RejectReachAuthoredReticle(uint32_t expectedGeneration,
                                      const char* reason);
 bool Game_AllowsSharedGameplayFeatures();
 bool Game_AllowsSharedControllerInput();
+// True only for a supported title-owned input context that may turn the Y+B
+// fallback chord into a native Start pulse.
+bool Game_AllowsPauseToggleInput();
 bool Game_HasTitleCapability(uint32_t requiredCapabilities);
 CinematicControlState Game_GetCinematicControlState();
 bool Game_GetCutsceneTheaterPresentation(float& authoredAspect);
