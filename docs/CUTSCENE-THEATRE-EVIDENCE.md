@@ -59,6 +59,31 @@ not complete, that frame is dropped and the immersive camera/session remain
 armed. The replacement remains headset-pending on Quest and requires a PSVR2
 regression before acceptance.
 
+#### Rejected: projection-space theatre compositor
+
+Source `387e5e3595d02608dd8906bcb610236b36ff58f6`, DLL SHA-256
+`698311F911FC4A1204F27D35A0F26C21FC7CD15E7F6637687DC05F5478C4BA9F`,
+was headset-rejected on the Steam edition through VirtualDesktopXR 1.0.10 on
+a Meta Quest 3 at 90 Hz. The user reported major stuttering and warping, broken
+3D cinema, and severely malformed box geometry. The exact log proves the new
+projection path activated at `01:05:06.017`; it reported 90 FPS, so the
+player-visible failure outranks that aggregate counter.
+
+The new path also raised the theatre render-window p95 to 7.03 ms. In the
+preserved pre-candidate log from the same Quest/runtime, the older quad path
+held 2.56--3.99 ms during extended theatre presentation. The rejected path
+added two full-size eye resolves plus two projection draws and cannot be
+retained as a performance-neutral presentation change. Evidence is preserved
+under
+`out/test-runs/387e5e3-quest-theatre-projection-fail-20260730-010527`
+(log SHA-256
+`C7AA8336B49128720713865C9184BD07AD5EFE60D5B9DA6E76F4A23981F56CE7`).
+
+The projection-space compositor is disabled before any further experiment.
+Its code remains inert as negative evidence. Theatre returns to the prior
+core eye-selective quad path; this restores the pre-candidate behavior but does
+not claim to fix Quest depth.
+
 The compositor also requires a separate fresh, generation-tagged authored
 projection aspect. It double-reads the cinematic-control publication around
 that projection read, so a title transition or camera-control handoff cannot

@@ -378,6 +378,12 @@ namespace
         float clipPositions[4][4]{};
     };
     static_assert(sizeof(TheaterProjectionParams) == 64);
+    // Source 387e5e3 was headset-rejected on Quest 3 / VirtualDesktopXR:
+    // the projection-space theatre produced severe warping/judder, malformed
+    // screen geometry, and roughly doubled the theatre render-window cost.
+    // Keep the implementation inert as negative evidence; use the prior core
+    // eye-selective quad path until a different presentation is proven.
+    constexpr bool kUseTheaterProjectionCompositor = false;
 
     // Official SMAA 1x shaders and immutable lookup tables. They are created on
     // first SMAA selection and remain tiny; the third eye-sized target is the
@@ -6800,7 +6806,9 @@ float4 ps_scope_linearize(VSOut i):SV_Target { return paint(i.uv,true); }
                     swi.timeout = 1000000000;
                     XrSwapchainImageReleaseInfo ri{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
                     bool reachStereoUploadComplete = !reachTitle;
-                    theaterProjectionAttempted = theaterPresentation &&
+                    theaterProjectionAttempted =
+                        kUseTheaterProjectionCompositor &&
+                        theaterPresentation &&
                         projection.viewCount == 2 &&
                         EnsureTheaterProjectionResources(g_stereoW, g_stereoH);
                     const XrResult stereoAcquire =
@@ -7233,7 +7241,8 @@ float4 ps_scope_linearize(VSOut i):SV_Target { return paint(i.uv,true); }
                                                 &theaterQuads[eye]));
                                     }
                                     static bool loggedFallback = false;
-                                    if (!loggedFallback)
+                                    if (kUseTheaterProjectionCompositor &&
+                                        !loggedFallback)
                                     {
                                         loggedFallback = true;
                                         LOG("cutscene theatre: projection "
