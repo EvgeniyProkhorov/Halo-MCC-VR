@@ -2380,6 +2380,46 @@ int main()
               ClassifyHalo3FamilyCinematicControl(true, true, false) ==
                   CinematicControlState::Unknown,
             "Halo 3 and ODST require both their cinematic flag and shot-state proof");
+        const float odstLockedLook[4] = {};
+        const float odstNoLookRate[4] = {};
+        const float odstFreeLook[4] = {0.0f, -0.1f, 0.0f, 0.2f};
+        const float odstOpeningLookRate[4] = {0.0f, -0.01f, 0.0f, 0.01f};
+        const float odstInvalidLook[4] = {
+            0.0f, 0.0f, std::numeric_limits<float>::quiet_NaN(), 0.0f};
+        Check(ClassifyOdstCinematicControl(
+                  CinematicControlState::AuthoredLocked, true,
+                  odstLockedLook, odstNoLookRate, 0) ==
+                  CinematicControlState::AuthoredLocked &&
+              ClassifyOdstCinematicControl(
+                  CinematicControlState::AuthoredLocked, true,
+                  odstFreeLook, odstNoLookRate, 0) ==
+                  CinematicControlState::PlayerControlled &&
+              ClassifyOdstCinematicControl(
+                  CinematicControlState::AuthoredLocked, true,
+                  odstLockedLook, odstOpeningLookRate, 60) ==
+                  CinematicControlState::PlayerControlled &&
+              ClassifyOdstCinematicControl(
+                  CinematicControlState::AuthoredLocked, true,
+                  odstLockedLook, odstOpeningLookRate, 0) ==
+                  CinematicControlState::AuthoredLocked,
+            "ODST qualifies only zero live look freedom with no active opening interpolation");
+        Check(ClassifyOdstCinematicControl(
+                  CinematicControlState::AuthoredLocked, false,
+                  odstLockedLook, odstNoLookRate, 0) ==
+                  CinematicControlState::Unknown &&
+              ClassifyOdstCinematicControl(
+                  CinematicControlState::AuthoredLocked, true,
+                  odstInvalidLook, odstNoLookRate, 0) ==
+                  CinematicControlState::Unknown &&
+              ClassifyOdstCinematicControl(
+                  CinematicControlState::AuthoredLocked, true,
+                  odstLockedLook, odstNoLookRate, -1) ==
+                  CinematicControlState::Unknown &&
+              ClassifyOdstCinematicControl(
+                  CinematicControlState::PlayerControlled, false,
+                  nullptr, nullptr, -1) ==
+                  CinematicControlState::PlayerControlled,
+            "ODST missing or invalid look proof fails closed without weakening known gameplay state");
         Check(ClassifyReachCinematicControl(true, 1) ==
                   CinematicControlState::AuthoredLocked &&
               ClassifyReachCinematicControl(true, 0) ==

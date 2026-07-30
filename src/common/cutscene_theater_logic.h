@@ -110,6 +110,43 @@ inline CinematicControlState ClassifyHalo3FamilyCinematicControl(
         : CinematicControlState::Unknown;
 }
 
+inline CinematicControlState ClassifyOdstCinematicControl(
+    CinematicControlState cinematicState,
+    bool userInputConstraintStateAvailable,
+    const float maximumLookAngles[4],
+    const float maximumLookAngleRates[4],
+    int32_t interpolationTicksRemaining) noexcept
+{
+    // ODST's authored cinematic tag can leave camera look enabled for a shot.
+    // Preserve weaker common evidence as-is, but never call an active cinematic
+    // locked unless its live title-native look constraints prove zero freedom.
+    if (cinematicState != CinematicControlState::AuthoredLocked)
+        return cinematicState;
+    if (!userInputConstraintStateAvailable || !maximumLookAngles ||
+        !maximumLookAngleRates || interpolationTicksRemaining < 0 ||
+        interpolationTicksRemaining > 360000)
+    {
+        return CinematicControlState::Unknown;
+    }
+
+    constexpr float kLookFreedomEpsilon = 0.0001f;
+    bool currentLookFreedom = false;
+    bool pendingLookFreedom = false;
+    for (int axis = 0; axis < 4; ++axis)
+    {
+        const float angle = maximumLookAngles[axis];
+        const float rate = maximumLookAngleRates[axis];
+        if (!std::isfinite(angle) || !std::isfinite(rate))
+            return CinematicControlState::Unknown;
+        currentLookFreedom |= std::fabs(angle) > kLookFreedomEpsilon;
+        pendingLookFreedom |= interpolationTicksRemaining > 0 &&
+            std::fabs(rate) > kLookFreedomEpsilon;
+    }
+    return currentLookFreedom || pendingLookFreedom
+        ? CinematicControlState::PlayerControlled
+        : CinematicControlState::AuthoredLocked;
+}
+
 inline CinematicControlState ClassifyReachCinematicControl(
     bool cinematicGlobalsProven, uint32_t stateWord) noexcept
 {

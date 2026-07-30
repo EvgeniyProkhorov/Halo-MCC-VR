@@ -381,6 +381,10 @@ namespace
         OdstMotionBlurVar motionBlurVars[2]{};
         bool motionBlurResolved = false;
         bool motionBlurZeroed = false;
+        // ODST cinematic camera object, proven by the title's own user-input-
+        // constraint setter. Its current/pending maximum-look-angle state is
+        // the theatre discriminator for player-controllable cinematic shots.
+        uint32_t cinematicCameraTlsMemberOffset = 0;
         // 10 camera/weapon/CHUD core hooks + optional HUD height + two
         // all-or-nothing crosshair hooks. Trampolines are recorded alongside
         // targets so optional-hook absence can never shift lifecycle mapping.
@@ -1333,7 +1337,8 @@ namespace
         lifecycle.enabledCapabilities =
             lifecycle.installed && !lifecycle.teardownRequested
                 ? kOdstRuntimeCapabilities : TitleCapability_None;
-        if (!g_cinematicTlsIndex)
+        if (!g_cinematicTlsIndex ||
+            !g_odstCamera.cinematicCameraTlsMemberOffset)
             lifecycle.enabledCapabilities &= ~TitleCapability_CutsceneTheater;
         return TitleAdapter_PublishLifecycle(
             GameTitle::Halo3ODST, generation, lifecycle);
@@ -4776,6 +4781,65 @@ namespace
         }
     }
 
+#if HALOMCCVR_EXPERIMENTAL_ODST_BRINGUP
+    CinematicControlState ReadOdstCinematicControl(
+        int32_t& scene, int32_t& shot)
+    {
+        const CinematicControlState cinematicState =
+            ReadCinematicControl(scene, shot);
+        if (cinematicState != CinematicControlState::AuthoredLocked)
+            return cinematicState;
+
+        bool constraintsAvailable = false;
+        float maximumLookAngles[4]{};
+        float maximumLookAngleRates[4]{};
+        int32_t interpolationTicksRemaining = 0;
+        const uint32_t cameraMemberOffset =
+            g_odstCamera.cinematicCameraTlsMemberOffset;
+        __try
+        {
+            auto** slots = reinterpret_cast<void**>(__readgsqword(0x58));
+            if (slots && g_cinematicTlsIndex &&
+                *g_cinematicTlsIndex < 256 && cameraMemberOffset)
+            {
+                auto* tls = reinterpret_cast<unsigned char*>(
+                    slots[*g_cinematicTlsIndex]);
+                auto* camera = tls
+                    ? *reinterpret_cast<unsigned char**>(
+                          tls + cameraMemberOffset)
+                    : nullptr;
+                if (camera &&
+                    *reinterpret_cast<const uint16_t*>(camera + 2) == 5)
+                {
+                    constexpr uint32_t kCurrentOffsets[4] = {
+                        0xC8, 0xCC, 0xD0, 0xD4};
+                    constexpr uint32_t kRateOffsets[4] = {
+                        0xD8, 0xDC, 0xE0, 0xE4};
+                    for (int axis = 0; axis < 4; ++axis)
+                    {
+                        maximumLookAngles[axis] =
+                            *reinterpret_cast<const float*>(
+                                camera + kCurrentOffsets[axis]);
+                        maximumLookAngleRates[axis] =
+                            *reinterpret_cast<const float*>(
+                                camera + kRateOffsets[axis]);
+                    }
+                    interpolationTicksRemaining =
+                        *reinterpret_cast<const int32_t*>(camera + 0xF0);
+                    constraintsAvailable = true;
+                }
+            }
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            constraintsAvailable = false;
+        }
+        return ClassifyOdstCinematicControl(
+            cinematicState, constraintsAvailable, maximumLookAngles,
+            maximumLookAngleRates, interpolationTicksRemaining);
+    }
+#endif
+
     bool CinematicFovPolicyStockReady()
     {
         return g_reduceCinematicFov.load(std::memory_order_acquire) != nullptr &&
@@ -5966,7 +6030,7 @@ namespace
         int32_t cinematicScene = -1;
         int32_t cinematicShot = -1;
         const CinematicControlState cinematicControl =
-            ReadCinematicControl(cinematicScene, cinematicShot);
+            ReadOdstCinematicControl(cinematicScene, cinematicShot);
         const bool cinematic = cinematicControl ==
             CinematicControlState::AuthoredLocked;
         const uint32_t cinematicGeneration =
@@ -7411,6 +7475,30 @@ namespace
     const char* kOdstNativeWeaponIkDecisionSig =
         "40 84 ED 74 05 45 84 FF 75 04 84 DB 74 0F BA 03 00 00 00 "
         "41 0F 28 D9 44 8D 42 FF EB 11";
+    // Pinned retail ODST's unique cinematic user-input-constraint setter.
+    // The RIP operand names ODST's engine TLS index and `mov r9d, imm32`
+    // supplies its cinematic-camera TLS member. The fixed tail proves the
+    // object type check plus current maximum-look-angle C8/CC/D0/D4 and
+    // interpolation-rate D8/DC/E0/E4 layout used below.
+    const char* kOdstCinematicUserInputConstraintSig =
+        "44 8B 05 ?? ?? ?? ?? 0F 28 E2 "
+        "65 48 8B 04 25 58 00 00 00 41 B9 ?? 00 00 00 "
+        "4A 8B 04 C0 4D 8B 0C 01 B8 05 00 00 00 "
+        "66 41 3B 41 02 0F 85 ?? ?? ?? ?? "
+        "F3 0F 10 15 ?? ?? ?? ?? 44 8D 40 FC "
+        "0F BF 42 02 0F 57 C0 41 3B C8 0F 57 DB 0F 57 C9 "
+        "44 0F 4D C1 F3 0F 2A C0 F3 41 0F 2A D8 "
+        "F3 0F 59 C2 F3 41 0F 5C 81 C8 00 00 00";
+    // The unique paired camera updater proves that +F0 is a positive remaining-
+    // tick count: while positive it adds D8/DC/E0/E4 to C8/CC/D0/D4 and then
+    // decrements +F0. This makes an active nonzero rate explicit pending look
+    // freedom rather than stale storage.
+    const char* kOdstCinematicUserInputUpdateSig =
+        "39 AB F0 00 00 00 7E ?? 48 8D 83 C8 00 00 00 "
+        "B9 04 00 00 00 F3 0F 10 40 10 F3 0F 58 00 "
+        "F3 0F 11 00 48 83 C0 04 49 2B CE 75 ?? "
+        "F3 0F 10 83 EC 00 00 00 F3 0F 58 83 E8 00 00 00 "
+        "FF 8B F0 00 00 00 F3 0F 11 83 E8 00 00 00";
     // Unique ODST-native wrappers that directly invoke chud_draw_widget.
     const char* kOdstHudPhasePrimarySig =
         "48 8B C4 48 89 58 08 48 89 68 10 48 89 70 18 48 89 78 20 "
@@ -8787,6 +8875,7 @@ namespace
             var = {};
         g_odstCamera.motionBlurResolved = false;
         g_odstCamera.motionBlurZeroed = false;
+        g_odstCamera.cinematicCameraTlsMemberOffset = 0;
         // Drop the cinematic-FOV debug-var pointer for the same stale-pointer
         // reason as the trampolines above: a later title change must never let
         // UpdateCinematicFovPolicy write into an unloaded halo3odst.dll. Halo 3
@@ -8802,6 +8891,58 @@ namespace
         g_odstCamera.installedAtMs.store(0, std::memory_order_release);
         g_odstCamera.cameraArrayReady.store(
             false, std::memory_order_release);
+    }
+
+    void LocateOdstCinematicUserInputState(uintptr_t base, size_t size)
+    {
+        // Optional, feature-local proof: failure masks only ODST theatre. The
+        // camera core remains armed and every cinematic stays immersive.
+        g_odstCamera.cinematicCameraTlsMemberOffset = 0;
+        const uintptr_t implementation = sig::Find(
+            base, size, kOdstCinematicUserInputConstraintSig);
+        const uintptr_t updater = sig::Find(
+            base, size, kOdstCinematicUserInputUpdateSig);
+        const bool uniqueImplementation = implementation &&
+            !sig::Find(implementation + 1,
+                       base + size - implementation - 1,
+                       kOdstCinematicUserInputConstraintSig);
+        const bool uniqueUpdater = updater &&
+            !sig::Find(updater + 1, base + size - updater - 1,
+                       kOdstCinematicUserInputUpdateSig);
+        if (!uniqueImplementation || !uniqueUpdater ||
+            implementation + 0x19 > base + size)
+        {
+            LOG("ODST cutscene theatre: user-input-constraint setter/updater "
+                "signature missing/ambiguous; theatre capability disabled");
+            return;
+        }
+
+        const int32_t tlsDisp =
+            *reinterpret_cast<const int32_t*>(implementation + 3);
+        auto* constraintTlsIndex = reinterpret_cast<uint32_t*>(
+            implementation + 7 + tlsDisp);
+        const uintptr_t constraintTlsIndexAddress =
+            reinterpret_cast<uintptr_t>(constraintTlsIndex);
+        const uint32_t cameraMemberOffset =
+            *reinterpret_cast<const uint32_t*>(implementation + 0x15);
+        if (!g_cinematicTlsIndex ||
+            constraintTlsIndex != g_cinematicTlsIndex ||
+            constraintTlsIndexAddress < base ||
+            constraintTlsIndexAddress + sizeof(uint32_t) > base + size ||
+            *constraintTlsIndex >= 256 ||
+            cameraMemberOffset < 0x40 || cameraMemberOffset > 0x400 ||
+            (cameraMemberOffset & (sizeof(uintptr_t) - 1)) != 0)
+        {
+            LOG("ODST cutscene theatre: user-input-constraint TLS proof "
+                "failed; theatre capability disabled");
+            return;
+        }
+
+        g_odstCamera.cinematicCameraTlsMemberOffset = cameraMemberOffset;
+        LOG("ODST cutscene theatre: live authored look constraints resolved "
+            "(TLS member 0x%X, current C8/CC/D0/D4, rates D8/DC/E0/E4, "
+            "ticks F0); only zero look freedom can enter theatre",
+            cameraMemberOffset);
     }
 
     bool ValidateOdstCameraLayout()
@@ -9661,6 +9802,12 @@ namespace
         g_odstCamera.motionBlurResolved = true;
         g_odstCamera.motionBlurZeroed = false;
 
+        // Resolve every ODST theatre prerequisite before enabling a detour or
+        // publishing capability. Both are optional, feature-local proofs:
+        // failure leaves the complete immersive camera core unchanged.
+        LocateCinematicState(base, size);
+        LocateOdstCinematicUserInputState(base, size);
+
         struct HookSpec
         {
             const char* name;
@@ -9817,11 +9964,6 @@ namespace
         TitleAdapter_PublishMode(
             GameTitle::Halo3ODST, runtimeGeneration, RuntimeMode::Loading);
         VR_SetScopeActive(false);
-        // Resolve ODST's cinematic scene/shot state so OdstApplyHeadLook can
-        // rebase the VR yaw at each authored cut, matching Halo 3. The signature
-        // is title-agnostic; the shot-state TLS offset is read from ODST's own
-        // instruction (0xA0). Failure logs and leaves shot-facing disabled.
-        LocateCinematicState(base, size);
         // ODST cinematic FOV parity (issue #18): Halo applies a 25% widescreen
         // FOV reduction while a cinematic is in progress, which also narrows the
         // visibility projection and pulls the view in during ODST cutscenes.

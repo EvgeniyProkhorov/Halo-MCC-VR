@@ -29,7 +29,7 @@ that projection read, so a title transition or camera-control handoff cannot
 combine state and aspect from different samples. Missing or invalid projection
 metadata keeps the frame immersive rather than guessing an aspect.
 
-## Halo 3 and ODST
+## Halo 3 and ODST common cinematic state
 
 Both engines expose the same uniquely matched
 `cinematic_in_progress` leaf getter. It reads the title's TLS cinematic-globals
@@ -42,11 +42,51 @@ current scene/shot state:
 | Halo 3 | `TLS+0x90` |
 | ODST | `TLS+0xA0` |
 
-The adapter reports `AuthoredLocked` only when the globals object is present,
-its cinematic-active byte is nonzero, and the title-specific shot-state object
-is readable. An inactive cinematic byte reports `PlayerControlled`. A missing
-or non-unique signature, missing object, read fault, stale generation, or title
-unload reports `Unknown` and masks the capability.
+This common state is sufficient for Halo 3. Its adapter reports
+`AuthoredLocked` only when the globals object is present, its cinematic-active
+byte is nonzero, and the title-specific shot-state object is readable. An
+inactive cinematic byte reports `PlayerControlled`. A missing or non-unique
+signature, missing object, read fault, stale generation, or title unload
+reports `Unknown` and masks the capability.
+
+### ODST live look constraints
+
+The first ODST headset pass disproved cinematic-active plus shot-state as a
+complete camera-lock test: the first mission's drop-pod sequence entered
+theatre even though right-stick look remained available. Candidate `14fc96e`
+then tried the HaloScript `player_camera_control` disabled bit. The next
+headset run disproved that interpretation too: the bit remained clear in a
+legitimate locked cinematic, so it disabled all ODST theatre. The candidate was
+reverted in `d00d962`; that global bit is negative evidence and is not used.
+
+H3ODSTEK contains the title-native distinction. Every cinematic shot has a
+`user input constraints` block whose records contain `ticks`, `maximum look
+angles`, and `frictional force`. The official `c100` opening tags make the
+drop-pod exception explicit: `c100_04` shots 3 and 4 set maximum look angles to
+`-40,-40,20,40`, while `c100_05` shot 3 sets them to `0,0,0,0` with friction 1.
+The earlier opening scenes contain no records granting nonzero look bounds.
+
+The pinned retail ODST module
+`5BB20976EFDFD9E1CE59C589339804725FEC239021027C8D65B2733EAB94829A`
+retains the `cinematic_scripting_set_user_input_constraints` external. Its
+wrapper at `halo3odst+0x22BC4C` resolves the current scene/shot record and calls
+the unique implementation at `halo3odst+0x23F25C`. That function uses ODST's
+own engine TLS index and the cinematic-camera pointer at `TLS+0x50`, verifies
+camera type 5, and interpolates four maximum-look-angle values. The live
+current values are at camera `+0xC8/+0xCC/+0xD0/+0xD4`; per-tick rates are at
+`+0xD8/+0xDC/+0xE0/+0xE4`; remaining ticks are at `+0xF0`. The unique paired
+updater at `halo3odst+0x23EF5C` applies those four rates only while `+0xF0` is
+positive and decrements the count each tick, proving that a nonzero rate with
+positive remaining ticks is pending look freedom rather than stale storage.
+
+The ODST adapter now retains `AuthoredLocked` only when the common cinematic
+proof is active, all four live look limits are zero, and no active interpolation
+is opening any limit. Any nonzero current limit or active nonzero rate reports
+`PlayerControlled`, keeping the pod immersive from the first opening tick.
+Missing or non-unique signatures, a mismatched TLS owner, missing/type-mismatched
+camera state, non-finite values, invalid ticks, or a read fault reports
+`Unknown` and masks only ODST theatre. It never disarms ODST VR or changes the
+camera core.
 
 Halo 3's pristine compact camera stores its authored horizontal/vertical
 projection tangents at `+0x28/+0x2C`. ODST's title-evidenced camera layout stores
