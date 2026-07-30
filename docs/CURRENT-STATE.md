@@ -20,11 +20,30 @@ are evidence, not instructions.
 > verify it against the code before building on it.
 
 > **CURRENT HEADSET-ACCEPTED DEVELOPMENT BUILD:** source
-> `74e1477d7ae02ea57f754ac76dfd99678d9028ec`, DLL SHA-256
-> `5BB673ABBA8BA9D4B0BC667D1009CE41880ABCB1F8EFDC31F7E118659C20C898`.
-> This is the accepted Reach black-static-world fix. The public distribution
-> release remains Alpha 0.3.0 below; do not confuse its older DLL with the
-> current headset-accepted development artifact.
+> `b2b3fa2ffd88c6f2285889090d85dfe3a069b5f3`, DLL SHA-256
+> `25906FE4C76B7AD87B4CFFE597777AD0F83EAB2AD05BFD0352E09BF30959479D`.
+> This is the accepted cumulative universal-cutscene-theatre build with ODST's
+> title-native free-look exclusion. The public distribution release remains
+> Alpha 0.3.0 below; do not confuse its older DLL with the current
+> headset-accepted development artifact.
+
+### ACCEPTED: ODST authored-look theatre qualification - 2026-07-29
+
+| Identity | Value |
+| --- | --- |
+| Accepted source | `b2b3fa2ffd88c6f2285889090d85dfe3a069b5f3` |
+| Candidate package | `out/candidates/b2b3fa2-reach-fp-parity-20260730-003242667Z` |
+| `halo3xr.dll` SHA-256 | `25906FE4C76B7AD87B4CFFE597777AD0F83EAB2AD05BFD0352E09BF30959479D` |
+| Installed editions | Steam and Microsoft Store; hashes verified independently |
+| Accepted runtime | Steam edition, SteamVR/OpenXR 2.17.6, PSVR2 at 120 Hz |
+| Headset result | Accepted. ODST's locked opening remains visible in theatre through the clouds reveal, and the right-stick-controllable drop-pod shots remain immersive VR. |
+
+The rejected `player_camera_control` qualifier at `14fc96e` disabled legitimate
+ODST theatre and remains negative evidence. This accepted build instead reads
+the engine's live per-shot maximum-look-angle constraints: any current or
+pending look freedom publishes `PlayerControlled`; only proven zero freedom
+retains `AuthoredLocked`. Missing proof falls back only this feature to
+immersive VR.
 
 ## PUBLIC RELEASE: MCC VR Alpha 0.3.0 - 2026-07-27
 
