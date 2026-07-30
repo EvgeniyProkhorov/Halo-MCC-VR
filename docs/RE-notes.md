@@ -238,3 +238,29 @@ The user confirmed that this frees the shotgun left arm. The removed synthetic p
   actually installed. Use it rather than a title list: the previous hardcoded
   lists went stale for both Reach and ODST and each time produced an opaque
   procedural crosshair painted over art the title had already captured.
+
+### Halo 3 authored-reticle ownership and cadence (2026-07-30)
+
+- Runtime source `112aaac` exposed two shared-lifecycle defects during a
+  Reach-to-Halo-3 transition. The compositor entered Halo 3 still reporting
+  `heldArt=1` with Reach key `789BF42442ECB040` for roughly seven seconds before
+  Halo 3 produced its first own capture. The shared reticle swapchain therefore
+  had content but no title ownership; an empty, opaque, or otherwise stale
+  image could be submitted for the next engine.
+- The same log proves the Halo 3 performance regression. Before authored
+  crosshair capture, steady `renderWindow` samples were generally about 1-4 ms.
+  After `Halo authored per-weapon crosshair redirected to VR aim quad`, the
+  timing summaries reached 6.63 ms and later 10.18 ms p95. The compositor was
+  applying Reach's six-frame animated-art refresh to every capture-capable
+  title, so Halo 3 repeatedly paid the blocking OpenXR crosshair-swapchain
+  acquire/wait/copy/release even while its identity key was unchanged.
+- The candidate fix makes the live capture predicate active-title-specific,
+  revokes held art and upload cadence on every title-presentation detach, and
+  refuses to submit a capture-capable reticle layer until that title has
+  successfully published non-empty authored art. Reach retains its bounded
+  animation refresh; Halo 3 and ODST upload only when their authored identity
+  changes. There is no runtime-name or headset-specific branch.
+- This is code- and log-verified but headset-pending. Acceptance requires Halo 3
+  native HUD plus authored CHUD crosshair visibility, stable weapon/zoom state
+  changes, and performance on the reporting Steam Link path, followed by Halo 3
+  on SteamVR and Reach/ODST regression coverage.
