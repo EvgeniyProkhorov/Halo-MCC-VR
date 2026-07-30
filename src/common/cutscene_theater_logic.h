@@ -110,6 +110,24 @@ inline CinematicControlState ClassifyHalo3FamilyCinematicControl(
         : CinematicControlState::Unknown;
 }
 
+inline CinematicControlState ClassifyOdstCinematicControl(
+    CinematicControlState cinematicState,
+    bool playerCameraControlStateAvailable,
+    bool playerCameraControlDisabled) noexcept
+{
+    // ODST can keep cinematic globals and shot state active while the player
+    // still owns camera look (the controllable drop-pod sequence is one such
+    // case). Never promote weaker evidence, and require the title-native
+    // player-camera disable bit before retaining AuthoredLocked.
+    if (cinematicState != CinematicControlState::AuthoredLocked)
+        return cinematicState;
+    if (!playerCameraControlStateAvailable)
+        return CinematicControlState::Unknown;
+    return playerCameraControlDisabled
+        ? CinematicControlState::AuthoredLocked
+        : CinematicControlState::PlayerControlled;
+}
+
 inline CinematicControlState ClassifyReachCinematicControl(
     bool cinematicGlobalsProven, uint32_t stateWord) noexcept
 {

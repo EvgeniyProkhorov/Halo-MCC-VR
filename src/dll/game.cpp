@@ -381,6 +381,10 @@ namespace
         OdstMotionBlurVar motionBlurVars[2]{};
         bool motionBlurResolved = false;
         bool motionBlurZeroed = false;
+        // Resolved from ODST's unique player_camera_control implementation.
+        // The pointed-to array uses 0x30-byte player slots; slot 0 flags live
+        // at +0x18 and bit 0 means player camera control is disabled.
+        uint32_t playerCameraControlTlsMemberOffset = 0;
         // 10 camera/weapon/CHUD core hooks + optional HUD height + two
         // all-or-nothing crosshair hooks. Trampolines are recorded alongside
         // targets so optional-hook absence can never shift lifecycle mapping.
@@ -1333,7 +1337,8 @@ namespace
         lifecycle.enabledCapabilities =
             lifecycle.installed && !lifecycle.teardownRequested
                 ? kOdstRuntimeCapabilities : TitleCapability_None;
-        if (!g_cinematicTlsIndex)
+        if (!g_cinematicTlsIndex ||
+            !g_odstCamera.playerCameraControlTlsMemberOffset)
             lifecycle.enabledCapabilities &= ~TitleCapability_CutsceneTheater;
         return TitleAdapter_PublishLifecycle(
             GameTitle::Halo3ODST, generation, lifecycle);
@@ -5965,8 +5970,43 @@ namespace
         static thread_local int32_t prevShot = -1;
         int32_t cinematicScene = -1;
         int32_t cinematicShot = -1;
-        const CinematicControlState cinematicControl =
+        CinematicControlState cinematicControl =
             ReadCinematicControl(cinematicScene, cinematicShot);
+        if (cinematicControl == CinematicControlState::AuthoredLocked)
+        {
+            bool controlStateAvailable = false;
+            bool playerCameraControlDisabled = false;
+            const uint32_t controlMemberOffset =
+                g_odstCamera.playerCameraControlTlsMemberOffset;
+            __try
+            {
+                auto** slots = reinterpret_cast<void**>(__readgsqword(0x58));
+                if (slots && g_cinematicTlsIndex &&
+                    *g_cinematicTlsIndex < 256 && controlMemberOffset)
+                {
+                    auto* tls = reinterpret_cast<unsigned char*>(
+                        slots[*g_cinematicTlsIndex]);
+                    auto* controls = tls
+                        ? *reinterpret_cast<unsigned char**>(
+                              tls + controlMemberOffset)
+                        : nullptr;
+                    if (controls)
+                    {
+                        const uint32_t flags =
+                            *reinterpret_cast<const uint32_t*>(controls + 0x18);
+                        controlStateAvailable = true;
+                        playerCameraControlDisabled = (flags & 1u) != 0;
+                    }
+                }
+            }
+            __except (EXCEPTION_EXECUTE_HANDLER)
+            {
+                controlStateAvailable = false;
+            }
+            cinematicControl = ClassifyOdstCinematicControl(
+                cinematicControl, controlStateAvailable,
+                playerCameraControlDisabled);
+        }
         const bool cinematic = cinematicControl ==
             CinematicControlState::AuthoredLocked;
         const uint32_t cinematicGeneration =
@@ -7411,6 +7451,21 @@ namespace
     const char* kOdstNativeWeaponIkDecisionSig =
         "40 84 ED 74 05 45 84 FF 75 04 84 DB 74 0F BA 03 00 00 00 "
         "41 0F 28 D9 44 8D 42 FF EB 11";
+    // Retail ODST's HaloScript descriptor for player_camera_control points to
+    // this unique implementation. Its RIP operand names the engine TLS-index
+    // global and the `mov r11d, imm32` supplies ODST's player-control TLS
+    // member. The fixed tail proves four 0x30-byte slots and flags at +0x18;
+    // bit 0 is set when player camera control is disabled.
+    const char* kOdstPlayerCameraControlSig =
+        "40 53 48 83 EC 20 83 64 24 48 00 8B DA E8 ?? ?? ?? ?? "
+        "48 85 C0 74 ?? 44 8A 08 45 33 D2 "
+        "65 48 8B 04 25 58 00 00 00 45 33 C0 "
+        "8B 0D ?? ?? ?? ?? 41 BB ?? 00 00 00 48 8B 04 C8 "
+        "4D 8B 1C 03 4B 8D 14 40 48 03 D2 41 8B 4C D3 18 "
+        "8B C1 83 E0 FE 83 C9 01 45 84 C9 0F 45 C8 "
+        "48 83 C8 FF 41 89 4C D3 18 83 C9 FF 41 FF C2 "
+        "41 83 FA 03 77 07 41 8B CA 49 8D 40 01 "
+        "44 8B D1 4C 8B C0 48 83 F8 FF 75 ??";
     // Unique ODST-native wrappers that directly invoke chud_draw_widget.
     const char* kOdstHudPhasePrimarySig =
         "48 8B C4 48 89 58 08 48 89 68 10 48 89 70 18 48 89 78 20 "
@@ -8787,6 +8842,7 @@ namespace
             var = {};
         g_odstCamera.motionBlurResolved = false;
         g_odstCamera.motionBlurZeroed = false;
+        g_odstCamera.playerCameraControlTlsMemberOffset = 0;
         // Drop the cinematic-FOV debug-var pointer for the same stale-pointer
         // reason as the trampolines above: a later title change must never let
         // UpdateCinematicFovPolicy write into an unloaded halo3odst.dll. Halo 3
@@ -8802,6 +8858,53 @@ namespace
         g_odstCamera.installedAtMs.store(0, std::memory_order_release);
         g_odstCamera.cameraArrayReady.store(
             false, std::memory_order_release);
+    }
+
+    void LocateOdstPlayerCameraControlState(uintptr_t base, size_t size)
+    {
+        // This proof is optional and feature-local. A miss leaves ODST VR
+        // armed, but masks CutsceneTheater so a controllable camera can never
+        // be inferred from cinematic/shot state alone.
+        g_odstCamera.playerCameraControlTlsMemberOffset = 0;
+        const uintptr_t implementation =
+            sig::Find(base, size, kOdstPlayerCameraControlSig);
+        const bool unique = implementation &&
+            !sig::Find(implementation + 1,
+                       base + size - implementation - 1,
+                       kOdstPlayerCameraControlSig);
+        if (!unique || implementation + 0x35 > base + size)
+        {
+            LOG("ODST cutscene theatre: player-camera-control signature "
+                "missing/ambiguous; theatre capability disabled");
+            return;
+        }
+
+        const int32_t tlsDisp =
+            *reinterpret_cast<const int32_t*>(implementation + 0x2B);
+        auto* controlTlsIndex = reinterpret_cast<uint32_t*>(
+            implementation + 0x2F + tlsDisp);
+        const uintptr_t controlTlsIndexAddress =
+            reinterpret_cast<uintptr_t>(controlTlsIndex);
+        const uint32_t controlMemberOffset =
+            *reinterpret_cast<const uint32_t*>(implementation + 0x31);
+        if (!g_cinematicTlsIndex ||
+            controlTlsIndex != g_cinematicTlsIndex ||
+            controlTlsIndexAddress < base ||
+            controlTlsIndexAddress + sizeof(uint32_t) > base + size ||
+            *controlTlsIndex >= 256 ||
+            controlMemberOffset < 0x40 || controlMemberOffset > 0x400 ||
+            (controlMemberOffset & (sizeof(uintptr_t) - 1)) != 0)
+        {
+            LOG("ODST cutscene theatre: player-camera-control TLS proof "
+                "failed; theatre capability disabled");
+            return;
+        }
+
+        g_odstCamera.playerCameraControlTlsMemberOffset =
+            controlMemberOffset;
+        LOG("ODST cutscene theatre: player camera ownership resolved "
+            "(TLS member 0x%X, slot-0 flags +0x18 bit 0); only a disabled "
+            "player camera can enter theatre", controlMemberOffset);
     }
 
     bool ValidateOdstCameraLayout()
@@ -9661,6 +9764,14 @@ namespace
         g_odstCamera.motionBlurResolved = true;
         g_odstCamera.motionBlurZeroed = false;
 
+        // Resolve every ODST theatre prerequisite before any detour can run or
+        // lifecycle capability can be published. The common signatures supply
+        // cinematic scene/shot state; the ODST-only proof additionally requires
+        // the engine's player-camera-disabled bit. Either failure is feature-
+        // local and leaves the camera core install below unchanged.
+        LocateCinematicState(base, size);
+        LocateOdstPlayerCameraControlState(base, size);
+
         struct HookSpec
         {
             const char* name;
@@ -9817,11 +9928,6 @@ namespace
         TitleAdapter_PublishMode(
             GameTitle::Halo3ODST, runtimeGeneration, RuntimeMode::Loading);
         VR_SetScopeActive(false);
-        // Resolve ODST's cinematic scene/shot state so OdstApplyHeadLook can
-        // rebase the VR yaw at each authored cut, matching Halo 3. The signature
-        // is title-agnostic; the shot-state TLS offset is read from ODST's own
-        // instruction (0xA0). Failure logs and leaves shot-facing disabled.
-        LocateCinematicState(base, size);
         // ODST cinematic FOV parity (issue #18): Halo applies a 25% widescreen
         // FOV reduction while a cinematic is in progress, which also narrows the
         // visibility projection and pulls the view in during ODST cutscenes.
