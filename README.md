@@ -219,7 +219,7 @@ security software globally.
 
 | Setting | Value |
 | --- | --- |
-| Video > Max Frame Rate | 120 |
+| Video > Max Frame Rate | unlimited |
 | Video > V-Sync | Off |
 | Halo 3 > Field of View | 120 |
 | ODST > Look Sensitivity | Maximum |
