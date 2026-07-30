@@ -23,7 +23,7 @@ publication freshness window is 500 ms. Capability loss, title transitions,
 module unload, a missing detector, or a failed read therefore return only this
 feature to immersive presentation.
 
-### Quest flat-theatre result and projection presentation
+### Quest flat-theatre result and presentation experiments
 
 The exact source `23ed3cef9da9c8bb610ca1c2a540d3cbb98a3f83`, DLL
 SHA-256 `828CD701FD4559E24F225FB72ABF0AAAD29918620A0D8AF16E3F2E843F9C88EE`,
@@ -41,23 +41,6 @@ room-fixed pose. Each layer selected one physical eye through
 swapchain. That is core-valid OpenXR, but it leaves correct stereo dependent on
 the runtime honoring both eye-selective layer composition and a nonzero array
 slice on a quad layer.
-
-The replacement is headset- and runtime-agnostic. Both title-rendered eyes are
-resolved into private ordinary 2D textures. A bounded compositor draw projects
-the configured room-fixed screen into each eye's already validated native-FOV
-image rectangle, then submits the same single two-view
-`XrCompositionLayerProjection` used by immersive gameplay. The screen
-projection derives only from the runtime's current eye poses/FOV, the shared
-theatre width/distance, and the title-published authored aspect. It contains no
-headset name, vendor, runtime, IPD constant, or per-runtime branch. The depth
-slider still scales the title's actual per-eye camera offsets before capture;
-Flip Depth swaps the two resolved source eyes before projection.
-
-If private projection resources cannot be created, only theatre falls back
-loudly to the prior core quad presentation. If a claimed projection frame does
-not complete, that frame is dropped and the immersive camera/session remain
-armed. The replacement remains headset-pending on Quest and requires a PSVR2
-regression before acceptance.
 
 #### Rejected: projection-space theatre compositor
 
@@ -79,11 +62,53 @@ under
 (log SHA-256
 `C7AA8336B49128720713865C9184BD07AD5EFE60D5B9DA6E76F4A23981F56CE7`).
 
-The projection-space compositor is disabled before any further experiment.
-Its code remains inert as negative evidence. Theatre returns to the prior
-core eye-selective quad path; this restores the pre-candidate behavior but does
-not claim to fix Quest depth.
+Static review found a second error in that exact implementation. While theatre
+correctly preserves the title's narrow authored cinematic FOV for its captured
+movie, source `387e5e3` used that authored `projectionViews` descriptor both to
+rasterize the room-fixed screen and to submit the result as the headset view.
+It did not use the runtime-native headset FOV claimed by its original
+narrative. That mismatch is consistent with the reported malformed projection,
+but only a headset result can accept the correction below.
 
+#### Rejected: side-by-side slice-zero eye delivery
+
+Source `89b6ac9216c19fd367275b3841bd416c1ef35248`, DLL SHA-256
+`5636610D9AAB3B1C160C5DE7BA28427E0A0127F3509BB24C1EA7B7A5E6D3AE25`,
+was headset-rejected on the Steam edition through VirtualDesktopXR 1.0.10 on
+a Meta Quest 3 at 90 Hz. The user reported a fatal error. The exact log ends
+while the focused session is visibly stalled and contains no orderly detach or
+shutdown. Evidence is preserved under
+`out/test-runs/89b6ac9-quest-theatre-atlas-fatal-20260730-012506`
+(log SHA-256
+`A0BBDC4570B1F39CCF5BBFE7B57EA41DB36E354A753D78C77F42993C85BF31E6`).
+
+This candidate packed both title eyes into one array-size-1 swapchain but still
+submitted two overlapping eye-selective quad layers. It therefore did not
+remove the unresolved `XrEyeVisibility` dependency, and its larger atlas added
+a new allocation path. The behavior was disabled in standalone revert
+`f26cf70953948c56ae908738b834d340b1d9de9d`. The fatal result does not identify
+which fact caused the failure, and neither is promoted to a finding.
+
+#### Pending: direct native-FOV two-view projection
+
+The next candidate removes both failed dependencies. It uses the existing
+array-size-2 world swapchain and submits one ordinary two-view
+`XrCompositionLayerProjection`. Each view uses the runtime's current native eye
+pose and FOV, a full existing swapchain slice, and no `XrEyeVisibility` field.
+The room screen is projected directly from the corresponding title eye cache
+into that view. The depth slider still scales the title's real per-eye camera
+offsets before capture; Flip Depth swaps those two source caches before the two
+physical-eye projection views are drawn.
+
+There is no headset name, vendor, runtime, fixed IPD, or per-runtime branch.
+With the tested configuration (`upscale_filter=0`, `aa_mode=0`,
+`sharpness=0`), the two source eyes are sampled directly and the candidate adds
+no full-size texture or extra draw beyond the two normal eye outputs.
+Non-default IQ modes retain their existing resolve/AA/sharpen chain and allocate
+the two private resolved images only while needed. Missing resources fall back
+only theatre to the prior quad path; a failed claimed frame is dropped without
+disarming the title camera core or OpenXR session. Quest 3 acceptance and the
+required PSVR2 regression are pending.
 The compositor also requires a separate fresh, generation-tagged authored
 projection aspect. It double-reads the cinematic-control publication around
 that projection read, so a title transition or camera-control handoff cannot

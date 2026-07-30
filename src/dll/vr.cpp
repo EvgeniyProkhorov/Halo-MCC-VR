@@ -361,29 +361,28 @@ namespace
     ID3D11ShaderResourceView* g_iqChainSrv[3] = {nullptr, nullptr, nullptr};
     D3D11_TEXTURE2D_DESC g_iqChainDesc{};
 
-    // Theatre is rasterized into the ordinary stereo projection layer. Each
-    // eye first resolves into a private 2D texture, then that texture is drawn
-    // onto a room-fixed screen inside the eye's projection image. This avoids
-    // relying on runtime-specific handling of two eye-selective quad layers or
-    // nonzero array slices on quad layers.
+    // Theatre is rasterized into the ordinary two-view projection layer. The
+    // default IQ configuration samples the title eye caches directly, so this
+    // costs the same two output draws as immersive presentation. Non-default
+    // IQ modes retain their existing resolve/AA/sharpen chain and use these two
+    // private textures only for its final room-screen draw.
     ID3D11Texture2D* g_theaterResolved[2] = {nullptr, nullptr};
     ID3D11RenderTargetView* g_theaterResolvedRtv[2] = {nullptr, nullptr};
     ID3D11ShaderResourceView* g_theaterResolvedSrv[2] = {nullptr, nullptr};
     D3D11_TEXTURE2D_DESC g_theaterResolvedDesc{};
+    ID3D11Texture2D* g_theaterDirectSourceKey[2] = {nullptr, nullptr};
+    ID3D11ShaderResourceView* g_theaterDirectSourceSrv[2] = {nullptr, nullptr};
     ID3D11VertexShader* g_theaterProjectionVs = nullptr;
     ID3D11PixelShader* g_theaterProjectionPs = nullptr;
     ID3D11Buffer* g_theaterProjectionCb = nullptr;
     struct TheaterProjectionParams
     {
         float clipPositions[4][4]{};
+        // x: source is sRGB; y: non-sRGB XR target needs perceptual output;
+        // z: source already passed through the normal IQ output encoding.
+        float color[4]{};
     };
-    static_assert(sizeof(TheaterProjectionParams) == 64);
-    // Source 387e5e3 was headset-rejected on Quest 3 / VirtualDesktopXR:
-    // the projection-space theatre produced severe warping/judder, malformed
-    // screen geometry, and roughly doubled the theatre render-window cost.
-    // Keep the implementation inert as negative evidence; use the prior core
-    // eye-selective quad path until a different presentation is proven.
-    constexpr bool kUseTheaterProjectionCompositor = false;
+    static_assert(sizeof(TheaterProjectionParams) == 80);
 
     // Official SMAA 1x shaders and immutable lookup tables. They are created on
     // first SMAA selection and remain tiny; the third eye-sized target is the
@@ -2007,25 +2006,53 @@ float4 ps_rcas(VSOut i) : SV_Target
     // ships native and full-size; only the reticle element is hidden via the
     // verified 0x2EDF24 element hook. See docs/RE-notes.md HUD dead ends.)
 
+    void ReleaseTheaterResolvedResources()
+    {
+        for (int eye = 0; eye < 2; ++eye)
+        {
+            if (g_theaterResolvedSrv[eye])
+                g_theaterResolvedSrv[eye]->Release();
+            if (g_theaterResolvedRtv[eye])
+                g_theaterResolvedRtv[eye]->Release();
+            if (g_theaterResolved[eye])
+                g_theaterResolved[eye]->Release();
+            g_theaterResolvedSrv[eye] = nullptr;
+            g_theaterResolvedRtv[eye] = nullptr;
+            g_theaterResolved[eye] = nullptr;
+        }
+        g_theaterResolvedDesc = {};
+    }
+
     void ReleaseTheaterProjectionResources()
     {
+        ReleaseTheaterResolvedResources();
+        for (int eye = 0; eye < 2; ++eye)
+        {
+            if (g_theaterDirectSourceSrv[eye])
+                g_theaterDirectSourceSrv[eye]->Release();
+            g_theaterDirectSourceSrv[eye] = nullptr;
+            g_theaterDirectSourceKey[eye] = nullptr;
+        }
         auto release = [](auto*& object) {
             if (object) object->Release();
             object = nullptr;
         };
-        for (int eye = 0; eye < 2; ++eye)
-        {
-            release(g_theaterResolvedSrv[eye]);
-            release(g_theaterResolvedRtv[eye]);
-            release(g_theaterResolved[eye]);
-        }
-        g_theaterResolvedDesc = {};
         release(g_theaterProjectionVs);
         release(g_theaterProjectionPs);
         release(g_theaterProjectionCb);
     }
 
-    bool EnsureTheaterProjectionResources(uint32_t width, uint32_t height)
+    bool TheaterProjectionCanSampleDirectly(
+        const D3D11_TEXTURE2D_DESC& sourceDesc) noexcept
+    {
+        return g_config.upscale_filter == 0 && g_config.aa_mode == 0 &&
+            g_config.sharpness <= 0.001f &&
+            (sourceDesc.BindFlags & D3D11_BIND_SHADER_RESOURCE) != 0 &&
+            sourceDesc.SampleDesc.Count == 1;
+    }
+
+    bool EnsureTheaterProjectionResources(
+        uint32_t width, uint32_t height, bool needResolved)
     {
         if (!width || !height || !g_device || !EnsureBlitPipeline())
             return false;
@@ -2035,16 +2062,37 @@ float4 ps_rcas(VSOut i) : SV_Target
             static const char* shader = R"(
 Texture2D srcTex : register(t0);
 SamplerState smp : register(s0);
-cbuffer TheaterProjectionParams : register(b0) { float4 clipPositions[4]; }
+cbuffer TheaterProjectionParams : register(b0)
+{
+    float4 clipPositions[4];
+    float4 colorParams;
+}
 struct VSOut { float4 pos : SV_Position; float2 uv : TEXCOORD0; };
 VSOut vs_main(uint id : SV_VertexID)
 {
     VSOut o; o.pos=clipPositions[id];
     o.uv=float2(id & 1, (id >> 1) & 1); return o;
 }
+float lin(float c)
+{
+    return c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4);
+}
+float enc(float c)
+{
+    c = max(c, 0.0);
+    return c <= 0.0031308 ? c * 12.92 : 1.055 * pow(c, 1.0/2.4) - 0.055;
+}
 float4 ps_main(VSOut i) : SV_Target
 {
-    return srcTex.SampleLevel(smp, i.uv, 0);
+    float4 c = srcTex.SampleLevel(smp, i.uv, 0);
+    if (colorParams.z < 0.5)
+    {
+        if (colorParams.x < 0.5)
+            c.rgb = float3(lin(c.r), lin(c.g), lin(c.b));
+        if (colorParams.y > 0.5)
+            c.rgb = float3(enc(c.r), enc(c.g), enc(c.b));
+    }
+    return c;
 }
 )";
             ID3DBlob* errors = nullptr;
@@ -2089,24 +2137,17 @@ float4 ps_main(VSOut i) : SV_Target
             }
         }
 
+        if (!needResolved)
+        {
+            ReleaseTheaterResolvedResources();
+            return true;
+        }
         const DXGI_FORMAT format = static_cast<DXGI_FORMAT>(g_xrFormat);
         if (g_theaterResolvedDesc.Width != width ||
             g_theaterResolvedDesc.Height != height ||
             g_theaterResolvedDesc.Format != format)
         {
-            for (int eye = 0; eye < 2; ++eye)
-            {
-                if (g_theaterResolvedSrv[eye])
-                    g_theaterResolvedSrv[eye]->Release();
-                if (g_theaterResolvedRtv[eye])
-                    g_theaterResolvedRtv[eye]->Release();
-                if (g_theaterResolved[eye])
-                    g_theaterResolved[eye]->Release();
-                g_theaterResolvedSrv[eye] = nullptr;
-                g_theaterResolvedRtv[eye] = nullptr;
-                g_theaterResolved[eye] = nullptr;
-            }
-            g_theaterResolvedDesc = {};
+            ReleaseTheaterResolvedResources();
         }
         D3D11_TEXTURE2D_DESC desc{};
         desc.Width=width; desc.Height=height; desc.MipLevels=1;
@@ -2136,14 +2177,35 @@ float4 ps_main(VSOut i) : SV_Target
         return true;
     }
 
-    bool CompositeTheaterProjectionEye(
-        uint32_t targetEye, uint32_t sourceEye,
-        const XrCompositionLayerProjectionView& view,
-        ID3D11RenderTargetView* targetRtv)
+    ID3D11ShaderResourceView* EnsureTheaterDirectSourceSrv(
+        uint32_t sourceEye, ID3D11Texture2D* source)
     {
-        if (targetEye > 1 || sourceEye > 1 || !targetRtv ||
-            !g_theaterResolvedSrv[sourceEye] || !g_theaterProjectionVs ||
-            !g_theaterProjectionPs || !g_theaterProjectionCb)
+        if (sourceEye > 1 || !source)
+            return nullptr;
+        if (g_theaterDirectSourceKey[sourceEye] != source)
+        {
+            if (g_theaterDirectSourceSrv[sourceEye])
+                g_theaterDirectSourceSrv[sourceEye]->Release();
+            g_theaterDirectSourceSrv[sourceEye] = nullptr;
+            g_theaterDirectSourceKey[sourceEye] = nullptr;
+            if (FAILED(g_device->CreateShaderResourceView(
+                    source, nullptr, &g_theaterDirectSourceSrv[sourceEye])))
+            {
+                return nullptr;
+            }
+            g_theaterDirectSourceKey[sourceEye] = source;
+        }
+        return g_theaterDirectSourceSrv[sourceEye];
+    }
+
+    bool CompositeTheaterProjectionEye(
+        uint32_t targetEye, ID3D11ShaderResourceView* sourceSrv,
+        const D3D11_TEXTURE2D_DESC& sourceDesc, bool sourceAlreadyXrEncoded,
+        const XrView& nativeView, ID3D11RenderTargetView* targetRtv)
+    {
+        if (targetEye > 1 || !sourceSrv || !targetRtv ||
+            !g_theaterProjectionVs || !g_theaterProjectionPs ||
+            !g_theaterProjectionCb)
             return false;
         const float width = g_config.cutscene_theater_width_m;
         const float height = CutsceneTheaterHeightFromAspect(
@@ -2152,17 +2214,19 @@ float4 ps_main(VSOut i) : SV_Target
             g_centerRot, {0.0f, 0.0f,
                           -g_config.cutscene_theater_distance_m});
         const float eyePosition[3]{
-            view.pose.position.x, view.pose.position.y, view.pose.position.z};
+            nativeView.pose.position.x, nativeView.pose.position.y,
+            nativeView.pose.position.z};
         const float eyeOrientation[4]{
-            view.pose.orientation.x, view.pose.orientation.y,
-            view.pose.orientation.z, view.pose.orientation.w};
+            nativeView.pose.orientation.x, nativeView.pose.orientation.y,
+            nativeView.pose.orientation.z, nativeView.pose.orientation.w};
         const float screenCenter[3]{
             g_centerPos.x+offset.x, g_centerPos.y+offset.y,
             g_centerPos.z+offset.z};
         const float screenOrientation[4]{
             g_centerRot.x, g_centerRot.y, g_centerRot.z, g_centerRot.w};
-        const float fov[4]{view.fov.angleLeft, view.fov.angleRight,
-                           view.fov.angleUp, view.fov.angleDown};
+        const float fov[4]{
+            nativeView.fov.angleLeft, nativeView.fov.angleRight,
+            nativeView.fov.angleUp, nativeView.fov.angleDown};
         CutsceneTheaterClipVertex vertices[4]{};
         if (!BuildCutsceneTheaterProjectionQuad(
                 eyePosition, eyeOrientation, screenCenter, screenOrientation,
@@ -2177,46 +2241,54 @@ float4 ps_main(VSOut i) : SV_Target
             params.clipPositions[i][2]=vertices[i].w*0.5f;
             params.clipPositions[i][3]=vertices[i].w;
         }
+        params.color[0] = IsSrgb(sourceDesc.Format) ? 1.0f : 0.0f;
+        params.color[1] = IsSrgb(static_cast<DXGI_FORMAT>(g_xrFormat))
+            ? 0.0f : 1.0f;
+        params.color[2] = sourceAlreadyXrEncoded ? 1.0f : 0.0f;
         g_context->UpdateSubresource(
             g_theaterProjectionCb, 0, nullptr, &params, 0, 0);
-        D3DStateBackup backup; backup.Capture(g_context);
+
+        D3DStateBackup backup;
+        backup.Capture(g_context);
         ID3D11Buffer* savedVsCb0 = nullptr;
+        ID3D11Buffer* savedPsCb0 = nullptr;
         g_context->VSGetConstantBuffers(0, 1, &savedVsCb0);
+        g_context->PSGetConstantBuffers(0, 1, &savedPsCb0);
         const float black[4]{0,0,0,1};
         g_context->ClearRenderTargetView(targetRtv, black);
         g_context->OMSetRenderTargets(1, &targetRtv, nullptr);
-        const XrRect2Di& rect = view.subImage.imageRect;
         D3D11_VIEWPORT viewport{
-            static_cast<float>(rect.offset.x),
-            static_cast<float>(rect.offset.y),
-            static_cast<float>(rect.extent.width),
-            static_cast<float>(rect.extent.height),0,1};
+            0.0f, 0.0f, static_cast<float>(g_stereoW),
+            static_cast<float>(g_stereoH), 0.0f, 1.0f};
         g_context->RSSetViewports(1, &viewport);
         g_context->RSSetState(g_blitRasterizer);
         g_context->OMSetBlendState(nullptr,nullptr,0xFFFFFFFF);
         g_context->OMSetDepthStencilState(g_blitDepthOff,0);
         g_context->IASetInputLayout(nullptr);
-        g_context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+        g_context->IASetPrimitiveTopology(
+            D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
         g_context->VSSetShader(g_theaterProjectionVs,nullptr,0);
         g_context->VSSetConstantBuffers(0,1,&g_theaterProjectionCb);
         g_context->GSSetShader(nullptr,nullptr,0);
         g_context->PSSetShader(g_theaterProjectionPs,nullptr,0);
-        g_context->PSSetShaderResources(0,1,&g_theaterResolvedSrv[sourceEye]);
+        g_context->PSSetConstantBuffers(0,1,&g_theaterProjectionCb);
+        g_context->PSSetShaderResources(0,1,&sourceSrv);
         g_context->PSSetSamplers(0,1,&g_blitSampler);
         g_context->Draw(4,0);
         backup.Restore(g_context);
         g_context->VSSetConstantBuffers(0,1,&savedVsCb0);
+        g_context->PSSetConstantBuffers(0,1,&savedPsCb0);
         if (savedVsCb0) savedVsCb0->Release();
+        if (savedPsCb0) savedPsCb0->Release();
         static bool logged = false;
         if (!logged && targetEye == 1)
         {
             logged = true;
-            LOG("cutscene theatre: headset-agnostic stereo projection active; "
-                "no eye-selective quad layers are submitted");
+            LOG("cutscene theatre: native-FOV two-view projection active; "
+                "no eye-selective layers or private theatre swapchain");
         }
         return true;
     }
-
     // ------------------------------------------------------- XR swapchains
 
     void DestroyChain(XrSwapchain& chain, std::vector<ID3D11Texture2D*>& images,
@@ -6534,6 +6606,11 @@ float4 ps_scope_linearize(VSOut i):SV_Target { return paint(i.uv,true); }
         XrCompositionLayerQuad screenQuad, menuQuad, reticleQuad, scopeQuad, fadeQuad;
         XrCompositionLayerQuad theaterQuads[2]{};
         XrCompositionLayerProjection projection{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
+        XrCompositionLayerProjection theaterProjection{
+            XR_TYPE_COMPOSITION_LAYER_PROJECTION};
+        XrCompositionLayerProjectionView theaterProjectionViews[2]{
+            {XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW},
+            {XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW}};
         // Reused across frames (Frame runs only on the render thread) so the
         // per-frame layer assembly allocates nothing in steady state.
         static std::vector<XrCompositionLayerProjectionView> projectionViews;
@@ -6754,6 +6831,7 @@ float4 ps_scope_linearize(VSOut i):SV_Target { return paint(i.uv,true); }
                     else
                     {
                         LOG("cutscene theatre: returned to immersive presentation");
+                        ReleaseTheaterResolvedResources();
                         Game_Recenter();
                     }
                 }
@@ -6761,6 +6839,31 @@ float4 ps_scope_linearize(VSOut i):SV_Target { return paint(i.uv,true); }
                     theaterTransition.active && g_haveCenter;
                 bool theaterProjectionAttempted = false;
                 bool theaterProjectionReady = false;
+                if (theaterPresentation && viewsValid &&
+                    locatedViewCount == 2 && g_stereoChain != XR_NULL_HANDLE)
+                {
+                    // This descriptor is intentionally independent from the
+                    // title-authored raster projection above. The rejected
+                    // 387e5e3 path reused that narrow cutscene FOV here, then
+                    // asked the runtime to reinterpret it as the headset view.
+                    // Project and submit against the native runtime views
+                    // instead, with one complete array slice per physical eye.
+                    theaterProjection.space = g_localSpace;
+                    theaterProjection.viewCount = 2;
+                    theaterProjection.views = theaterProjectionViews;
+                    for (uint32_t eye = 0; eye < 2; ++eye)
+                    {
+                        theaterProjectionViews[eye].pose = g_views[eye].pose;
+                        theaterProjectionViews[eye].fov = g_views[eye].fov;
+                        theaterProjectionViews[eye].subImage.swapchain =
+                            g_stereoChain;
+                        theaterProjectionViews[eye].subImage.imageRect = {
+                            {0, 0}, {static_cast<int32_t>(g_stereoW),
+                                     static_cast<int32_t>(g_stereoH)}};
+                        theaterProjectionViews[eye].subImage.imageArrayIndex =
+                            eye;
+                    }
+                }
                 if (stereo)
                 {
 #if HALOMCCVR_EXPERIMENTAL_REACH_RENDER_CANDIDATE
@@ -6806,11 +6909,16 @@ float4 ps_scope_linearize(VSOut i):SV_Target { return paint(i.uv,true); }
                     swi.timeout = 1000000000;
                     XrSwapchainImageReleaseInfo ri{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
                     bool reachStereoUploadComplete = !reachTitle;
+                    const D3D11_TEXTURE2D_DESC& capturedEyeDesc = reachTitle
+                        ? g_reachCaptureDesc : g_eyeCacheDesc;
+                    const bool theaterDirectSampling = theaterPresentation &&
+                        TheaterProjectionCanSampleDirectly(capturedEyeDesc);
                     theaterProjectionAttempted =
-                        kUseTheaterProjectionCompositor &&
                         theaterPresentation &&
-                        projection.viewCount == 2 &&
-                        EnsureTheaterProjectionResources(g_stereoW, g_stereoH);
+                        theaterProjection.viewCount == 2 &&
+                        EnsureTheaterProjectionResources(
+                            g_stereoW, g_stereoH,
+                            !theaterDirectSampling);
                     const XrResult stereoAcquire =
                         xrAcquireSwapchainImage(g_stereoChain, &ai, &idx);
                     const bool stereoAcquired = reachTitle
@@ -6838,54 +6946,69 @@ float4 ps_scope_linearize(VSOut i):SV_Target { return paint(i.uv,true); }
                     {
                         bool everyReachEyeUploaded = reachImages;
                         bool everyEyeUploaded = true;
-                        for (uint32_t eye = 0; eye < 2; ++eye)
+                        for (uint32_t targetEye = 0; targetEye < 2; ++targetEye)
                         {
+                            const uint32_t sourceEye = theaterProjectionAttempted
+                                ? CutsceneTheaterImageIndex(
+                                      targetEye,
+                                      g_config.cutscene_theater_flip_depth)
+                                : targetEye;
                             const bool haveImage = reachImages ||
-                                (!reachTitle && g_eyeHasImage[eye]);
+                                (!reachTitle && g_eyeHasImage[sourceEye]);
                             ID3D11Texture2D* source = reachImages
-                                ? reachAccess.eyes[eye]
-                                : (reachTitle ? nullptr : g_eyeCache[eye]);
+                                ? reachAccess.eyes[sourceEye]
+                                : (reachTitle ? nullptr : g_eyeCache[sourceEye]);
                             const D3D11_TEXTURE2D_DESC& sourceDesc = reachImages
                                 ? g_reachCaptureDesc : g_eyeCacheDesc;
                             bool eyeUploaded = false;
                             if (haveImage && source)
                             {
-                                ID3D11Texture2D* destination =
-                                    theaterProjectionAttempted
-                                        ? g_theaterResolved[eye]
-                                        : g_stereoImages[idx];
-                                ID3D11RenderTargetView* rtv =
-                                    theaterProjectionAttempted
-                                        ? g_theaterResolvedRtv[eye]
-                                        : GetStereoRtv(idx, eye);
-                                if (destination && rtv)
+                                ID3D11RenderTargetView* targetRtv =
+                                    GetStereoRtv(idx, targetEye);
+                                if (theaterProjectionAttempted && targetRtv)
+                                {
+                                    if (theaterDirectSampling)
+                                    {
+                                        ID3D11ShaderResourceView* sourceSrv =
+                                            EnsureTheaterDirectSourceSrv(
+                                                sourceEye, source);
+                                        eyeUploaded =
+                                            CompositeTheaterProjectionEye(
+                                                targetEye, sourceSrv,
+                                                sourceDesc, false,
+                                                g_views[targetEye], targetRtv);
+                                    }
+                                    else if (g_theaterResolved[targetEye] &&
+                                            g_theaterResolvedRtv[targetEye] &&
+                                            g_theaterResolvedSrv[targetEye])
+                                    {
+                                        const bool resolved = BlitImageQuality(
+                                            source, sourceDesc,
+                                            g_theaterResolved[targetEye],
+                                            g_stereoW, g_stereoH,
+                                            g_theaterResolvedRtv[targetEye]);
+                                        eyeUploaded = resolved &&
+                                            CompositeTheaterProjectionEye(
+                                                targetEye,
+                                                g_theaterResolvedSrv[targetEye],
+                                                g_theaterResolvedDesc, true,
+                                                g_views[targetEye], targetRtv);
+                                    }
+                                }
+                                else if (!theaterProjectionAttempted && targetRtv)
+                                {
                                     eyeUploaded = BlitImageQuality(
-                                        source, sourceDesc, destination,
-                                        g_stereoW, g_stereoH, rtv);
+                                        source, sourceDesc, g_stereoImages[idx],
+                                        g_stereoW, g_stereoH, targetRtv);
+                                }
                             }
                             everyEyeUploaded = everyEyeUploaded && eyeUploaded;
                             if (reachTitle)
                                 everyReachEyeUploaded =
                                     everyReachEyeUploaded && eyeUploaded;
                         }
-                        if (theaterProjectionAttempted && everyEyeUploaded)
-                        {
-                            theaterProjectionReady = true;
-                            for (uint32_t targetEye = 0;
-                                 targetEye < 2; ++targetEye)
-                            {
-                                const uint32_t sourceEye =
-                                    CutsceneTheaterImageIndex(
-                                        targetEye,
-                                        g_config.cutscene_theater_flip_depth);
-                                theaterProjectionReady =
-                                    CompositeTheaterProjectionEye(
-                                        targetEye, sourceEye,
-                                        projectionViews[targetEye],
-                                        GetStereoRtv(idx, targetEye)) &&
-                                    theaterProjectionReady;
-                            }
-                        }
+                        theaterProjectionReady =
+                            theaterProjectionAttempted && everyEyeUploaded;
                         const XrResult stereoRelease =
                             xrReleaseSwapchainImage(g_stereoChain, &ri);
                         const bool stereoReleased = reachTitle
@@ -7207,7 +7330,7 @@ float4 ps_scope_linearize(VSOut i):SV_Target { return paint(i.uv,true); }
                                 {
                                     layers.push_back(
                                         reinterpret_cast<XrCompositionLayerBaseHeader*>(
-                                            &projection));
+                                            &theaterProjection));
                                 }
                                 else if (!theaterProjectionAttempted)
                                 {
@@ -7241,13 +7364,12 @@ float4 ps_scope_linearize(VSOut i):SV_Target { return paint(i.uv,true); }
                                                 &theaterQuads[eye]));
                                     }
                                     static bool loggedFallback = false;
-                                    if (kUseTheaterProjectionCompositor &&
-                                        !loggedFallback)
+                                    if (!loggedFallback)
                                     {
                                         loggedFallback = true;
-                                        LOG("cutscene theatre: projection "
-                                            "compositor unavailable; using the "
-                                            "core eye-selective quad fallback");
+                                        LOG("cutscene theatre: native-FOV projection "
+                                            "unavailable; using the core "
+                                            "eye-selective quad fallback");
                                     }
                                 }
                             }
@@ -8116,6 +8238,7 @@ void VR_OnResizeBuffers(IDXGISwapChain*)
     // references it must go first or the resize fails. The tracked history
     // targets are resolution-dependent too — drop and re-learn them.
     ReleaseSourceViews();
+    ReleaseTheaterProjectionResources();
     if (g_sceneColorRtv)
     {
         g_sceneColorRtv->Release();

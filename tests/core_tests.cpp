@@ -2601,6 +2601,32 @@ int main()
               rightEyeVertices[0].x < projectionVertices[0].x &&
               rightEyeVertices[3].x < projectionVertices[3].x,
             "room-fixed theatre projection preserves physical-eye parallax");
+        constexpr float questRadians = 0.01745329251994329577f;
+        const float questEyes[2][3]{
+            {-0.03295f, 0.0f, 0.0f}, {0.03295f, 0.0f, 0.0f}};
+        const float questFovs[2][4]{
+            {-54.0f * questRadians, 40.0f * questRadians,
+              44.0f * questRadians, -55.0f * questRadians},
+            {-40.0f * questRadians, 54.0f * questRadians,
+              44.0f * questRadians, -55.0f * questRadians}};
+        const float questScreenCenter[3]{0.0f, 0.0f, -5.3f};
+        bool questNativeViewsContainScreen = true;
+        for (int eye = 0; eye < 2; ++eye)
+        {
+            CutsceneTheaterClipVertex questVertices[4]{};
+            questNativeViewsContainScreen &= BuildCutsceneTheaterProjectionQuad(
+                questEyes[eye], projectionOrientation, questScreenCenter,
+                projectionOrientation, 6.0f, 3.375f, questFovs[eye],
+                questVertices);
+            for (const auto& vertex : questVertices)
+            {
+                questNativeViewsContainScreen &= vertex.w > 0.0f &&
+                    std::fabs(vertex.x) <= vertex.w * 1.001f &&
+                    std::fabs(vertex.y) <= vertex.w * 1.001f;
+            }
+        }
+        Check(questNativeViewsContainScreen,
+            "runtime-native asymmetric Quest views contain the configured room screen");
         const float behindCenter[3]{0.0f, 0.0f, 1.0f};
         Check(!BuildCutsceneTheaterProjectionQuad(
                   projectionEye, projectionOrientation,
