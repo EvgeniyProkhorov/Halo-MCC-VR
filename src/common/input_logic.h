@@ -64,6 +64,17 @@ uint32_t NormalizeVirtualXInputSetStateResult(
 // Halo 3 gameplay owner may use its edge to change VR pause presentation.
 bool PausePresentationInputAllowed(bool sharedGameplayOwner);
 
+// Reach's on-foot VR layout trades the physical left trigger and X button so
+// armour ability stays on the trigger and grenade moves to X. Vehicles must
+// receive Reach's native layout instead. `playerInVehicleProven` is deliberately
+// fail-open for the existing remap: an unavailable or stale title sample is
+// false, so a failed optional detector cannot silently change on-foot controls.
+inline constexpr bool ReachShouldSwapLeftHandActions(
+    bool reachActive, bool playerInVehicleProven)
+{
+    return reachActive && !playerInVehicleProven;
+}
+
 // Hold-mode two-hand aiming uses the barrel zone only to acquire the support
 // grip. Once acquired, ordinary movement of either hand must not drop the hold;
 // releasing the grip is the explicit disengage action.

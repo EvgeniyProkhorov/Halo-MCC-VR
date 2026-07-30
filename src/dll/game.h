@@ -103,6 +103,10 @@ void Game_MapMoveStick(float& mx, float& my);
 // death and the shell, where the same stick navigates the game's own menus and
 // must pass through as a plain analog stick (see input.cpp / GitHub #9).
 bool Game_MoveStickIsLocomotion();
+// Reach-only optional input refinement. True only when the exact current title
+// generation has proven that output user 0's unit is seated on a parent unit.
+// False preserves the established on-foot LT/X swap.
+bool Game_ReachPlayerIsInVehicle();
 // True while an armed tracked camera consumes the OpenXR turn action. The
 // XInput hook must then suppress stock RX/RY so the game cannot create a second
 // camera motion underneath the HMD-owned view.

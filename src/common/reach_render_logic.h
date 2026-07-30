@@ -33,6 +33,43 @@ inline constexpr const char* kReachRetailModuleSha256[] = {
     // Microsoft Store / Xbox app (Game Pass)
     "F9F39CF058FF28C298CC05964BC40898A57C30D33848FA54D950D8D6C2697E20",
 };
+
+// Reach's title-native all-vehicle input proof. Official HREK names and defines
+// player_mapping_get_unit_by_output_user and unit_in_vehicle; the latter means
+// that the unit is seated on a parent unit, so the same predicate covers every
+// vehicle seat and vehicle type (including the Banshee). The pinned retail
+// homologs and the script evaluator edge are documented in
+// docs/REACH-SIGNATURE-EVIDENCE.md and are re-verified cold before use.
+inline constexpr uintptr_t kReachPlayerUnitByOutputUserRva = 0x00053EF8;
+inline constexpr uintptr_t kReachUnitInVehicleRva = 0x004F9368;
+inline constexpr uintptr_t kReachUnitInVehicleEvaluatorRva = 0x0019EF28;
+inline constexpr uintptr_t kReachUnitInVehicleEvaluatorCallRva = 0x0019EF5E;
+inline constexpr uintptr_t kReachUnitInVehicleNameRva = 0x009FB710;
+inline constexpr uintptr_t kReachUnitInVehicleDescriptorRva = 0x00A22B60;
+inline constexpr uintptr_t kReachEngineTlsIndexRva = 0x00C17B18;
+
+enum class ReachVehicleInputState : uint32_t
+{
+    Unknown = 0,
+    OnFoot = 1,
+    Vehicle = 2,
+};
+
+inline constexpr uint64_t ReachVehicleInputSnapshot(
+    uint32_t generation, ReachVehicleInputState state)
+{
+    return (static_cast<uint64_t>(generation) << 32) |
+        static_cast<uint32_t>(state);
+}
+
+inline constexpr bool ReachVehicleInputSnapshotIsVehicle(
+    uint64_t snapshot, uint32_t generation)
+{
+    return generation != 0 &&
+        static_cast<uint32_t>(snapshot >> 32) == generation &&
+        static_cast<uint32_t>(snapshot) ==
+            static_cast<uint32_t>(ReachVehicleInputState::Vehicle);
+}
 inline constexpr uintptr_t kReachMainRenderViewRva = 0x000C31F4;
 inline constexpr uintptr_t kReachNormalSetupCallRva = 0x000C36D6;
 inline constexpr uintptr_t kReachNormalSetupTargetRva = 0x0026C204;

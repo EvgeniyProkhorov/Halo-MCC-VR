@@ -10122,6 +10122,15 @@ namespace
     using ReachCameraStackCallbackFn = void(__fastcall*)();
     using ReachFpCameraRebuildFn = void(__fastcall*)(void*, bool);
     using ReachFpCameraUploadFn = void(__fastcall*)(void*, void*);
+    using ReachPlayerUnitByOutputUserFn = int(__fastcall*)(int);
+    using ReachUnitInVehicleFn = bool(__fastcall*)(int);
+
+    enum class ReachVehicleInputBindingState : uint8_t
+    {
+        StockFallback = 0,
+        CleanupRequired = 1,
+        Installed = 2,
+    };
 
     struct ReachRenderHelpers
     {
@@ -10357,7 +10366,17 @@ namespace
         void* observerCameraTarget = nullptr;
         void* effectLocationTarget = nullptr;
         void* rainRenderTarget = nullptr;
+        ReachPlayerUnitByOutputUserFn playerUnitByOutputUser = nullptr;
+        ReachUnitInVehicleFn unitInVehicle = nullptr;
+        std::atomic<uint8_t> vehicleInputBindingState{
+            static_cast<uint8_t>(
+                ReachVehicleInputBindingState::StockFallback)};
     } g_reachCamera;
+    // High 32 bits are the title-module generation; low 32 bits are the
+    // ReachVehicleInputState value. One atomic publication prevents the input
+    // thread from combining a new generation with an old vehicle result.
+    std::atomic<uint64_t> g_reachVehicleInputSnapshot{0};
+    std::atomic<uint32_t> g_reachVehicleInputFaults{0};
     std::atomic<uint32_t> g_reachLightmapShadowSuppressedEyes{0};
     std::atomic<uint32_t> g_reachLightmapShadowAlreadyDisabledEyes{0};
     std::atomic<uint32_t> g_reachLightmapShadowWriteFailures{0};
@@ -14218,6 +14237,61 @@ namespace
         }
     }
 
+    // Sample only on Reach's proven normal-player outer-render thread, whose
+    // engine TLS is valid. The XInput hook reads only the resulting lock-free
+    // snapshot and never calls title code from MCC's input thread.
+    void ReachSampleVehicleInputState(
+        uint32_t windowIndex, uintptr_t returnAddress)
+    {
+        if (windowIndex != 0 ||
+            g_reachCamera.vehicleInputBindingState.load(
+                std::memory_order_acquire) != static_cast<uint8_t>(
+                    ReachVehicleInputBindingState::Installed) ||
+            g_reachCamera.teardownRequested.load(std::memory_order_acquire))
+            return;
+
+        const uintptr_t base = g_reachCamera.base;
+        const uint32_t generation = g_reachCamera.generation.load(
+            std::memory_order_acquire);
+        if (!base || !generation ||
+            ClassifyReachOuterRenderCaller(
+                base, kReachRetailImageSize, returnAddress) !=
+                    ReachOuterRenderCaller::NormalPlayer)
+            return;
+
+        ReachVehicleInputState state = ReachVehicleInputState::Unknown;
+        bool faulted = false;
+        __try
+        {
+            const int unit = g_reachCamera.playerUnitByOutputUser(0);
+            if (unit != -1)
+            {
+                state = g_reachCamera.unitInVehicle(unit)
+                    ? ReachVehicleInputState::Vehicle
+                    : ReachVehicleInputState::OnFoot;
+            }
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            faulted = true;
+        }
+        if (faulted)
+        {
+            // Disable only this optional refinement. The controller path falls
+            // back to its prior Reach-wide swap; stereo ownership is untouched.
+            g_reachVehicleInputSnapshot.store(0, std::memory_order_release);
+            g_reachVehicleInputFaults.fetch_add(1, std::memory_order_relaxed);
+            g_reachCamera.vehicleInputBindingState.store(
+                static_cast<uint8_t>(
+                    ReachVehicleInputBindingState::StockFallback),
+                std::memory_order_release);
+            return;
+        }
+        g_reachVehicleInputSnapshot.store(
+            ReachVehicleInputSnapshot(generation, state),
+            std::memory_order_release);
+    }
+
     uintptr_t ReachMainRenderViewBody(
         uintptr_t workspace, uintptr_t playerView, uint32_t windowIndex,
         uintptr_t returnAddress)
@@ -14282,6 +14356,8 @@ namespace
             }
             return nestedResult;
         }
+
+        ReachSampleVehicleInputState(windowIndex, returnAddress);
 
         const ReachModuleEpoch epoch{
             g_reachCamera.base, g_reachCamera.generation};
@@ -15084,6 +15160,15 @@ namespace
         TitleAdapter_ClearCinematicControl(
             GameTitle::HaloReach,
             g_reachCamera.generation.load(std::memory_order_acquire));
+        // Revoke the optional input publication before detour quiescence. Any
+        // concurrent XInput read immediately falls back to the established
+        // Reach-wide swap; the retained function pointers are cleared only
+        // after every outer-render callback has returned.
+        g_reachCamera.vehicleInputBindingState.store(
+            static_cast<uint8_t>(
+                ReachVehicleInputBindingState::CleanupRequired),
+            std::memory_order_release);
+        g_reachVehicleInputSnapshot.store(0, std::memory_order_release);
         g_reachCamera.teardownRequested.store(
             true, std::memory_order_release);
         g_reachCamera.armed.store(false, std::memory_order_release);
@@ -15184,6 +15269,12 @@ namespace
         g_reachCamera.observerCameraTarget = nullptr;
         g_reachCamera.effectLocationTarget = nullptr;
         g_reachCamera.rainRenderTarget = nullptr;
+        g_reachCamera.playerUnitByOutputUser = nullptr;
+        g_reachCamera.unitInVehicle = nullptr;
+        g_reachCamera.vehicleInputBindingState.store(
+            static_cast<uint8_t>(
+                ReachVehicleInputBindingState::StockFallback),
+            std::memory_order_release);
         g_reachCamera.moduleReference = nullptr;
         g_reachCamera.base = 0;
         g_reachCamera.size = 0;
@@ -15261,6 +15352,77 @@ namespace
         const uintptr_t next=first+1;
         const uintptr_t end=base+size;
         return next>=end || sig::Find(next,static_cast<size_t>(end-next),pattern)==0;
+    }
+
+    // Optional input feature only. HREK supplies the semantics and ABIs; retail
+    // is used only to match and verify the known homologs. Failure preserves the
+    // existing Reach-wide LT/X swap and cannot gate the camera core.
+    bool ResolveReachVehicleInputBinding(
+        uintptr_t base, size_t size,
+        ReachPlayerUnitByOutputUserFn& playerUnitByOutputUser,
+        ReachUnitInVehicleFn& unitInVehicle)
+    {
+        playerUnitByOutputUser = nullptr;
+        unitInVehicle = nullptr;
+        static constexpr char kPlayerUnitAob[] =
+            "83 C8 FF 83 F9 03 77 27 8B 15 12 3C BC 00 65 48 8B 04 25 58 00 00 00 41 B8 58 01 00 00 48 63 C9 48 8B 04 D0 4A 8B 04 00 8B 84 88 C8 00 00 00 C3";
+        static constexpr char kUnitInVehicleAob[] =
+            "48 89 5C 24 08 48 89 74 24 10 57 48 83 EC 20 45 32 DB 41 83 C9 FF 41 3B C9 0F 84 80 00 00 00 8B 15 8B E7 71 00 65 48 8B 04 25 58 00 00 00 41 B8 10 00 00 00";
+        static constexpr char kEvaluatorAob[] =
+            "40 53 48 83 EC 20 48 83 64 24 48 00 8B DA 48 0F BF C1 45 8A C8 48 8D 0D FC 9D 88 00 48 8B 0C C1 0F B7 51 38 4C 8D 41 3A 8B CB E8 91 76 EE FF 48 85 C0 74 16 8B 08 E8 05 A4 35 00";
+        static constexpr char kName[] = "unit_in_vehicle";
+        const auto fits = [size](uintptr_t rva, size_t bytes) {
+            return rva < size && bytes <= size - rva;
+        };
+        if (!fits(kReachPlayerUnitByOutputUserRva, 49) ||
+            !fits(kReachUnitInVehicleRva, 53) ||
+            !fits(kReachUnitInVehicleEvaluatorRva, 57) ||
+            !fits(kReachUnitInVehicleEvaluatorCallRva, 5) ||
+            !fits(kReachUnitInVehicleNameRva, sizeof(kName)) ||
+            !fits(kReachUnitInVehicleDescriptorRva, 40) ||
+            !ReachColdExactSignatureAt(base, size,
+                kReachPlayerUnitByOutputUserRva, kPlayerUnitAob) ||
+            !ReachColdExactSignatureAt(base, size,
+                kReachUnitInVehicleRva, kUnitInVehicleAob) ||
+            !ReachColdExactSignatureAt(base, size,
+                kReachUnitInVehicleEvaluatorRva, kEvaluatorAob) ||
+            !ReachVerifyRel32Call(base,
+                kReachUnitInVehicleEvaluatorCallRva,
+                kReachUnitInVehicleRva) ||
+            memcmp(reinterpret_cast<const void*>(
+                base + kReachUnitInVehicleNameRva),
+                kName, sizeof(kName)) != 0)
+            return false;
+
+        const auto tlsLoadMatches = [base](uintptr_t rva) {
+            const auto* p = reinterpret_cast<const uint8_t*>(base + rva);
+            if (p[0] != 0x8B || p[1] != 0x15) return false;
+            int32_t displacement = 0;
+            memcpy(&displacement, p + 2, sizeof(displacement));
+            return static_cast<uintptr_t>(
+                static_cast<intptr_t>(base + rva + 6) + displacement) ==
+                    base + kReachEngineTlsIndexRva;
+        };
+        if (!tlsLoadMatches(kReachPlayerUnitByOutputUserRva + 8) ||
+            !tlsLoadMatches(kReachUnitInVehicleRva + 31))
+            return false;
+
+        const auto* descriptor = reinterpret_cast<const uint64_t*>(
+            base + kReachUnitInVehicleDescriptorRva);
+        if (descriptor[0] != 5 ||
+            descriptor[1] != base + kReachUnitInVehicleNameRva ||
+            descriptor[4] != base + kReachUnitInVehicleEvaluatorRva)
+            return false;
+
+        playerUnitByOutputUser = reinterpret_cast<
+            ReachPlayerUnitByOutputUserFn>(
+                base + kReachPlayerUnitByOutputUserRva);
+        unitInVehicle = reinterpret_cast<ReachUnitInVehicleFn>(
+            base + kReachUnitInVehicleRva);
+        return ReachColdExecutableAddress(
+                   reinterpret_cast<uintptr_t>(playerUnitByOutputUser)) &&
+            ReachColdExecutableAddress(
+                reinterpret_cast<uintptr_t>(unitInVehicle));
     }
 
     bool ResolveReachLightmapShadowsControl(
@@ -16105,6 +16267,20 @@ namespace
             return false;
         }
 
+        ReachPlayerUnitByOutputUserFn reachPlayerUnitByOutputUser = nullptr;
+        ReachUnitInVehicleFn reachUnitInVehicle = nullptr;
+        const bool reachVehicleInputResolved =
+            ResolveReachVehicleInputBinding(
+                base, size, reachPlayerUnitByOutputUser,
+                reachUnitInVehicle);
+        if (!reachVehicleInputResolved)
+        {
+            LOG("Reach vehicle input: StockFallback; exact HREK/retail "
+                "player-unit or all-vehicle proof failed, so the existing "
+                "Reach-wide LT/X swap remains active and the camera core "
+                "continues");
+        }
+
         uint8_t* reachNativeWeaponIkDisable = nullptr;
         uint8_t reachNativeWeaponIkDisableOriginal = 0;
         if (!ResolveReachNativeWeaponIkControl(
@@ -16545,6 +16721,23 @@ namespace
             effectLocationCreated ? effectLocation : nullptr;
         g_reachCamera.rainRenderTarget =
             rainRenderCreated ? rainRender : nullptr;
+        g_reachCamera.playerUnitByOutputUser =
+            reachVehicleInputResolved ? reachPlayerUnitByOutputUser : nullptr;
+        g_reachCamera.unitInVehicle =
+            reachVehicleInputResolved ? reachUnitInVehicle : nullptr;
+        g_reachVehicleInputSnapshot.store(0, std::memory_order_release);
+        g_reachVehicleInputFaults.store(0, std::memory_order_relaxed);
+        g_reachCamera.vehicleInputBindingState.store(
+            static_cast<uint8_t>(reachVehicleInputResolved
+                ? ReachVehicleInputBindingState::Installed
+                : ReachVehicleInputBindingState::StockFallback),
+            std::memory_order_release);
+        if (reachVehicleInputResolved)
+        {
+            LOG("Reach vehicle input: Installed; native LT/X will be restored "
+                "for every seated vehicle and the on-foot Reach swap remains "
+                "active");
+        }
         g_reachRainDecoupled.store(0, std::memory_order_relaxed);
         g_reachRainSkipped.store(0, std::memory_order_relaxed);
         g_reachMuzzleRedirects.store(0, std::memory_order_relaxed);
@@ -16909,6 +17102,45 @@ namespace
         else if (code==3)
             LOG("Reach FP layout changed or failed validation at live=%d; next pair remains stock",
                 liveCount);
+    }
+
+    void ReachVehicleInputLogTick()
+    {
+        static uint64_t loggedSnapshot = 0;
+        static uint32_t loggedFaultGeneration = 0;
+        const uint32_t generation = g_reachCamera.generation.load(
+            std::memory_order_acquire);
+        if (!generation)
+            return;
+        if (g_reachVehicleInputFaults.load(std::memory_order_relaxed) != 0 &&
+            loggedFaultGeneration != generation)
+        {
+            loggedFaultGeneration = generation;
+            LOG("Reach vehicle input: runtime title-call fault; only this "
+                "optional refinement fell back to the existing Reach-wide "
+                "LT/X swap, and the camera core continues");
+        }
+
+        const uint64_t snapshot = g_reachVehicleInputSnapshot.load(
+            std::memory_order_acquire);
+        if (static_cast<uint32_t>(snapshot >> 32) != generation ||
+            snapshot == loggedSnapshot)
+            return;
+        const auto state = static_cast<ReachVehicleInputState>(
+            static_cast<uint32_t>(snapshot));
+        if (state == ReachVehicleInputState::Unknown)
+            return;
+        loggedSnapshot = snapshot;
+        if (state == ReachVehicleInputState::Vehicle)
+        {
+            LOG("Reach vehicle input: local player seated; native LT/X active "
+                "for this vehicle");
+        }
+        else
+        {
+            LOG("Reach vehicle input: local player on foot; armour/grenade "
+                "LT/X swap active");
+        }
     }
 
     // Called from the 50 ms title worker's Reach block. Self-contained: it never
@@ -17671,6 +17903,7 @@ namespace
         LogReachOuterCameraCommitIfReady();
         LogReachFpCameraUploadIfReady();
         LogReachFpStatusIfNew();
+        ReachVehicleInputLogTick();
         const bool installed =
             g_reachCamera.installed.load(std::memory_order_acquire);
         if (installed && g_reachCamera.teardownRequested.load(
@@ -19523,6 +19756,26 @@ bool Game_MoveStickIsLocomotion()
         return g_reachEnginePauseCache.load(std::memory_order_acquire) != 1;
 #endif
     return false;
+}
+
+bool Game_ReachPlayerIsInVehicle()
+{
+#if HALOMCCVR_EXPERIMENTAL_REACH_RENDER_CANDIDATE
+    if (TitleAdapter_GetActiveTitle() != GameTitle::HaloReach ||
+        !g_reachCamera.installed.load(std::memory_order_acquire) ||
+        g_reachCamera.teardownRequested.load(std::memory_order_acquire) ||
+        g_reachCamera.vehicleInputBindingState.load(
+            std::memory_order_acquire) != static_cast<uint8_t>(
+                ReachVehicleInputBindingState::Installed))
+        return false;
+    const uint32_t generation = TitleAdapter_GetGeneration(
+        GameTitle::HaloReach);
+    return ReachVehicleInputSnapshotIsVehicle(
+        g_reachVehicleInputSnapshot.load(std::memory_order_acquire),
+        generation);
+#else
+    return false;
+#endif
 }
 
 void Game_GunScale(int dir)

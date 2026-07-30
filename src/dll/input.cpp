@@ -122,14 +122,17 @@ namespace
             g_pauseChord.Reset();
         }
 
-        // Reach only: the left trigger and the left X button trade places, so
-        // the grenade lands on X and the Spartan armour ability lands on the
-        // trigger. The VR->XInput map above is otherwise ONE profile shared by
-        // every title; Halo 3 and ODST have no armour ability and keep X on
-        // reload/action, so this is gated on the active title rather than
-        // changing the shared map. Both inputs are on the left hand either way.
-        const bool swapLeftHandActions =
+        // Reach only: on foot, the left trigger and X trade places so grenade
+        // lands on X and armour ability lands on the trigger. While the local
+        // player is seated in ANY vehicle, restore Reach's native LT/X layout;
+        // that includes aircraft such as the Banshee as well as drivers,
+        // gunners, and passengers. Vehicle state is an optional title-native
+        // proof. If it is unavailable or stale, preserve the existing on-foot
+        // swap instead of changing controls or affecting the Reach VR core.
+        const bool reachActive =
             TitleAdapter_GetActiveTitle() == GameTitle::HaloReach;
+        const bool swapLeftHandActions = ReachShouldSwapLeftHandActions(
+            reachActive, Game_ReachPlayerIsInVehicle());
         // The trigger is analog and X is a click. Neither Reach action is
         // pressure-sensitive, so cross them at the same 0.6 threshold the grips
         // already use, and drive the trigger fully on from the click.

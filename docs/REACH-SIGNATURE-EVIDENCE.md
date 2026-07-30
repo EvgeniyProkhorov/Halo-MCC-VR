@@ -2239,6 +2239,58 @@ Solace scene. Acceptance additionally needs a normal Reach sky comparison and a
 Halo 3 regression result; until then `docs/CURRENT-STATE.md` must remain on the
 accepted build.
 
+## All-vehicle controller-layout predicate (HREK-derived, 2026-07-29)
+
+Halo 3 behavior being matched: vehicle controls receive the title's native
+XInput LT/X layout. Reach's VR-only on-foot convenience swap remains active for
+armour ability/grenade, but must not leak into any driver, gunner, passenger, or
+aircraft seat.
+
+Official HREK supplies both required semantic identities. Its
+`player_mapping_get_unit_by_output_user(int)` is RVA `0x1D24F0`, size `0x56`,
+body SHA-256
+`167D2975D4D5E005076C458D9BC5ABACEC443E8A21661D5D37C2FFFDEE988702`.
+It bounds the output-user index to 0..3, reads the player-mapping TLS member,
+and returns the unit datum from `+0xC8 + output_user*4` or `NONE`.
+
+HREK's script descriptor literally names `unit_in_vehicle` and describes it as
+true when the given unit is seated on a parent unit. Its evaluator at RVA
+`0x698EA0` calls the native predicate at RVA `0xE23780`; that predicate is size
+`0x88`, body SHA-256
+`46AE78D4D3FD272B89E45E5B37BB5FB27C97FD1950B5DA71790D56170EA2A10D`.
+This is the title's generic seated-parent predicate, not a vehicle tag, seat,
+or ground-vehicle special case, so it includes Banshees and every other vehicle
+type.
+
+Only after those HREK semantics were established were their pinned-retail
+homologs matched:
+
+| Retail identity | RVA | Body/range identity |
+| --- | ---: | --- |
+| `player_mapping_get_unit_by_output_user` | `0x00053EF8` | `0x30` bytes, SHA-256 `AC88BBC2B04311476DA9030986E4FEDB47BCE2BBCCE5CDFF9931D7755E958B25` |
+| `unit_in_vehicle` script evaluator | `0x0019EF28` | `0x50` bytes, SHA-256 `28196326897CD53E67B11925A2691E2383DF4772FC5ECD68AE78D37AE3DF380F` |
+| Native `unit_in_vehicle` | `0x004F9368` | `0xB2` bytes, SHA-256 `BCAA7DA0395FF9329104A47624CA7209A9321EBFA03688359884FBD41C0013DD` |
+
+Each production entry AOB has exactly one raw-image match in the pinned retail
+module. The evaluator's call at `0x0019EF5E` resolves to `0x004F9368`; its
+descriptor at `0x00A22B60` points both to the literal `unit_in_vehicle` at
+`0x009FB710` and to evaluator `0x0019EF28`. Both native helpers independently
+decode the same engine TLS-index target at `0x00C17B18`. Production repeats all
+of these checks cold before publishing either function pointer.
+
+The functions are invoked only from the already-proven normal-player
+`main_render_view` render thread, where Reach engine TLS is live. That hook
+publishes one generation-keyed atomic state. The XInput hook calls no title
+function and restores native LT/X only for the exact current generation's
+`Vehicle` state. Invalid units and stale/unknown samples preserve the existing
+on-foot swap. Signature failure or a guarded runtime call fault falls back only
+this optional refinement, logs the fallback, and never disarms the Reach camera
+core.
+
+Status: **implemented, headset acceptance pending**. Required check is on-foot
+swap, Banshee, at least one ground vehicle, and exit back to on-foot in the same
+session.
+
 ## Evidence still required
 
 The unaccepted camera candidate now implements the exact outer-owner token,

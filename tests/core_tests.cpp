@@ -834,6 +834,27 @@ int main()
               kReachCameraStackCallbackBodySize == 0x6C,
             "Reach render candidate pins the renderer and outer-camera callback identities");
 
+        constexpr uint32_t vehicleGeneration = 37;
+        constexpr uint64_t onFootSnapshot = ReachVehicleInputSnapshot(
+            vehicleGeneration, ReachVehicleInputState::OnFoot);
+        constexpr uint64_t vehicleSnapshot = ReachVehicleInputSnapshot(
+            vehicleGeneration, ReachVehicleInputState::Vehicle);
+        Check(kReachPlayerUnitByOutputUserRva == 0x00053EF8 &&
+              kReachUnitInVehicleRva == 0x004F9368 &&
+              kReachUnitInVehicleEvaluatorRva == 0x0019EF28 &&
+              kReachUnitInVehicleEvaluatorCallRva == 0x0019EF5E &&
+              kReachUnitInVehicleNameRva == 0x009FB710 &&
+              kReachUnitInVehicleDescriptorRva == 0x00A22B60 &&
+              kReachEngineTlsIndexRva == 0x00C17B18 &&
+              !ReachVehicleInputSnapshotIsVehicle(
+                  onFootSnapshot, vehicleGeneration) &&
+              ReachVehicleInputSnapshotIsVehicle(
+                  vehicleSnapshot, vehicleGeneration) &&
+              !ReachVehicleInputSnapshotIsVehicle(
+                  vehicleSnapshot, vehicleGeneration + 1) &&
+              !ReachVehicleInputSnapshotIsVehicle(vehicleSnapshot, 0),
+            "Reach vehicle input pins the HREK-matched retail identities and rejects stale generations");
+
         constexpr float kReachTestIpdMeters = 0.064f;
         Check(std::isfinite(kReachWorldUnitsPerMeter) &&
               kReachWorldUnitsPerMeter > 0.0f &&
@@ -3197,6 +3218,11 @@ int main()
             "proven Halo 3 gameplay may control pause presentation");
         Check(!PausePresentationInputAllowed(false),
             "MCC shell and private ODST Start edges cannot head-lock presentation");
+        Check(ReachShouldSwapLeftHandActions(true, false) &&
+              !ReachShouldSwapLeftHandActions(true, true) &&
+              !ReachShouldSwapLeftHandActions(false, false) &&
+              !ReachShouldSwapLeftHandActions(false, true),
+            "Reach swaps LT/X only on foot and restores the native layout in every proven vehicle");
         Check(OdstMustClearForeignPause(true, true, false) &&
                   OdstMustClearForeignPause(true, false, true),
             "private ODST entry clears either pending or active foreign pause state");
