@@ -2575,6 +2575,38 @@ int main()
                   CutsceneTheaterImageIndex(0, true) == 1 &&
                   CutsceneTheaterImageIndex(1, true) == 0,
             "Flip Depth swaps only the per-eye image slices");
+        const float projectionEye[3]{0.0f, 0.0f, 0.0f};
+        const float projectionOrientation[4]{0.0f, 0.0f, 0.0f, 1.0f};
+        const float projectionCenter[3]{0.0f, 0.0f, -4.0f};
+        const float projectionFov[4]{
+            -0.785398163f, 0.785398163f,
+             0.785398163f, -0.785398163f};
+        CutsceneTheaterClipVertex projectionVertices[4]{};
+        Check(BuildCutsceneTheaterProjectionQuad(
+                  projectionEye, projectionOrientation,
+                  projectionCenter, projectionOrientation,
+                  6.0f, 3.375f, projectionFov, projectionVertices) &&
+              std::fabs(projectionVertices[0].x + 3.0f) < 0.00001f &&
+              std::fabs(projectionVertices[0].y - 1.6875f) < 0.00001f &&
+              std::fabs(projectionVertices[0].w - 4.0f) < 0.00001f &&
+              std::fabs(projectionVertices[3].x - 3.0f) < 0.00001f &&
+              std::fabs(projectionVertices[3].y + 1.6875f) < 0.00001f,
+            "theatre screen projects into an ordinary stereo projection view");
+        const float rightEye[3]{0.032f, 0.0f, 0.0f};
+        CutsceneTheaterClipVertex rightEyeVertices[4]{};
+        Check(BuildCutsceneTheaterProjectionQuad(
+                  rightEye, projectionOrientation,
+                  projectionCenter, projectionOrientation,
+                  6.0f, 3.375f, projectionFov, rightEyeVertices) &&
+              rightEyeVertices[0].x < projectionVertices[0].x &&
+              rightEyeVertices[3].x < projectionVertices[3].x,
+            "room-fixed theatre projection preserves physical-eye parallax");
+        const float behindCenter[3]{0.0f, 0.0f, 1.0f};
+        Check(!BuildCutsceneTheaterProjectionQuad(
+                  projectionEye, projectionOrientation,
+                  behindCenter, projectionOrientation,
+                  6.0f, 3.375f, projectionFov, projectionVertices),
+            "theatre projection rejects a screen behind the viewer");
         Check(std::fabs(CutsceneTheaterHeight(6.0f, 2912, 2100) -
                     6.0f * 2100.0f / 2912.0f) < 0.00001f &&
                   CutsceneTheaterHeight(6.0f, 0, 2100) == 0.0f,

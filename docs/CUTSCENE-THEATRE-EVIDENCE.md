@@ -23,6 +23,42 @@ publication freshness window is 500 ms. Capability loss, title transitions,
 module unload, a missing detector, or a failed read therefore return only this
 feature to immersive presentation.
 
+### Quest flat-theatre result and projection presentation
+
+The exact source `23ed3cef9da9c8bb610ca1c2a540d3cbb98a3f83`, DLL
+SHA-256 `828CD701FD4559E24F225FB72ABF0AAAD29918620A0D8AF16E3F2E843F9C88EE`,
+entered theatre on the Steam edition through VirtualDesktopXR 1.0.10 on a
+Meta Quest 3 at 90 Hz. The runtime supplied a valid 65.9 mm eye separation,
+and the saved theatre-depth setting changed from 0.43 to 1.01. The user's
+headset result was nevertheless explicit: the theatre image remained flat on
+Quest and the depth slider made no visible difference. The same two-eye
+theatre had visible stereo depth through the PSVR2/SteamVR path. This is a
+cross-runtime presentation failure, not evidence against the headset result.
+
+The failed path submitted two `XrCompositionLayerQuad` layers at the same
+room-fixed pose. Each layer selected one physical eye through
+`XrEyeVisibility` and selected the corresponding slice of the shared array
+swapchain. That is core-valid OpenXR, but it leaves correct stereo dependent on
+the runtime honoring both eye-selective layer composition and a nonzero array
+slice on a quad layer.
+
+The replacement is headset- and runtime-agnostic. Both title-rendered eyes are
+resolved into private ordinary 2D textures. A bounded compositor draw projects
+the configured room-fixed screen into each eye's already validated native-FOV
+image rectangle, then submits the same single two-view
+`XrCompositionLayerProjection` used by immersive gameplay. The screen
+projection derives only from the runtime's current eye poses/FOV, the shared
+theatre width/distance, and the title-published authored aspect. It contains no
+headset name, vendor, runtime, IPD constant, or per-runtime branch. The depth
+slider still scales the title's actual per-eye camera offsets before capture;
+Flip Depth swaps the two resolved source eyes before projection.
+
+If private projection resources cannot be created, only theatre falls back
+loudly to the prior core quad presentation. If a claimed projection frame does
+not complete, that frame is dropped and the immersive camera/session remain
+armed. The replacement remains headset-pending on Quest and requires a PSVR2
+regression before acceptance.
+
 The compositor also requires a separate fresh, generation-tagged authored
 projection aspect. It double-reads the cinematic-control publication around
 that projection read, so a title transition or camera-control handoff cannot

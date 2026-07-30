@@ -224,6 +224,112 @@ inline uint32_t CutsceneTheaterImageIndex(
     return flipDepth ? 1u - visibleEye : visibleEye;
 }
 
+struct CutsceneTheaterClipVertex
+{
+    float x = 0.0f;
+    float y = 0.0f;
+    float w = 0.0f;
+};
+
+// Project a room-fixed theatre rectangle into one ordinary OpenXR projection
+// view. This deliberately uses no compositor eye-selection behavior: each
+// physical eye gets a complete projection image, just like immersive gameplay.
+// Quaternion arrays use OpenXR's x/y/z/w order and all positions are in the
+// same LOCAL reference space.
+inline bool BuildCutsceneTheaterProjectionQuad(
+    const float eyePosition[3], const float eyeOrientation[4],
+    const float screenCenter[3], const float screenOrientation[4],
+    float widthMeters, float heightMeters,
+    const float fov[4], CutsceneTheaterClipVertex (&vertices)[4]) noexcept
+{
+    if (!eyePosition || !eyeOrientation || !screenCenter ||
+        !screenOrientation || !fov ||
+        !std::isfinite(widthMeters) || !std::isfinite(heightMeters) ||
+        widthMeters <= 0.0f || heightMeters <= 0.0f)
+        return false;
+    for (int i = 0; i < 3; ++i)
+        if (!std::isfinite(eyePosition[i]) || !std::isfinite(screenCenter[i]))
+            return false;
+    for (int i = 0; i < 4; ++i)
+        if (!std::isfinite(eyeOrientation[i]) ||
+            !std::isfinite(screenOrientation[i]) || !std::isfinite(fov[i]))
+            return false;
+
+    // fov = left/right/up/down, matching XrFovf.
+    const float tanLeft = std::tan(fov[0]);
+    const float tanRight = std::tan(fov[1]);
+    const float tanUp = std::tan(fov[2]);
+    const float tanDown = std::tan(fov[3]);
+    if (!std::isfinite(tanLeft) || !std::isfinite(tanRight) ||
+        !std::isfinite(tanUp) || !std::isfinite(tanDown) ||
+        tanRight - tanLeft <= 1e-5f || tanUp - tanDown <= 1e-5f)
+        return false;
+
+    auto normalize = [](const float q[4], float out[4]) noexcept {
+        const float lengthSquared =
+            q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3];
+        if (!std::isfinite(lengthSquared) || lengthSquared < 1e-8f)
+            return false;
+        const float inverseLength = 1.0f / std::sqrt(lengthSquared);
+        for (int i = 0; i < 4; ++i)
+            out[i] = q[i] * inverseLength;
+        return true;
+    };
+    auto rotate = [](const float q[4], const float v[3],
+                     float out[3]) noexcept {
+        const float tx = 2.0f * (q[1] * v[2] - q[2] * v[1]);
+        const float ty = 2.0f * (q[2] * v[0] - q[0] * v[2]);
+        const float tz = 2.0f * (q[0] * v[1] - q[1] * v[0]);
+        out[0] = v[0] + q[3] * tx + (q[1] * tz - q[2] * ty);
+        out[1] = v[1] + q[3] * ty + (q[2] * tx - q[0] * tz);
+        out[2] = v[2] + q[3] * tz + (q[0] * ty - q[1] * tx);
+    };
+
+    float eyeQ[4]{}, screenQ[4]{};
+    if (!normalize(eyeOrientation, eyeQ) || !normalize(screenOrientation, screenQ))
+        return false;
+    const float inverseEyeQ[4]{-eyeQ[0], -eyeQ[1], -eyeQ[2], eyeQ[3]};
+    const float localRight[3]{1.0f, 0.0f, 0.0f};
+    const float localUp[3]{0.0f, 1.0f, 0.0f};
+    float screenRight[3]{}, screenUp[3]{};
+    rotate(screenQ, localRight, screenRight);
+    rotate(screenQ, localUp, screenUp);
+
+    const float halfWidth = widthMeters * 0.5f;
+    const float halfHeight = heightMeters * 0.5f;
+    // Triangle-strip order and matching UVs:
+    // top-left, top-right, bottom-left, bottom-right.
+    constexpr float signs[4][2]{
+        {-1.0f,  1.0f}, { 1.0f,  1.0f},
+        {-1.0f, -1.0f}, { 1.0f, -1.0f}};
+    for (int vertex = 0; vertex < 4; ++vertex)
+    {
+        float delta[3]{};
+        for (int axis = 0; axis < 3; ++axis)
+        {
+            const float corner = screenCenter[axis] +
+                screenRight[axis] * halfWidth * signs[vertex][0] +
+                screenUp[axis] * halfHeight * signs[vertex][1];
+            delta[axis] = corner - eyePosition[axis];
+        }
+        float view[3]{};
+        rotate(inverseEyeQ, delta, view);
+        const float clipW = -view[2];
+        if (!std::isfinite(clipW) || clipW <= 1e-4f)
+            return false;
+        const float tangentX = view[0] / clipW;
+        const float tangentY = view[1] / clipW;
+        const float ndcX =
+            2.0f * (tangentX - tanLeft) / (tanRight - tanLeft) - 1.0f;
+        const float ndcY =
+            2.0f * (tangentY - tanDown) / (tanUp - tanDown) - 1.0f;
+        if (!std::isfinite(ndcX) || !std::isfinite(ndcY))
+            return false;
+        vertices[vertex] = {ndcX * clipW, ndcY * clipW, clipW};
+    }
+    return true;
+}
+
 inline float CutsceneTheaterHeight(
     float widthMeters, uint32_t imageWidth, uint32_t imageHeight) noexcept
 {
