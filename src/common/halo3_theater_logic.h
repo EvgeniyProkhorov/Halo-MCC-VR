@@ -7,12 +7,17 @@
 // Scaling both tangents equally preserves the authored aspect ratio. This is
 // title-adapter policy, not part of the universal theatre compositor.
 inline constexpr float kHalo3CutsceneTheaterFovScale = 0.85f;
+// Halo 3's theatre capture sits low inside the authored frame after the FOV
+// correction. A -0.10 row-vector projection-center term moves the image up by
+// 0.10 NDC, or five percent of the screen height, without rotating the camera.
+inline constexpr float kHalo3CutsceneTheaterVerticalCenterAdjustment = -0.10f;
 
 struct Halo3CutsceneTheaterFrustum
 {
     bool valid = false;
     float projectionTangentX = 0.0f;
     float projectionTangentY = 0.0f;
+    float projectionCenterYAdjustment = 0.0f;
     float cullingTangentX = 0.0f;
     float cullingTangentY = 0.0f;
 };
@@ -57,6 +62,8 @@ inline Halo3CutsceneTheaterFrustum SelectHalo3CutsceneTheaterFrustum(
     {
         return {};
     }
+    result.projectionCenterYAdjustment =
+        kHalo3CutsceneTheaterVerticalCenterAdjustment;
 
     // Halo 3 derives visibility from the compact-camera tangents before it
     // consumes the derived projection matrix. Keep that visibility volume at

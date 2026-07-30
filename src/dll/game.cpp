@@ -5500,6 +5500,15 @@ namespace
                     1.0f / theaterFrustum.projectionTangentX;
                 vrProjection[5] =
                     1.0f / theaterFrustum.projectionTangentY;
+                // In Halo 3's row-vector projection layout, index 9 is the
+                // vertical center term. Preserve the engine's current value
+                // (including its tiny per-frame offset) and lift only the
+                // theatre capture; immersive policy returns an exact zero.
+                if (theaterFrustum.projectionCenterYAdjustment != 0.0f)
+                {
+                    vrProjection[9] +=
+                        theaterFrustum.projectionCenterYAdjustment;
+                }
                 finalProjection = vrProjection;
                 if (fabsf(finalProjection[0]) > 0.01f && fabsf(finalProjection[5]) > 0.01f)
                 {

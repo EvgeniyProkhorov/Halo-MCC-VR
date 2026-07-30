@@ -191,9 +191,14 @@ frustum from a 0.95 tangent-space projection. The exact later baseline
 `06e76a2752fa3b1163a8346753bdecb7201acb2a`, DLL SHA-256
 `71D4B03D8166DF152344DCF3D295B691DDDD1FF28F749BB716598CC0DA6FE577`,
 retained that policy; headset testing found the visible Halo 3 framing still
-too wide and exposed elements outside the intended shot. The next calibration
-tightens only the projection to a 0.85 tangent-space copy. It remains
-headset-pending.
+too wide and exposed elements outside the intended shot. Source
+`49c680c60169751a48e466eca280fd4331c03842`, DLL SHA-256
+`5400450B5AC43146776713E121A194881AE81F1030C30893BA7CBBBC496C8D47`,
+tightened only the projection to a 0.85 tangent-space copy. The Steam edition,
+SteamVR/OpenXR 2.17.6, runtime-reported Oculus headset at 120 Hz run accepted
+the FOV: the user reported that it was fine. The remaining report is separate:
+the captured cinematic sits too low, leaving too much headspace and clipping
+the lower composition.
 
 The Halo 3 follow-up is deliberately title-local. The signature-located
 compact-to-derived builder at
@@ -207,8 +212,16 @@ derived projection's X/Y scales to a 0.85 tangent-space copy of the authored
 framing. Applying the same scale to both axes preserves the authored aspect.
 When theatre is inactive, projection and visibility both receive the exact
 existing OpenXR tangents. ODST and Reach do not call this Halo 3 policy. This
-follow-up remains headset-pending; the static boundary and isolation are
-evidence, not a claim that the visible culling result has passed.
+FOV correction is headset-accepted.
+
+The same exact run logged Halo 3's live row-vector projection with its vertical
+center term at matrix index 9. The next title-local calibration preserves that
+engine-built value and subtracts 0.10 only while Halo 3 authored theatre is
+active. In this matrix layout that lifts the captured image by 0.10 NDC, or
+five percent of the screen height, without rotating or translating the authored
+camera. The room-fixed screen, stereo eye transforms, 0.85 FOV, wider visibility
+cover, immersive Halo 3 path, ODST, Reach, and shared compositor are unchanged.
+The vertical calibration remains headset-pending.
 
 ## Reach
 

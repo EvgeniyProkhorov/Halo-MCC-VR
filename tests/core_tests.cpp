@@ -2530,6 +2530,7 @@ int main()
         Check(immersiveHalo3.valid &&
                   immersiveHalo3.projectionTangentX == 1.84f &&
                   immersiveHalo3.projectionTangentY == 1.33f &&
+                  immersiveHalo3.projectionCenterYAdjustment == 0.0f &&
                   immersiveHalo3.cullingTangentX == 1.84f &&
                   immersiveHalo3.cullingTangentY == 1.33f,
             "Halo 3 immersive projection and culling remain byte-for-byte on the existing OpenXR cover");
@@ -2539,13 +2540,15 @@ int main()
         Check(theaterHalo3.valid &&
                   std::fabs(theaterHalo3.projectionTangentX - 1.02f) < 0.00001f &&
                   std::fabs(theaterHalo3.projectionTangentY - 0.765f) < 0.00001f &&
+                  std::fabs(theaterHalo3.projectionCenterYAdjustment +
+                            0.10f) < 0.00001f &&
                   theaterHalo3.cullingTangentX == 1.84f &&
                   theaterHalo3.cullingTangentY == 1.33f &&
                   std::fabs(
                       theaterHalo3.projectionTangentX /
                           theaterHalo3.projectionTangentY -
                       4.0f / 3.0f) < 0.00001f,
-            "Halo 3 theatre tightens framing without changing aspect and retains the wider visibility cover");
+            "Halo 3 theatre tightens and lifts framing without changing aspect or the wider visibility cover");
         Check(!SelectHalo3CutsceneTheaterFrustum(
                    true, 0.0f, 0.90f, 1.84f, 1.33f).valid &&
                   !SelectHalo3CutsceneTheaterFrustum(
