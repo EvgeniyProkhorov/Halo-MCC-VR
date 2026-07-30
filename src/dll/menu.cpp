@@ -246,6 +246,29 @@ namespace
     // Private message we post to the game window so the fit runs on the window's
     // own (UI) thread, where touching window size/position is safe.
     constexpr UINT kFitGameWindowMsg = WM_APP + 0x37;
+    constexpr UINT kActivateGameWindowMsg = WM_APP + 0x38;
+
+    // Consume the exact-process foreground permission granted by the launcher
+    // once MCC's real UI window exists. Running on the owner thread also makes
+    // SetActiveWindow/SetFocus meaningful. This is intentionally startup-only:
+    // after launch, Alt+Tab and other deliberate focus changes remain the
+    // user's choice.
+    void ActivateGameWindow(HWND hwnd)
+    {
+        if (IsIconic(hwnd))
+            ShowWindow(hwnd, SW_RESTORE);
+
+        const BOOL foregroundCall = SetForegroundWindow(hwnd);
+        SetActiveWindow(hwnd);
+        SetFocus(hwnd);
+
+        LOG("focus: startup activation requested; call=%d foreground=%d active=%d "
+            "keyboard=%d",
+            foregroundCall ? 1 : 0,
+            GetForegroundWindow() == hwnd ? 1 : 0,
+            GetActiveWindow() == hwnd ? 1 : 0,
+            GetFocus() == hwnd ? 1 : 0);
+    }
 
     // Fit the game window inside the primary monitor's work area, preserving the
     // render aspect (kNativeRenderWidth:kNativeRenderHeight, constant because
@@ -313,6 +336,11 @@ namespace
         if (msg == kFitGameWindowMsg)
         {
             FitGameWindow(hwnd);
+            return 0;
+        }
+        if (msg == kActivateGameWindowMsg)
+        {
+            ActivateGameWindow(hwnd);
             return 0;
         }
         // Keep the game rendering and processing input while the user is in the
@@ -1139,6 +1167,7 @@ bool Menu_Init(HWND gameWindow, ID3D11Device* device, ID3D11DeviceContext* conte
     // runs on the UI thread.
     if (D3D_FitActive())
         PostMessageW(gameWindow, kFitGameWindowMsg, 0, 0);
+    PostMessageW(gameWindow, kActivateGameWindowMsg, 0, 0);
 
     g_ready = true;
     LOG("menu ready (F1 to toggle)");
