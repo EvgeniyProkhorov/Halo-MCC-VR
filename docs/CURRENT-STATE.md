@@ -20,12 +20,27 @@ are evidence, not instructions.
 > verify it against the code before building on it.
 
 > **CURRENT HEADSET-ACCEPTED DEVELOPMENT BUILD:** source
-> `b2b3fa2ffd88c6f2285889090d85dfe3a069b5f3`, DLL SHA-256
-> `25906FE4C76B7AD87B4CFFE597777AD0F83EAB2AD05BFD0352E09BF30959479D`.
+> `081002cdf85ae40151b657101a1101930083cad8`, DLL SHA-256
+> `EA7D114CFED85D3E0A5EB2993422CA0918FC2850549680F3976A058B7D43FB66`.
 > This is the accepted cumulative universal-cutscene-theatre build with ODST's
-> title-native free-look exclusion. The public distribution release remains
-> Alpha 0.3.0 below; do not confuse its older DLL with the current
-> headset-accepted development artifact.
+> title-native free-look exclusion and the L3+R3 VR-space recenter/menu chord.
+> The public distribution release remains Alpha 0.3.0 below; do not confuse its
+> older DLL with the current headset-accepted development artifact.
+
+### ACCEPTED: L3+R3 VR-space recenter/menu chord - 2026-07-29
+
+| Identity | Value |
+| --- | --- |
+| Accepted source | `081002cdf85ae40151b657101a1101930083cad8` |
+| Candidate package | `out/candidates/081002c-reach-fp-parity-20260730-004638634Z` |
+| `halo3xr.dll` SHA-256 | `EA7D114CFED85D3E0A5EB2993422CA0918FC2850549680F3976A058B7D43FB66` |
+| Installed editions | Steam and Microsoft Store; hashes verified independently |
+| Accepted runtime | Steam edition, SteamVR/OpenXR 2.17.6, PSVR2 at 120 Hz |
+| Headset result | Accepted. Pressing L3+R3 correctly recenters VR space and toggles the F1 menu. |
+
+The same debounced L3+R3 edge now recenters the immersive camera and room-fixed
+theatre origin before opening the menu. The existing R3 zoom suppression and
+menu click consumption remain intact.
 
 ### ACCEPTED: ODST authored-look theatre qualification - 2026-07-29
 
