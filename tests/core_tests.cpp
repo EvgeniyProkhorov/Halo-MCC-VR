@@ -31,6 +31,8 @@
 #include "title_registry.h"
 #include "title_runtime_state.h"
 
+#include <authored_reticle_logic.h>
+
 namespace
 {
     int g_failures = 0;
@@ -131,6 +133,71 @@ namespace
 
 int main()
 {
+    {
+        const float neutral[4]{1.0f, 0.3f, 0.6f, 0.9f};
+        const float neutralFaded[4]{0.5f, 0.15f, 0.3f, 0.45f};
+        const float friendly[4]{1.0f, 0.8f, 0.2f, 0.4f};
+        const float enemy[4]{1.0f, 0.2f, 0.8f, 0.4f};
+        const uint32_t neutralState =
+            ClassifyAuthoredReticleColorOrdering(neutral);
+        Check(neutralState != 0 &&
+                  neutralState ==
+                      ClassifyAuthoredReticleColorOrdering(neutralFaded) &&
+                  neutralState !=
+                      ClassifyAuthoredReticleColorOrdering(friendly) &&
+                  neutralState !=
+                      ClassifyAuthoredReticleColorOrdering(enemy) &&
+                  ClassifyAuthoredReticleColorOrdering(friendly) !=
+                      ClassifyAuthoredReticleColorOrdering(enemy),
+              "authored colour ordering and fade stability");
+        const float invalid[4]{1.0f, 0.0f, INFINITY, 0.0f};
+        Check(ClassifyAuthoredReticleColorOrdering(invalid) == 0,
+              "authored invalid colour rejected");
+    }
+    {
+        AuthoredReticleRefreshState state{};
+        Check(!ShouldUploadAuthoredReticle(
+                  AuthoredReticleRefreshPolicy::IdentityAndColorState,
+                  true, true, 7, 2, 100, 1, state), "reticle settle starts");
+        Check(!ShouldUploadAuthoredReticle(
+                  AuthoredReticleRefreshPolicy::IdentityAndColorState,
+                  true, true, 7, 2, 123, 1, state), "reticle still settling");
+        Check(ShouldUploadAuthoredReticle(
+                  AuthoredReticleRefreshPolicy::IdentityAndColorState,
+                  true, true, 7, 2, 124, 1, state), "reticle settled publish");
+        MarkAuthoredReticleUploaded(state, 7, 2, 124);
+        Check(!ShouldUploadAuthoredReticle(
+                  AuthoredReticleRefreshPolicy::IdentityAndColorState,
+                  true, true, 7, 2, 130, 1, state), "same colour skipped");
+        Check(ShouldUploadAuthoredReticle(
+                  AuthoredReticleRefreshPolicy::IdentityAndColorState,
+                  true, true, 7, 4, 130, 1, state), "colour edge publish");
+        MarkAuthoredReticleUploaded(state, 7, 4, 130);
+        Check(!ShouldUploadAuthoredReticle(
+                  AuthoredReticleRefreshPolicy::IdentityAndColorState,
+                  true, true, 7, 8, 133, 1, state), "colour edge throttled");
+        Check(ShouldUploadAuthoredReticle(
+                  AuthoredReticleRefreshPolicy::IdentityAndColorState,
+                  true, true, 7, 8, 136, 1, state), "colour edge after gap");
+        Check(!ShouldUploadAuthoredReticle(
+                  AuthoredReticleRefreshPolicy::IdentityAndColorState,
+                  true, true, 8, 8, 200, 1, state), "new identity settles");
+        Check(ShouldUploadAuthoredReticle(
+                  AuthoredReticleRefreshPolicy::IdentityAndColorState,
+                  true, true, 8, 8, 224, 1, state), "new identity publishes");
+        Check(ShouldUploadAuthoredReticle(
+                  AuthoredReticleRefreshPolicy::BoundedAnimation,
+                  true, true, 7, 0, 230, 1, state), "bounded title cadence");
+        Check(!AuthoredReticleLayerHasContent(true, false) &&
+                  AuthoredReticleLayerHasContent(true, true) &&
+                  AuthoredReticleLayerHasContent(false, false),
+              "held authored layer gate");
+        Check(!ShouldUploadAuthoredReticle(
+                  AuthoredReticleRefreshPolicy::IdentityAndColorState,
+                  true, true, 9, 2, 400, 2, state) &&
+                  state.ownerEpoch == 2 && state.lastPublishedKey == 0,
+              "reticle owner reset");
+    }
     {
         constexpr std::array<uint8_t, 6> repeatedPattern{
             0xAA, 0xBB, 0xCC, 0xAA, 0xBB, 0xCC

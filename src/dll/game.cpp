@@ -13,6 +13,7 @@
 #include "vr.h"
 #include "ik.h"
 #include "title_adapter.h"
+#include "../common/authored_reticle_logic.h"
 #include "../common/reach_chud_logic.h"
 #include "../common/reach_render_logic.h"
 #ifndef HALOMCCVR_EXPERIMENTAL_REACH_RENDER_CANDIDATE
@@ -621,15 +622,19 @@ namespace
     typedef bool (__fastcall *GameIsPlaybackFn)();
     typedef void (__fastcall *HudDrawWidgetFn)(
         int, void*, unsigned short, unsigned char, void*);
+    typedef void (__fastcall *HudPlaceFn)(void*, void*, void*, void*);
     HudCrosshairVisibleFn g_realHudCrosshairVisible = nullptr;
     GameIsPlaybackFn g_gameIsPlayback = nullptr;
     HudDrawWidgetFn g_realHudDrawWidget = nullptr;
+    HudPlaceFn g_realHudPlace = nullptr;
     thread_local bool g_insideHudDrawWidget = false;
     // Identity of the crosshair art most recently captured, for ANY title.
     // The compositor re-uploads the authored reticle only when this changes, so
     // a static crosshair costs no swapchain work at all.
     std::atomic<uint64_t> g_authoredCrosshairKey{0};
     thread_local uint64_t g_authoredCrosshairKeyAccum = 0;
+    std::atomic<uint32_t> g_authoredCrosshairColorState{0};
+    thread_local uint32_t g_authoredCrosshairColorStateAccum = 0;
 
     inline uint64_t FoldAuthoredCrosshairKey(
         uint64_t accum, unsigned int widgetIndex, unsigned int variant)
@@ -640,6 +645,45 @@ namespace
         return k ? k : 1;  // 0 is reserved for "nothing captured"
     }
     thread_local bool g_authoredReticleCaptureStarted = false;
+
+    uint32_t Halo3AuthoredCrosshairColorState(void* placementOutput)
+    {
+        // Pinned halo3.dll chud placement at +0x2EEFC8 writes its computed
+        // four-float colour to its fourth argument +0x88 before returning.
+        // The earlier headset probe independently measured this output region
+        // as colour/alpha/animation state. Compare the ordering of all four
+        // channels, so the state identity does not depend on assuming whether
+        // this engine layout stores alpha first or last. Uniform fade/opacity
+        // changes preserve that ordering and therefore cost no upload.
+        if (!placementOutput)
+            return 0;
+        float channel[4]{};
+        __try
+        {
+            memcpy(channel, static_cast<const uint8_t*>(placementOutput) + 0x88,
+                   sizeof(channel));
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            return 0;
+        }
+        return ClassifyAuthoredReticleColorOrdering(channel);
+    }
+
+    void __fastcall HudPlaceHook(
+        void* context, void* widgetDefinition, void* placementInput,
+        void* placementOutput)
+    {
+        g_realHudPlace(
+            context, widgetDefinition, placementInput, placementOutput);
+        if (!g_authoredReticleCaptureStarted ||
+            TitleAdapter_GetActiveTitle() != GameTitle::Halo3)
+            return;
+        g_authoredCrosshairColorStateAccum |=
+            Halo3AuthoredCrosshairColorState(placementOutput);
+        g_authoredCrosshairColorState.store(
+            g_authoredCrosshairColorStateAccum, std::memory_order_release);
+    }
     // Shared because Halo can execute first-person work on a render worker.
     std::atomic<bool> g_scopeRenderActive{false};
 
@@ -689,8 +733,15 @@ namespace
             // This widget's art was redirected into the authored texture, so
             // fold its identity in and publish it. Same weapon and state ->
             // same key -> the compositor skips the blocking swapchain upload.
+            const bool halo3Title =
+                TitleAdapter_GetActiveTitle() == GameTitle::Halo3;
+            // Halo 3's alternate-path byte changes with CHUD presentation
+            // state, so it is not widget identity. Its exact colour output is
+            // tracked separately below. ODST retains its proven key unchanged.
+            const unsigned int identityVariant =
+                halo3Title ? 0u : useAlternatePath;
             g_authoredCrosshairKeyAccum = FoldAuthoredCrosshairKey(
-                g_authoredCrosshairKeyAccum, widgetIndex, useAlternatePath);
+                g_authoredCrosshairKeyAccum, widgetIndex, identityVariant);
             g_authoredCrosshairKey.store(
                 g_authoredCrosshairKeyAccum, std::memory_order_release);
             VR_EndAuthoredReticleCapture();
@@ -811,10 +862,9 @@ namespace
             1, std::memory_order_acq_rel);
     }
 #endif
-    // (HudPlaceHook removed 2026-07-19: the 0x2EEFC8 out-struct was MEASURED —
-    // user sliders + log dump — to hold colors/alpha/animation state only, no
-    // screen coordinates. Halo's HUD has no per-element position to edit; the
-    // HUD panel in vr.cpp (capture diff) is the real fix.)
+    // The 0x2EEFC8 placement output was measured to hold colour/alpha/animation
+    // state, not screen coordinates. HudPlaceHook now observes that state only;
+    // HUD positioning remains in the capture transform path in vr.cpp.
 
     // Per-eye snapshot handed from RenderViewHook to the FP hooks below. The
     // buffers are written before g_origRenderView and read during it (same
@@ -8051,6 +8101,43 @@ namespace
             else
                 LOG("M3: HUD height anchor signature missing/ambiguous or hook failed; "
                     "height remains stock");
+
+            // Halo 3's placement output is the exact boundary that writes the
+            // computed authored colour vector at output+0x88. Its prologue is
+            // unique in the pinned module; failure leaves the visible reticle
+            // working and only its state-triggered colour refresh unavailable.
+            const char* kHudPlaceSig =
+                "48 8B C4 48 89 58 08 48 89 68 10 48 89 70 18 48 89 78 20 "
+                "41 54 41 56 41 57 48 81 EC 80 00 00 00 "
+                "4C 8B 3D ?? ?? ?? ?? 49 8B F1 0F 29 70 D8 4D 8B E0 "
+                "0F 29 78 C8 48 8B E9";
+            uintptr_t hudPlace = sig::Find(base, size, kHudPlaceSig);
+            const bool uniqueHudPlace = hudPlace &&
+                !sig::Find(hudPlace + 1, base + size - hudPlace - 1,
+                           kHudPlaceSig);
+            bool hudPlaceHookReady = false;
+            if (uniqueHudPlace)
+            {
+                const MH_STATUS placeCreate = MH_CreateHook(
+                    reinterpret_cast<void*>(hudPlace),
+                    reinterpret_cast<void*>(&HudPlaceHook),
+                    reinterpret_cast<void**>(&g_realHudPlace));
+                hudPlaceHookReady = placeCreate == MH_OK &&
+                    MH_EnableHook(reinterpret_cast<void*>(hudPlace)) == MH_OK;
+                if (hudPlaceHookReady)
+                    RememberInstalledGameHook(reinterpret_cast<void*>(hudPlace));
+                else if (placeCreate == MH_OK)
+                {
+                    MH_RemoveHook(reinterpret_cast<void*>(hudPlace));
+                    g_realHudPlace = nullptr;
+                }
+            }
+            if (hudPlaceHookReady)
+                LOG("M3: authored CHUD colour-state output hooked at "
+                    "halo3.dll+0x%llX", (unsigned long long)(hudPlace - base));
+            else
+                LOG("M3: authored CHUD colour-state signature missing/ambiguous "
+                    "or hook failed; reticle remains visible with held colour");
 
             const char* kHudElemSig =
                 "48 89 5C 24 10 57 48 83 EC 50 48 8B 05 ?? ?? ?? ?? 41 8A F9 45 0F B7 C0";
@@ -18467,11 +18554,23 @@ bool Game_IsCameraOnlyBringup()
 // art it had already captured.
 bool Game_TitleCapturesAuthoredCrosshair()
 {
+    const GameTitle activeTitle = TitleAdapter_GetActiveTitle();
 #if HALOMCCVR_EXPERIMENTAL_REACH_RENDER_CANDIDATE
-    if (TitleAdapter_GetActiveTitle() == GameTitle::HaloReach)
+    if (activeTitle == GameTitle::HaloReach)
         return g_reachOrigHudDrawWidget != nullptr;
 #endif
-    return g_realHudDrawWidget != nullptr;
+#if HALOMCCVR_EXPERIMENTAL_ODST_BRINGUP
+    if (activeTitle == GameTitle::Halo3ODST)
+    {
+        return g_odstCamera.installed.load(std::memory_order_acquire) &&
+            g_odstCamera.crosshairClassGatePatched &&
+            g_realHudCrosshairVisible != nullptr &&
+            g_realHudDrawWidget != nullptr;
+    }
+#endif
+    return activeTitle == GameTitle::Halo3 &&
+        g_realHudCrosshairVisible != nullptr &&
+        g_realHudDrawWidget != nullptr;
 }
 
 
@@ -18501,11 +18600,17 @@ uint64_t Game_GetAuthoredCrosshairKey()
 {
     return g_authoredCrosshairKey.load(std::memory_order_acquire);
 }
+uint32_t Game_GetAuthoredCrosshairColorState()
+{
+    return g_authoredCrosshairColorState.load(std::memory_order_acquire);
+}
 
 void Game_ResetAuthoredCrosshairKey()
 {
     g_authoredCrosshairKeyAccum = 0;
     g_authoredCrosshairKey.store(0, std::memory_order_release);
+    g_authoredCrosshairColorStateAccum = 0;
+    g_authoredCrosshairColorState.store(0, std::memory_order_release);
 }
 
 

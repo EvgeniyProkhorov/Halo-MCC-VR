@@ -229,7 +229,9 @@ The user confirmed that this frees the shotgun left arm. The removed synthetic p
 - That upload is a blocking OpenXR swapchain acquire/wait/copy/release. Doing
   it every frame costs ~4-5ms of `renderWindow` - measured, and the entire
   difference between fitting a 120Hz budget (8.33ms) and missing it and halving
-  to 60. It is now gated on the captured art's identity changing.
+  to 60. Reach and ODST use a bounded animation cadence. Halo 3 candidate
+  publishing is identity plus discrete colour-state edges, with no periodic
+  upload in steady state.
 - The procedural reticle and the authored art share one swapchain. For a title
   that captures, the procedural reticle is fully transparent, so repainting it
   ERASES the captured widget. Once the swapchain holds authored art it must be
@@ -238,3 +240,41 @@ The user confirmed that this frees the shotgun left arm. The removed synthetic p
   actually installed. Use it rather than a title list: the previous hardcoded
   lists went stale for both Reach and ODST and each time produced an opaque
   procedural crosshair painted over art the title had already captured.
+
+## Halo 3 authored CHUD colour-state publishing (2026-07-30)
+
+- Headset result for source `f205ce9048895116babdd5d9ddb617351ecc0112`
+  (DLL `31C72CAADEC000761B02A91519C793C6FA2F2417880468C72FCF73B85E20CE24`):
+  the authored reticle was visible and the previous performance loss was fixed,
+  but its blue/green/red target state was frozen. Preserve the exact SteamVR
+  session at
+  `out/test-runs/f205ce9-halo3-reticle-visible-fast-color-fail-20260730/halo3xr.log`
+  (SHA-256 `A8D9D5E04D52A4A04BD44B139BBF6FD1574BD88A062CA52180EEEA58D5A749EF`).
+  The log's steady 120 Hz render windows were about 6-7 ms. This proves the
+  zero-steady-upload performance result, not colour correctness.
+- Pinned discovery module:
+  `N:/SteamLibrary/steamapps/common/Halo The Master Chief Collection/halo3/halo3.dll`,
+  SHA-256 `B209D8454B12DC77E54CCD2C9924EC8D44B8619D21CF98E36FFAF601E67EFB63`.
+  `chud_draw_widget` at `+0x2EDF24` calls `+0x2EEB80`; at `+0x2EECB2` that
+  function calls the placement boundary at `+0x2EEFC8` with its fourth
+  argument as a local output. The placement function writes a 16-byte vector
+  at output `+0x88` before returning. This agrees with the earlier live probe
+  that identified this output as colour/alpha/animation state rather than
+  screen coordinates.
+- The original 32-byte placement prologue occurs seven times. The extended
+  55-byte signature through `48 8B E9` occurs exactly once in the pinned module
+  (PE file offset `0x2EE3C8`, runtime RVA `0x2EEFC8`). Missing, ambiguous, or
+  failed installation degrades only colour refresh; the held authored reticle
+  remains visible.
+- The candidate classifies pairwise ordering of all four finite output floats,
+  with scale-relative tolerance. It deliberately does not assume ARGB versus
+  RGBA: native captured pixels remain the colour source. Uniform opacity/fade
+  scaling preserves the classification, while categorical blue/green/red
+  changes produce edges. A settled Halo 3 widget uploads once, then only on a
+  changed nonzero colour class with a six-frame minimum gap. There is no
+  recurring Halo 3 upload and VR scope state is not a trigger.
+- Apparent-size parity remains headset-pending: all three titles use the same
+  `crosshair_size_deg` and distance-controlled outer quad; Halo 3 uses a 4x
+  internal authored-art occupancy while Reach/ODST retain 2x. Do not call the
+  cross-title visual calibration accepted until the same slider value has been
+  compared in all three headsets sessions.

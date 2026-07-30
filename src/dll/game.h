@@ -48,6 +48,10 @@ uint64_t Game_GetReachAuthoredCrosshairKey();
 // invisible. False means the procedural reticle IS the crosshair.
 bool Game_TitleCapturesAuthoredCrosshair();
 uint64_t Game_GetAuthoredCrosshairKey();
+// Halo 3's discrete authored colour output for the current capture. The value
+// is an opaque state identity (not a requested replacement colour); 0 means the
+// exact output was unavailable. Other titles retain their existing cadence.
+uint32_t Game_GetAuthoredCrosshairColorState();
 // Called once per displayed frame, before any capture, so the per-frame
 // accumulation starts clean and a static crosshair yields a stable key.
 void Game_ResetAuthoredCrosshairKey();
