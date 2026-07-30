@@ -2537,8 +2537,8 @@ int main()
             SelectHalo3CutsceneTheaterFrustum(
                 true, 1.20f, 0.90f, 1.84f, 1.33f);
         Check(theaterHalo3.valid &&
-                  std::fabs(theaterHalo3.projectionTangentX - 1.02f) < 0.00001f &&
-                  std::fabs(theaterHalo3.projectionTangentY - 0.765f) < 0.00001f &&
+                  std::fabs(theaterHalo3.projectionTangentX - 1.14f) < 0.00001f &&
+                  std::fabs(theaterHalo3.projectionTangentY - 0.855f) < 0.00001f &&
                   theaterHalo3.cullingTangentX == 1.84f &&
                   theaterHalo3.cullingTangentY == 1.33f &&
                   std::fabs(

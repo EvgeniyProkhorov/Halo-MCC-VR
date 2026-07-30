@@ -3,10 +3,10 @@
 #include <algorithm>
 #include <cmath>
 
-// Halo 3's authored theatre framing needs a headset-tuned correction.
+// Halo 3's authored theatre framing needs a small headset-tuned correction.
 // Scaling both tangents equally preserves the authored aspect ratio. This is
 // title-adapter policy, not part of the universal theatre compositor.
-inline constexpr float kHalo3CutsceneTheaterFovScale = 0.85f;
+inline constexpr float kHalo3CutsceneTheaterFovScale = 0.95f;
 
 struct Halo3CutsceneTheaterFrustum
 {
