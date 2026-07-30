@@ -185,15 +185,25 @@ policy unchanged.
 
 The first Halo 3 headset pass of the authored-projection candidate reported
 that theatre framing remained slightly too wide and that geometry culled at the
-camera edge, while Reach was correct. The Halo 3 follow-up is deliberately
-title-local. The signature-located compact-to-derived builder at
+camera edge, while Reach was correct. Source
+`876480c54632313141d97c814242183f2a436fee` separated the wider visibility
+frustum from a 0.95 tangent-space projection. The exact later baseline
+`06e76a2752fa3b1163a8346753bdecb7201acb2a`, DLL SHA-256
+`71D4B03D8166DF152344DCF3D295B691DDDD1FF28F749BB716598CC0DA6FE577`,
+retained that policy; headset testing found the visible Halo 3 framing still
+too wide and exposed elements outside the intended shot. The next calibration
+tightens only the projection to a 0.85 tangent-space copy. It remains
+headset-pending.
+
+The Halo 3 follow-up is deliberately title-local. The signature-located
+compact-to-derived builder at
 `halo3+0x2A6980` derives the complete camera block from the compact camera; its
 projection matrix begins at the already validated derived offset `+0x78`.
 The prepared-view path at `halo3+0x1854C8` then uploads that compact/derived
 pair before the inner render at `halo3+0x286A14`. The candidate therefore
 builds Halo 3's visibility data from a compact frustum at least as wide as both
 the authored camera and the existing OpenXR cover, then changes only the
-derived projection's X/Y scales to a 0.95 tangent-space copy of the authored
+derived projection's X/Y scales to a 0.85 tangent-space copy of the authored
 framing. Applying the same scale to both axes preserves the authored aspect.
 When theatre is inactive, projection and visibility both receive the exact
 existing OpenXR tangents. ODST and Reach do not call this Halo 3 policy. This
