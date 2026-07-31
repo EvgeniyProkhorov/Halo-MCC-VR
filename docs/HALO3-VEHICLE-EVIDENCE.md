@@ -590,3 +590,77 @@ rolls the player's world.
 Status: logic and tests landed; **nothing calls it yet**. It ships with the
 motion-control steering author, after the authored-point camera bake (C8) has
 a headset confirmation.
+
+## C8 — vehicle identity confirmed in process (C7 session log, 2026-07-31 09:32 Steam)
+
+The C7 candidate (`ebd0e14`) was driven on Steam under VirtualDesktopXR. The
+session is mechanically clean — `renderWindow p95 5.33 ms` (inside the C1
+baseline 4.4–6.2), `stalls=0`, no `frame=INSANE`, no `too-deep`, no sampler
+fault, and every seat resolved `seatCam=authored`. More importantly the
+log-only identity probe answered the open §E5 question.
+
+**§E5 is CONFIRMED in process.** The physics-block count array is indexed
+exactly by physics type, and the `address*4` scaling that was unexercised on
+the physics records specifically now reads real values:
+
+| def | directType | counts | engine_moment | turn_rate | blur | vehicle |
+|---|---|---|---|---|---|---|
+| 0517 | 1 | `0100000000` | **650.0** | 6.3 | 2.40 | mongoose |
+| 05F9 | 1 | `0100000000` | **2000.0** | 9.4 | 0.55 | warthog |
+| 0697 | 5 | `0000010000` | – | – | 0.10 | chaingun (mounted, `frame=composed`) |
+| 08C7 | 5 | `0000010000` | – | – | 0.00 | standalone turret (`native=0`) |
+| 0BDB | 8 | `0000000010` | – | – | 0.00 | brute chopper |
+| 01C2 | 0 | `1000000000` | – | – | 0.55 | scorpion |
+
+`engine_moment` returned exactly the two values E5 predicted offline (2000
+warthog / 650 mongoose). `turn_rate` resolves as **radians** — 9.4 rad = 540°
+and 6.3 rad = 360°, which is E5's degree pair in the field's own units, so
+that discriminator is confirmed too rather than contradicted. The measure-
+before-use caveat recorded in E5 is therefore discharged: C8 may key cameras
+off these fields.
+
+**The definition INDEX must never be a key.** `def=05F9` identifies the
+warthog *in this map's tag table*; Halo 3 cache files carry per-map tag
+indices, so the same vehicle can hold a different index on another level.
+C8 keys on definition CONTENT (authored per tag, stable everywhere), never on
+the index. The index remains in the log purely for correlation.
+
+### Identity model
+
+`Halo3ResolveVehicleId` maps definition fields to a vehicle:
+
+- type 0 → Scorpion, 4 → Banshee, 7 → Hornet, 8 → Chopper (each unique).
+- type 1 (human_jeep) → `engine_moment` 2000 ± 200 = Warthog, 650 ± 200 =
+  Mongoose. The two constants are 1350 apart, an order of magnitude beyond
+  the tolerance.
+- type 3 (alien_scout) → `specific_type` 1 = Ghost, 3 = Wraith, 4 = Mauler
+  (Prowler). Mechanism confirmed above; these three values are still E5
+  offline predictions, and a value matching none of them yields Unknown.
+- type 5 (turret) is never a root identity.
+- Anything else, any failed read, any unmatched value → **Unknown**, which
+  matches no seat point, so the stock chase camera stands. A mislabel puts
+  the player's head inside another vehicle's geometry; a missing label only
+  costs the effect. The table is built so the first is impossible.
+
+Resolution runs once per distinct definition (an 8-slot direct-mapped cache
+keyed by definition index *and* runtime generation), not per frame.
+
+### Mounted turret gunners are keyed and framed by their CARRIER
+
+`native=1` with `directType=5` means the direct parent is the gun but a
+carrier sits under it (C7 log: chaingun `directType=5 native=1`, standalone
+turret `directType=5 native=0`). The sampler already captured the carrier's
+data window for the C7 composition; C8 additionally reads the carrier's own
+definition index and physics type from it, so the gunner seat is identified
+as "the gunner of a warthog / scorpion / wraith / prowler".
+
+The anchor for those seats now takes the **carrier's frame verbatim** instead
+of composing carrier ∘ local. C7's composition is ~0.42 wu (1.3 m) low
+because an attached child stores its transform relative to the parent's
+ATTACHMENT NODE rather than its object origin — the hog's `turret` marker's
+raw node-local translation matched the measured child position exactly, while
+the node-composed tag position did not. Authoring and anchoring in carrier
+space never touches that node matrix. Nothing is lost: a mounted turret's
+object frame is mount-fixed and does not follow gun aim. The bounding-sphere
+sanity gate follows the frame's owner, so a carrier-frame anchor is checked
+against the carrier's sphere.

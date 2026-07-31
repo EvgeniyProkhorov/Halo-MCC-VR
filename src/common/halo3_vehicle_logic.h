@@ -212,6 +212,68 @@ inline Halo3Frame Halo3ComposeFrame(const Halo3Frame& parent,
     return world;
 }
 
+// C8 identity — the bounding-center fingerprint. Physics type + seat index is
+// NOT a vehicle identity: (1,0) is both warthog and mongoose, (3,0) is ghost,
+// wraith and mauler, and every mounted turret is (5,0,native=1). Expressing
+// (bounding_sphere_center - position) in the object's OWN axes recovers that
+// tag's render_model node-0 default translation — a per-tag constant, free
+// from data the sampler already captures, and proven in a live session (it
+// identified a Mongoose in a drive logged as a "warthog"). R^T * v, with R's
+// columns the object's (fwd, left, up).
+inline bool Halo3ComputeFingerprint(const Halo3Frame& frame,
+                                    const float center[3], float out[3])
+{
+    if (!Halo3FrameOrthonormal(frame))
+        return false;
+    float left[3];
+    Halo3FrameLeft(frame, left);
+    float v[3];
+    for (int i = 0; i < 3; ++i)
+    {
+        if (!std::isfinite(center[i]))
+            return false;
+        v[i] = center[i] - frame.pos[i];
+    }
+    out[0] = v[0] * frame.fwd[0] + v[1] * frame.fwd[1] + v[2] * frame.fwd[2];
+    out[1] = v[0] * left[0] + v[1] * left[1] + v[2] * left[2];
+    out[2] = v[0] * frame.up[0] + v[1] * frame.up[1] + v[2] * frame.up[2];
+    return true;
+}
+
+inline float Halo3FingerprintDistance(const float a[3], const float b[3])
+{
+    float d2 = 0.0f;
+    for (int i = 0; i < 3; ++i)
+    {
+        if (!std::isfinite(a[i]) || !std::isfinite(b[i]))
+            return 1e9f;
+        const float d = a[i] - b[i];
+        d2 += d * d;
+    }
+    return std::sqrt(d2);
+}
+
+// A fingerprint identifies a cousin only when ONE candidate is close and
+// every other is comfortably far. Ambiguity must never pick a winner: the
+// caller then publishes no point and the stock chase camera stands, which is
+// the whole safety property of this feature (a mislabel puts the player's
+// head inside another vehicle's geometry; no label merely costs the effect).
+inline constexpr float kHalo3FingerprintAccept = 0.15f;   // wu
+inline constexpr float kHalo3FingerprintSeparate = 0.30f; // wu
+
+inline bool Halo3FingerprintIsUnique(float bestDistance, float runnerUpDistance,
+                                     float accept = kHalo3FingerprintAccept,
+                                     float separate = kHalo3FingerprintSeparate)
+{
+    if (!std::isfinite(bestDistance))
+        return false;
+    if (bestDistance > accept)
+        return false;
+    if (!std::isfinite(runnerUpDistance))
+        return true;   // only one candidate at all
+    return runnerUpDistance >= separate;
+}
+
 // Anchor-frame sanity: the frame origin must sit inside the seated parent's
 // own bounding sphere (+0x1C center / +0x28 radius) plus a margin generous
 // enough for every authored point yet far below any wrong-frame miss (the C6
@@ -242,6 +304,7 @@ enum class Halo3FrameStatus : uint32_t
     Composed = 2,   // attached child: parent ∘ local
     Insane = 3,     // sanity gate rejected the frame -> stock
     TooDeep = 4,    // more than one attachment level -> stock
+    Carrier = 5,    // C8: mounted gunner anchored in the carrier's own frame
 };
 
 // C9 seat yaw — "the camera does not rotate with the car" (user, 2026-07-31).
@@ -325,42 +388,149 @@ inline constexpr uintptr_t kHalo3DefMinFlipVelocityOffset = 0x39C;
 inline constexpr uintptr_t kHalo3DefMaxFlipVelocityOffset = 0x3A0;
 inline constexpr uintptr_t kHalo3DefBlurSpeedOffset = 0x3B4;
 
+// C8 vehicle identity. Physics type is a CLASS, not a vehicle: (1,seat 0) is
+// warthog AND mongoose, (3,seat 0) is ghost, wraith AND mauler. The C7
+// session log (2026-07-31 09:32, Steam, cand ebd0e14) confirmed IN PROCESS
+// that the §E5 definition reads work — the block-count array indexed exactly
+// by physics type (jeep [0100000000], turret [0000010000], chopper
+// [0000000010], tank [1000000000]) and `engine_moment` came back 2000.0 on
+// the warthog and 650.0 on the mongoose, the two values E5 predicted offline.
+// `turn_rate` resolved as radians (9.4 = 540 deg hog, 6.3 = 360 deg
+// mongoose), which is the same fact in the field's own units.
+enum class Halo3VehicleId : uint8_t
+{
+    Unknown = 0,   // never keys a camera: no point -> stock chase view
+    Scorpion,
+    Warthog,
+    Mongoose,
+    Ghost,
+    Wraith,
+    Mauler,        // the Prowler
+    Banshee,
+    Hornet,
+    Chopper,
+    // A turret the player walks up to and uses (physics type 5 with no
+    // carrier under it). Not resolved from definition content: the machinegun
+    // turret, plasma cannon and missile pod are not separable offline, and
+    // their authored eye points sit within 0.09 wu (27 cm) of each other, so
+    // one shared point is within authoring noise for all three.
+    StationaryTurret,
+};
+
+// Definition-resident fields the sampler resolves ONCE per seat session (on a
+// definition-index change), never per frame.
+struct Halo3DefinitionFields
+{
+    int physicsType = -1;
+    bool jeepValid = false;
+    float engineMoment = 0.0f;
+    bool scoutValid = false;
+    int specificType = -1;
+};
+
+// Tolerances are wide enough for any float representation of the authored
+// constant and far narrower than the gap between the two authored values
+// (650 vs 2000). Anything unrecognised stays Unknown — a wrong identity puts
+// the player's head inside another vehicle, a missing one costs the effect.
+inline constexpr float kHalo3WarthogEngineMoment = 2000.0f;
+inline constexpr float kHalo3MongooseEngineMoment = 650.0f;
+inline constexpr float kHalo3EngineMomentTolerance = 200.0f;
+
+inline Halo3VehicleId Halo3ResolveVehicleId(const Halo3DefinitionFields& def)
+{
+    switch (def.physicsType)
+    {
+    case 0: return Halo3VehicleId::Scorpion;      // human_tank
+    case 4: return Halo3VehicleId::Banshee;       // alien_fighter
+    case 7: return Halo3VehicleId::Hornet;        // vtol
+    case 8: return Halo3VehicleId::Chopper;       // chopper
+    case 1:                                        // human_jeep
+        if (!def.jeepValid || !std::isfinite(def.engineMoment))
+            return Halo3VehicleId::Unknown;
+        if (std::fabs(def.engineMoment - kHalo3WarthogEngineMoment) <=
+            kHalo3EngineMomentTolerance)
+            return Halo3VehicleId::Warthog;
+        if (std::fabs(def.engineMoment - kHalo3MongooseEngineMoment) <=
+            kHalo3EngineMomentTolerance)
+            return Halo3VehicleId::Mongoose;
+        return Halo3VehicleId::Unknown;
+    case 3:                                        // alien_scout
+        if (!def.scoutValid)
+            return Halo3VehicleId::Unknown;
+        if (def.specificType == 1) return Halo3VehicleId::Ghost;
+        if (def.specificType == 3) return Halo3VehicleId::Wraith;
+        if (def.specificType == 4) return Halo3VehicleId::Mauler;
+        return Halo3VehicleId::Unknown;
+    default:
+        return Halo3VehicleId::Unknown;            // incl. 5 (turret)
+    }
+}
+
 // User-authored first-person seat points (Blender kit, model-space world
 // units, relative to the DIRECT parent object's origin and basis).
-// nativeRequired: -1 = any, else the exact nativeInVehicle flag (separates
-// mounted turrets from stationary ones). Entries cover the seats whose
-// vehicle identity is certain from type/seat alone; same-type cousins
-// (mongoose, other mounted turrets) intentionally share the closest authored
-// point until their fingerprints are labeled.
+// Keyed by RESOLVED VEHICLE IDENTITY, not physics type, so a mongoose can
+// never wear the warthog's eye point. `carrierFrame` marks the mounted-turret
+// gunner seats: those points are authored in the CARRIER's frame (and
+// `vehicle` is then the CARRIER's identity), because an attached child stores
+// its transform relative to the parent's ATTACHMENT NODE, which left C7's
+// carrier-origin composition ~0.42 wu (1.3 m) low. Authoring in carrier space
+// sidesteps the node matrix entirely; nothing is lost, as a mounted turret's
+// object frame is mount-fixed and does not follow gun aim.
+//
+// Values are the user's own Blender placements (kit v3, every vehicle at the
+// world origin, metres / 3.048), read back 2026-07-31 with the parse guard
+// that refuses any camera whose evaluated and stored transforms disagree.
 struct Halo3SeatPoint
 {
-    uint8_t directType;
+    Halo3VehicleId vehicle;
     int8_t seatIndex;
-    int8_t nativeRequired;
+    bool carrierFrame;
     float x, y, z;
 };
 
 inline constexpr Halo3SeatPoint kHalo3SeatPoints[] = {
-    {8, 0, -1, -0.512f, 0.000f, 0.738f}, // brute chopper driver
-    {4, 0, -1, 0.563f, 0.005f, 0.435f},  // banshee pilot
-    {7, 0, -1, 0.993f, -0.003f, 0.612f}, // hornet pilot
-    {7, 1, -1, 0.521f, 0.250f, 0.524f},  // hornet left passenger
-    {7, 2, -1, 0.521f, -0.250f, 0.524f}, // hornet right passenger
-    {0, 0, -1, 0.033f, 0.189f, 1.023f},  // scorpion driver
-    {1, 0, -1, 0.053f, 0.166f, 0.614f},  // warthog driver (all human_jeep)
-    {1, 1, -1, 0.013f, -0.159f, 0.660f}, // warthog passenger (all human_jeep)
-    {5, 0, 0, -0.391f, 0.000f, 0.519f},  // stationary turret (mg point)
-    {5, 0, 1, -0.123f, 0.000f, 0.573f},  // mounted turret (chaingun point)
+    // Root vehicles — the seated parent owns the frame.
+    {Halo3VehicleId::Warthog,  0, false,  0.0299f,  0.1683f, 0.6663f},
+    {Halo3VehicleId::Warthog,  1, false, -0.0139f, -0.1903f, 0.6601f},
+    {Halo3VehicleId::Mongoose, 0, false, -0.0476f,  0.0000f, 0.5207f},
+    {Halo3VehicleId::Mongoose, 1, false, -0.4368f,  0.0000f, 0.5967f},
+    {Halo3VehicleId::Ghost,    0, false, -0.1078f,  0.0000f, 0.4491f},
+    {Halo3VehicleId::Wraith,   0, false,  0.3060f,  0.0000f, 1.0573f},
+    {Halo3VehicleId::Mauler,   0, false, -1.0738f,  0.0000f, 0.6381f},
+    {Halo3VehicleId::Mauler,   1, false, -0.2252f,  0.4659f, 0.7430f},
+    {Halo3VehicleId::Mauler,   2, false, -0.2389f, -0.4790f, 0.6764f},
+    {Halo3VehicleId::Chopper,  0, false, -0.4396f,  0.0000f, 0.7348f},
+    {Halo3VehicleId::Banshee,  0, false,  0.4190f,  0.0000f, 0.4119f},
+    {Halo3VehicleId::Hornet,   0, false,  1.0059f, -0.0098f, 0.6517f},
+    {Halo3VehicleId::Hornet,   1, false,  0.5215f,  0.3566f, 0.5583f},
+    {Halo3VehicleId::Hornet,   2, false,  0.5208f, -0.3379f, 0.5830f},
+    // Scorpion driver: the user's forward/height, with the lateral the tag
+    // itself authors (+0.189, the hatch is left of the turret ring). Their
+    // saved file still had this one camera untouched on the centre line.
+    {Halo3VehicleId::Scorpion, 0, false,  0.0326f,  0.1893f, 1.0226f},
+
+    // Mounted turret gunners — identified and anchored by the CARRIER.
+    {Halo3VehicleId::Warthog,  0, true,  -0.5832f,  0.0000f, 1.0624f},
+    {Halo3VehicleId::Scorpion, 0, true,   0.4673f, -0.1903f, 0.8659f},
+    {Halo3VehicleId::Wraith,   0, true,  -0.1886f,  0.0000f, 1.1956f},
+    {Halo3VehicleId::Mauler,   0, true,   0.0054f,  0.0000f, 0.9307f},
+
+    // Walk-up turrets — the machinegun turret's point, shared (see the enum).
+    {Halo3VehicleId::StationaryTurret, 0, false, -0.2368f, 0.0000f, 0.5743f},
 };
 
+// `vehicle` is the seated parent's identity for a normal seat, or the
+// CARRIER's identity when the player is a mounted-turret gunner. Unknown
+// never matches, so an unidentified vehicle always falls back to stock.
 inline constexpr const Halo3SeatPoint* Halo3FindSeatPoint(
-    int directType, int seatIndex, int nativeInVehicle)
+    Halo3VehicleId vehicle, int seatIndex, bool mountedTurret)
 {
+    if (vehicle == Halo3VehicleId::Unknown)
+        return nullptr;
     for (const Halo3SeatPoint& p : kHalo3SeatPoints)
     {
-        if (static_cast<int>(p.directType) == directType &&
-            static_cast<int>(p.seatIndex) == seatIndex &&
-            (p.nativeRequired < 0 || p.nativeRequired == nativeInVehicle))
+        if (p.vehicle == vehicle && p.carrierFrame == mountedTurret &&
+            static_cast<int>(p.seatIndex) == seatIndex)
             return &p;
     }
     return nullptr;

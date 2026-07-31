@@ -4715,23 +4715,96 @@ int main()
               Halo3FindNearestTriplet(nullptr, 0, xformRef).index == -1,
             "Transform probe scans find planted basis and position triplets");
 
-        // C5 authored seat points: exact (type, seat) match; the native flag
-        // separates mounted from stationary turrets; unknown seats resolve to
-        // nothing so the camera stays stock.
-        const Halo3SeatPoint* hogDriver = Halo3FindSeatPoint(1, 0, 1);
-        const Halo3SeatPoint* hogPassenger = Halo3FindSeatPoint(1, 1, 1);
-        const Halo3SeatPoint* mountedTurret = Halo3FindSeatPoint(5, 0, 1);
-        const Halo3SeatPoint* stationaryTurret = Halo3FindSeatPoint(5, 0, 0);
-        Check(hogDriver && hogDriver->y > 0.1f &&
-              hogPassenger && hogPassenger->y < -0.1f &&
-              mountedTurret && stationaryTurret &&
-              mountedTurret != stationaryTurret &&
-              Halo3FindSeatPoint(3, 0, 1) == nullptr &&
-              Halo3FindSeatPoint(4, 0, 1) != nullptr &&
-              Halo3FindSeatPoint(7, 2, 1) != nullptr &&
-              Halo3FindSeatPoint(9, 0, 1) == nullptr &&
-              Halo3FindSeatPoint(1, 3, 1) == nullptr,
-            "Authored seat points resolve exactly and unknown seats stay stock");
+        // C8 identity resolution: physics type alone is a CLASS, so the
+        // definition fields the C7 log confirmed in process must separate the
+        // cousins, and anything unrecognised must resolve to Unknown.
+        {
+            Halo3DefinitionFields hogDef;
+            hogDef.physicsType = 1; hogDef.jeepValid = true;
+            hogDef.engineMoment = 2000.0f;              // C7 log, def=05F9
+            Halo3DefinitionFields gooseDef;
+            gooseDef.physicsType = 1; gooseDef.jeepValid = true;
+            gooseDef.engineMoment = 650.0f;             // C7 log, def=0517
+            Halo3DefinitionFields oddJeep;
+            oddJeep.physicsType = 1; oddJeep.jeepValid = true;
+            oddJeep.engineMoment = 1300.0f;             // neither -> stock
+            Halo3DefinitionFields blindJeep;
+            blindJeep.physicsType = 1;                  // block unreadable
+            Halo3DefinitionFields ghostDef;
+            ghostDef.physicsType = 3; ghostDef.scoutValid = true;
+            ghostDef.specificType = 1;
+            Halo3DefinitionFields wraithDef;
+            wraithDef.physicsType = 3; wraithDef.scoutValid = true;
+            wraithDef.specificType = 3;
+            Halo3DefinitionFields maulerDef;
+            maulerDef.physicsType = 3; maulerDef.scoutValid = true;
+            maulerDef.specificType = 4;
+            Halo3DefinitionFields scoutOdd;
+            scoutOdd.physicsType = 3; scoutOdd.scoutValid = true;
+            scoutOdd.specificType = 7;
+            Halo3DefinitionFields turretDef;
+            turretDef.physicsType = 5;                  // never a root identity
+            Halo3DefinitionFields tankDef;  tankDef.physicsType = 0;
+            Halo3DefinitionFields choppDef; choppDef.physicsType = 8;
+
+            const bool cousinsSplit =
+                Halo3ResolveVehicleId(hogDef) == Halo3VehicleId::Warthog &&
+                Halo3ResolveVehicleId(gooseDef) == Halo3VehicleId::Mongoose &&
+                Halo3ResolveVehicleId(ghostDef) == Halo3VehicleId::Ghost &&
+                Halo3ResolveVehicleId(wraithDef) == Halo3VehicleId::Wraith &&
+                Halo3ResolveVehicleId(maulerDef) == Halo3VehicleId::Mauler &&
+                Halo3ResolveVehicleId(tankDef) == Halo3VehicleId::Scorpion &&
+                Halo3ResolveVehicleId(choppDef) == Halo3VehicleId::Chopper;
+            const bool unknownsStayUnknown =
+                Halo3ResolveVehicleId(oddJeep) == Halo3VehicleId::Unknown &&
+                Halo3ResolveVehicleId(blindJeep) == Halo3VehicleId::Unknown &&
+                Halo3ResolveVehicleId(scoutOdd) == Halo3VehicleId::Unknown &&
+                Halo3ResolveVehicleId(turretDef) == Halo3VehicleId::Unknown &&
+                Halo3ResolveVehicleId(Halo3DefinitionFields{}) ==
+                    Halo3VehicleId::Unknown;
+
+            // The two authored jeep constants must not be within tolerance of
+            // each other, or the resolver would be a coin toss.
+            const bool constantsSeparate =
+                std::fabs(kHalo3WarthogEngineMoment -
+                          kHalo3MongooseEngineMoment) >
+                2.0f * kHalo3EngineMomentTolerance;
+
+            // Seat lookup keys on identity, not type: a mongoose must never
+            // receive the warthog point, mounted gunners come from the
+            // carrier's identity, and Unknown never resolves to anything.
+            const Halo3SeatPoint* hogDriver = Halo3FindSeatPoint(
+                Halo3VehicleId::Warthog, 0, false);
+            const Halo3SeatPoint* hogGunner = Halo3FindSeatPoint(
+                Halo3VehicleId::Warthog, 0, true);
+            const Halo3SeatPoint* gooseDriver = Halo3FindSeatPoint(
+                Halo3VehicleId::Mongoose, 0, false);
+            const Halo3SeatPoint* hogPassenger = Halo3FindSeatPoint(
+                Halo3VehicleId::Warthog, 1, false);
+            const bool lookupOk =
+                hogDriver && hogDriver->y > 0.1f && !hogDriver->carrierFrame &&
+                hogPassenger && hogPassenger->y < -0.1f &&
+                gooseDriver && gooseDriver != hogDriver &&
+                std::fabs(gooseDriver->z - hogDriver->z) > 0.1f &&
+                hogGunner && hogGunner->carrierFrame &&
+                hogGunner != hogDriver &&
+                // the gunner point is the same key but a different frame
+                Halo3FindSeatPoint(Halo3VehicleId::Mongoose, 0, true) ==
+                    nullptr &&
+                Halo3FindSeatPoint(Halo3VehicleId::Unknown, 0, false) ==
+                    nullptr &&
+                Halo3FindSeatPoint(Halo3VehicleId::Ghost, 1, false) ==
+                    nullptr &&
+                Halo3FindSeatPoint(Halo3VehicleId::Hornet, 2, false) !=
+                    nullptr &&
+                Halo3FindSeatPoint(Halo3VehicleId::Banshee, 3, false) ==
+                    nullptr;
+
+            Check(cousinsSplit && unknownsStayUnknown && constantsSeparate &&
+                  lookupOk,
+                "Vehicle identity separates same-type cousins and an "
+                "unidentified vehicle resolves to no point at all");
+        }
 
         // C7 frame composition: a mounted turret's parent-relative frame must
         // compose through the carrier. Carrier at (10, 20, -5) yawed 90° left
@@ -4778,6 +4851,52 @@ int main()
                   !Halo3AnchorWithinBounds(skyPos, boundsCenter, 1e9f, 2.0f),
                 "Frame composition carries mounted turrets and the sanity "
                 "gate rejects wrong-frame anchors");
+        }
+
+        // C8 fingerprint: the same physics type covers several vehicles, so
+        // the authored point is keyed on the tag's node-0 offset recovered
+        // from data already sampled. It must be independent of where the
+        // vehicle is and which way it faces, and ambiguity must never pick.
+        {
+            // Warthog-like: node 0 sits 0.30 up and 0.05 forward of the origin.
+            const float node0[3] = {0.05f, 0.0f, 0.30f};
+            // Same vehicle parked at the origin facing +X...
+            Halo3Frame a{};
+            a.fwd[0] = 1.0f; a.up[2] = 1.0f;
+            float centerA[3] = {0.05f, 0.0f, 0.30f};
+            float fpA[3] = {0.0f, 0.0f, 0.0f};
+            const bool okA = Halo3ComputeFingerprint(a, centerA, fpA);
+            // ...and the same vehicle far away, yawed 90 deg left (fwd = +Y).
+            Halo3Frame b{};
+            b.pos[0] = 120.5f; b.pos[1] = -44.25f; b.pos[2] = 8.0f;
+            b.fwd[1] = 1.0f; b.up[2] = 1.0f;
+            // world center = pos + fwd*0.05 + up*0.30 (left is unused here)
+            float centerB[3] = {120.5f, -44.25f + 0.05f, 8.0f + 0.30f};
+            float fpB[3] = {0.0f, 0.0f, 0.0f};
+            const bool okB = Halo3ComputeFingerprint(b, centerB, fpB);
+            const bool invariant = okA && okB &&
+                Halo3FingerprintDistance(fpA, node0) < 1e-4f &&
+                Halo3FingerprintDistance(fpB, node0) < 1e-4f;
+
+            // A degenerate frame must refuse rather than emit junk.
+            Halo3Frame bad = a;
+            bad.up[2] = 0.0f;
+            float ignored[3];
+            const bool refuses = !Halo3ComputeFingerprint(bad, centerA, ignored);
+
+            // Uniqueness: close winner with a distant runner-up identifies;
+            // two close candidates are ambiguous and must produce no point;
+            // a lone candidate that is simply too far also fails.
+            const bool picks = Halo3FingerprintIsUnique(0.02f, 0.55f);
+            const bool ambiguous = !Halo3FingerprintIsUnique(0.02f, 0.08f);
+            const bool tooFar = !Halo3FingerprintIsUnique(0.40f, 9.0f);
+            const bool loneOk = Halo3FingerprintIsUnique(
+                0.01f, std::numeric_limits<float>::infinity());
+
+            Check(invariant && refuses && picks && ambiguous && tooFar &&
+                  loneOk,
+                "Bounding-center fingerprint is pose-invariant and refuses to "
+                "identify a vehicle when two candidates are both plausible");
         }
 
         // C9 seat yaw: the view must turn with the hull. Entry references the

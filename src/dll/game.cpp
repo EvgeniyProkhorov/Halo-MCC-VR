@@ -5176,6 +5176,9 @@ namespace
         std::atomic<uint32_t> nativeInVehicle{0};
         std::atomic<uint32_t> frameStatus{0};      // Halo3FrameStatus
         std::atomic<uint32_t> definitionIndex{0xFFFFFFFFu};
+        std::atomic<uint32_t> vehicleId{
+            static_cast<uint32_t>(Halo3VehicleId::Unknown)};
+        std::atomic<uint32_t> mountedTurret{0};
     };
     Halo3VehicleProbe g_halo3VehicleProbe;
     std::atomic<uint64_t> g_halo3VehicleProbeKey{~0ull};
@@ -5218,8 +5221,71 @@ namespace
         int32_t directType = -1;
         int32_t seatIndex = -1;
         int32_t nativeInVehicle = 0;
+        // C8: the identity the authored point is keyed on — the seated
+        // parent's, or the CARRIER's when the player is a mounted-turret
+        // gunner (whose point is authored in carrier space). Unknown never
+        // resolves to a point, so an unidentified vehicle stays stock.
+        uint32_t vehicleId =
+            static_cast<uint32_t>(Halo3VehicleId::Unknown);
+        int32_t mountedTurret = 0;
     };
     Halo3VehicleTransform g_halo3VehicleTransform;
+
+    // C8: definition index -> vehicle identity, resolved once per distinct
+    // vehicle instead of per frame. Direct-mapped and tiny; a collision only
+    // costs a re-read. Tag data is immutable while a map is loaded, and the
+    // runtime generation keys the entries so a title change cannot serve a
+    // previous session's identity.
+    struct Halo3IdentitySlot
+    {
+        uint32_t defIndex = 0xFFFFFFFFu;
+        uint32_t generation = 0;
+        Halo3VehicleId id = Halo3VehicleId::Unknown;
+    };
+    Halo3IdentitySlot g_halo3IdentityCache[16];
+
+    // Defined with the identity probe below; SEH-guarded internally.
+    bool Halo3ReadDefinitionFields(uint32_t defIndex, int32_t counts[10],
+                                   float jeepFields[2], int32_t* scoutSpecific,
+                                   float* scoutAccel, float tails[3]);
+
+    // Physics type is a class, not a vehicle. The §E5 definition fields the
+    // C7 session confirmed in process (engine_moment 2000 hog / 650 mongoose;
+    // alien_scout specific_type 1/3/4) turn it into an identity. A read that
+    // fails, or a value matching nothing, yields Unknown — never a guess.
+    Halo3VehicleId Halo3ResolveIdentityCached(uint32_t defIndex,
+                                              int physicsType,
+                                              uint32_t generation)
+    {
+        if (defIndex > 0xFFFFu)
+            return Halo3VehicleId::Unknown;
+        // Mix the high nibble in: a seated gunner resolves both the gun and
+        // its carrier every frame, and adjacent tag indices must not collide
+        // into the same slot and thrash.
+        Halo3IdentitySlot& slot =
+            g_halo3IdentityCache[(defIndex ^ (defIndex >> 4)) & 15u];
+        if (slot.defIndex == defIndex && slot.generation == generation)
+            return slot.id;
+        Halo3DefinitionFields fields;
+        fields.physicsType = physicsType;
+        int32_t counts[10] = {};
+        float jeep[2] = {-1.0f, -1.0f};
+        int32_t scoutSpecific = -1;
+        float scoutAccel = -1.0f;
+        float tails[3] = {-1.0f, -1.0f, -1.0f};
+        if (Halo3ReadDefinitionFields(defIndex, counts, jeep, &scoutSpecific,
+                                      &scoutAccel, tails))
+        {
+            fields.jeepValid = counts[1] == 1;
+            fields.engineMoment = jeep[0];
+            fields.scoutValid = counts[3] == 1;
+            fields.specificType = scoutSpecific;
+        }
+        slot.defIndex = defIndex;
+        slot.generation = generation;
+        slot.id = Halo3ResolveVehicleId(fields);
+        return slot.id;
+    }
 
     // C3 first-person camera state, all owned by the engine camera thread
     // (the sampler and ApplyHeadLook both run inside CamCopyHook). The
@@ -5279,6 +5345,10 @@ namespace
         bool grandWindowValid = false;
         bool chainTooDeep = false;
         uint32_t defIndex = 0xFFFFFFFFu;
+        // C8: the carrier's own definition, so a mounted-turret gunner can be
+        // identified (and anchored) by the vehicle carrying the gun.
+        uint32_t carrierDefIndex = 0xFFFFFFFFu;
+        int carrierType = -1;
         bool faulted = false;
         __try
         {
@@ -5360,6 +5430,13 @@ namespace
                                                    kHalo3ParentCaptureBase,
                                                sizeof(grandWindow));
                                         grandWindowValid = true;
+                                        carrierDefIndex =
+                                            *reinterpret_cast<const uint16_t*>(
+                                                grandData);
+                                        carrierType =
+                                            g_halo3VehicleTypeAccessor(
+                                                static_cast<unsigned short>(
+                                                    carrierDefIndex));
                                         chainTooDeep =
                                             *reinterpret_cast<const int32_t*>(
                                                 grandData +
@@ -5405,6 +5482,30 @@ namespace
         // stored frame is parent-relative (C6 log proof). Either way the
         // frame origin must pass the bounding-sphere sanity gate or the
         // stock chase view stands for the whole seat session.
+        // C8: identity, resolved outside the sampler's SEH block (the tag walk
+        // carries its own) and cached, so this is a lookup on all but the
+        // first frame of a seat session.
+        const Halo3VehicleId directId =
+            Halo3ResolveIdentityCached(defIndex, directType, generation);
+        // A mounted turret gunner: the direct parent is the gun (physics type
+        // 5) but the native flag still reports the ULTIMATE parent as a
+        // non-turret, i.e. there is a carrier under it. C7 log: chaingun
+        // directType=5 nativeInVehicle=1, stationary turret directType=5
+        // nativeInVehicle=0.
+        const bool mountedTurret = seated && directType == 5 && native == 1 &&
+            grandWindowValid && !chainTooDeep;
+        const Halo3VehicleId carrierId = mountedTurret
+            ? Halo3ResolveIdentityCached(carrierDefIndex, carrierType,
+                                         generation)
+            : Halo3VehicleId::Unknown;
+        // A turret with no carrier under it is one the player walked up to.
+        const bool stationaryTurret =
+            seated && directType == 5 && native == 0;
+        const Halo3VehicleId anchorId = mountedTurret
+            ? carrierId
+            : (stationaryTurret ? Halo3VehicleId::StationaryTurret
+                                : directId);
+
         Halo3FrameStatus frameStatus = Halo3FrameStatus::None;
         {
             Halo3VehicleTransform& xf = g_halo3VehicleTransform;
@@ -5425,7 +5526,29 @@ namespace
                     return f;
                 };
                 const Halo3Frame local = frameFrom(parentWindow);
-                if (parentOfParent == -1)
+                // Which object's bounding sphere the anchor is sanity-checked
+                // against — the frame's own owner.
+                const float* boundsWindow = parentWindow;
+                if (mountedTurret)
+                {
+                    // C8: the gunner point is authored in CARRIER space, so
+                    // take the carrier's frame verbatim. C7 composed
+                    // carrier ∘ local instead, which is ~0.42 wu (1.3 m) low:
+                    // an attached child's stored transform is relative to the
+                    // parent's ATTACHMENT NODE, not its object origin (the
+                    // hog's `turret` marker's raw node-local translation
+                    // matched the measured child position exactly, while the
+                    // node-composed tag position did not). Anchoring in
+                    // carrier space never touches that node matrix. Nothing
+                    // is lost: a mounted turret's object frame is mount-fixed
+                    // and does not follow gun aim.
+                    world = frameFrom(grandWindow);
+                    frameOk = Halo3FrameOrthonormal(world);
+                    frameStatus = frameOk ? Halo3FrameStatus::Carrier
+                                          : Halo3FrameStatus::Insane;
+                    boundsWindow = grandWindow;
+                }
+                else if (parentOfParent == -1)
                 {
                     world = local;
                     frameOk = Halo3FrameOrthonormal(world);
@@ -5446,9 +5569,9 @@ namespace
                 }
                 if (frameOk)
                 {
-                    const float* center = parentWindow +
+                    const float* center = boundsWindow +
                         (0x1C - kHalo3ParentCaptureBase) / 4;
-                    const float radius = parentWindow[
+                    const float radius = boundsWindow[
                         (0x28 - kHalo3ParentCaptureBase) / 4];
                     if (!Halo3AnchorWithinBounds(world.pos, center, radius,
                                                  2.0f))
@@ -5471,6 +5594,8 @@ namespace
                 xf.directType = directType;
                 xf.seatIndex = seat;
                 xf.nativeInVehicle = static_cast<int32_t>(native);
+                xf.vehicleId = static_cast<uint32_t>(anchorId);
+                xf.mountedTurret = mountedTurret ? 1 : 0;
                 xf.valid.store(1, std::memory_order_relaxed);
                 xf.sampleMs.store(nowMs, std::memory_order_relaxed);
                 xf.seq.fetch_add(1, std::memory_order_release);  // -> even
@@ -5541,6 +5666,10 @@ namespace
         probe.frameStatus.store(static_cast<uint32_t>(frameStatus),
                                 std::memory_order_relaxed);
         probe.definitionIndex.store(defIndex, std::memory_order_relaxed);
+        probe.vehicleId.store(static_cast<uint32_t>(anchorId),
+                              std::memory_order_relaxed);
+        probe.mountedTurret.store(mountedTurret ? 1u : 0u,
+                                  std::memory_order_relaxed);
         probe.seq.fetch_add(1, std::memory_order_release);   // -> even
     }
 
@@ -5626,20 +5755,24 @@ namespace
             100)
             return false;
         float pos[3], fwd[3], up[3];
-        int type, seatIndex, native;
+        int seatIndex;
+        uint32_t identity;
+        bool mounted;
         const uint32_t seq = xf.seq.load(std::memory_order_acquire);
         if (seq & 1u)
             return false;
         memcpy(pos, xf.pos, sizeof(pos));
         memcpy(fwd, xf.fwd, sizeof(fwd));
         memcpy(up, xf.up, sizeof(up));
-        type = xf.directType;
         seatIndex = xf.seatIndex;
-        native = xf.nativeInVehicle;
+        identity = xf.vehicleId;
+        mounted = xf.mountedTurret != 0;
         if (xf.seq.load(std::memory_order_acquire) != seq)
             return false;
-        const Halo3SeatPoint* point =
-            Halo3FindSeatPoint(type, seatIndex, native);
+        // A mounted gunner's point is keyed and framed by its CARRIER, so its
+        // seat index on the gun tag (always 0) is the right key there too.
+        const Halo3SeatPoint* point = Halo3FindSeatPoint(
+            static_cast<Halo3VehicleId>(identity), seatIndex, mounted);
         if (!point)
             return false;
         for (int i = 0; i < 3; ++i)
@@ -5676,6 +5809,23 @@ namespace
             static_cast<uint32_t>(Halo3VehicleState::Vehicle))
             return false;
         return Game_Halo3VehicleState().state == Halo3VehicleState::Vehicle;
+    }
+
+    const char* Halo3VehicleIdName(uint32_t id)
+    {
+        switch (static_cast<Halo3VehicleId>(id))
+        {
+        case Halo3VehicleId::Scorpion: return "scorpion";
+        case Halo3VehicleId::Warthog:  return "warthog";
+        case Halo3VehicleId::Mongoose: return "mongoose";
+        case Halo3VehicleId::Ghost:    return "ghost";
+        case Halo3VehicleId::Wraith:   return "wraith";
+        case Halo3VehicleId::Mauler:   return "prowler";
+        case Halo3VehicleId::Banshee:  return "banshee";
+        case Halo3VehicleId::Hornet:   return "hornet";
+        case Halo3VehicleId::Chopper:  return "chopper";
+        default: return "unidentified";
+        }
     }
 
     const char* Halo3VehicleStateName(uint32_t state)
@@ -5829,19 +5979,24 @@ namespace
             probe.frameStatus.load(std::memory_order_relaxed);
         const uint32_t defIndex =
             probe.definitionIndex.load(std::memory_order_relaxed);
+        const uint32_t vehicleId =
+            probe.vehicleId.load(std::memory_order_relaxed);
+        const uint32_t mounted =
+            probe.mountedTurret.load(std::memory_order_relaxed);
         if (probe.seq.load(std::memory_order_acquire) != seq)
             return; // a newer capture started; re-read next tick
         const Halo3SeatPoint* seatPoint = Halo3FindSeatPoint(
-            directType, seat, static_cast<int>(native));
+            static_cast<Halo3VehicleId>(vehicleId), seat, mounted != 0);
         static const char* const frameNames[] = {
-            "none", "direct", "composed", "INSANE", "too-deep"};
+            "none", "direct", "composed", "INSANE", "too-deep", "carrier"};
         LOG("H3 vehicle probe: state=%s unit=%08X seat=%d parent=%08X "
-            "parentKind=%u directType=%d nativeInVehicle=%u seatCam=%s "
-            "frame=%s def=%04X",
+            "parentKind=%u directType=%d nativeInVehicle=%u id=%s%s "
+            "seatCam=%s frame=%s def=%04X",
             Halo3VehicleStateName(state), (unsigned)unit, seat,
             (unsigned)parent, parentKind, directType, native,
+            Halo3VehicleIdName(vehicleId), mounted ? "(carrier)" : "",
             seatPoint ? "authored" : "none(stock)",
-            frameStatus < 5 ? frameNames[frameStatus] : "?", defIndex);
+            frameStatus < 6 ? frameNames[frameStatus] : "?", defIndex);
         g_halo3VehicleProbeLoggedSeq.store(seq, std::memory_order_relaxed);
         if (state == static_cast<uint32_t>(Halo3VehicleState::Vehicle))
             LogHalo3DefinitionProbe(defIndex, directType);
