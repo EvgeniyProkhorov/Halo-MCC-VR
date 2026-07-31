@@ -102,6 +102,14 @@ struct Config
 
     // Aim crosshair (stereo only): a small reticle floating where the weapon
     // actually shoots. Drawn as a compositor quad layer, so it costs no game
+    // First-person vehicles (currently Halo 3; other titles ignore these
+    // until they publish a vehicle state). The camera sits at the engine's
+    // own per-seat pivot instead of the third-person chase position; head
+    // look and leaning stay fully live. 0 restores the stock chase view.
+    bool vehicle_first_person = true;
+    float vehicle_cam_forward_m = 0.10f; // + = toward the windshield
+    float vehicle_cam_up_m = 0.05f;      // + = raise out of the seat
+
     // rendering. The game's own HUD reticle sits at head-center and is wrong
     // whenever hand aim is on; this one is the truth.
     bool crosshair = true;

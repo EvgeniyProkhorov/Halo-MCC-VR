@@ -60,6 +60,10 @@ static void Clamp()
                                       -kMenuOffsetLimit, kMenuOffsetLimit);
     g_config.turn_snap_deg = std::clamp(g_config.turn_snap_deg, 5.0f, 90.0f);
     g_config.turn_smooth_deg_s = std::clamp(g_config.turn_smooth_deg_s, 30.0f, 360.0f);
+    g_config.vehicle_cam_forward_m =
+        std::clamp(g_config.vehicle_cam_forward_m, -0.5f, 1.0f);
+    g_config.vehicle_cam_up_m =
+        std::clamp(g_config.vehicle_cam_up_m, -0.5f, 1.0f);
     g_config.crosshair_distance_m = std::clamp(g_config.crosshair_distance_m, 2.0f, 50.0f);
     g_config.crosshair_size_deg = std::clamp(g_config.crosshair_size_deg, 0.3f, 20.0f);
     g_config.reticle_r = std::clamp(g_config.reticle_r, 0.0f, 1.0f);
@@ -190,6 +194,12 @@ void ConfigLoad(const wchar_t* path)
             continue; // retired switches; accept old config files quietly
         else if (!strcmp(key, "dpad_hand"))
             g_config.dpad_hand = atoi(val) != 0 ? 1 : 0;
+        else if (!strcmp(key, "vehicle_first_person"))
+            g_config.vehicle_first_person = atoi(val) != 0;
+        else if (!strcmp(key, "vehicle_cam_forward_m"))
+            g_config.vehicle_cam_forward_m = (float)atof(val);
+        else if (!strcmp(key, "vehicle_cam_up_m"))
+            g_config.vehicle_cam_up_m = (float)atof(val);
         else if (!strcmp(key, "crosshair"))
             g_config.crosshair = atoi(val) != 0;
         else if (!strcmp(key, "crosshair_distance_m"))
@@ -544,6 +554,22 @@ void ConfigSave()
     fprintf(f, "# (default %.2f, range -0.3 to 0.3; ~0.11 is about 4 inches)\n",
             d.muzzle_height_m);
     fprintf(f, "muzzle_height_m = %.2f\n\n", g_config.muzzle_height_m);
+    fprintf(f, "# -------------------------------------------------------------------\n");
+    fprintf(f, "#  FIRST-PERSON VEHICLES\n");
+    fprintf(f, "#  Sit in the seat instead of floating behind the vehicle.\n");
+    fprintf(f, "# -------------------------------------------------------------------\n\n");
+    fprintf(f, "# First-person vehicle camera (currently Halo 3). The position is the\n");
+    fprintf(f, "# game's own per-seat camera pivot; your head look and leaning stay\n");
+    fprintf(f, "# live. 0 = the stock behind-the-vehicle view.\n");
+    fprintf(f, "# (default %d)\n", d.vehicle_first_person ? 1 : 0);
+    fprintf(f, "vehicle_first_person = %d\n\n",
+            g_config.vehicle_first_person ? 1 : 0);
+    fprintf(f, "# Trim applied to every seat, in meters: forward toward the\n");
+    fprintf(f, "# windshield, and up out of the seat.\n");
+    fprintf(f, "# (defaults %.2f / %.2f, range -0.5 to 1)\n",
+            d.vehicle_cam_forward_m, d.vehicle_cam_up_m);
+    fprintf(f, "vehicle_cam_forward_m = %.2f\n", g_config.vehicle_cam_forward_m);
+    fprintf(f, "vehicle_cam_up_m = %.2f\n\n", g_config.vehicle_cam_up_m);
     fprintf(f, "# -------------------------------------------------------------------\n");
     fprintf(f, "#  EXPERIMENTAL SCOPE\n");
     fprintf(f, "#  Universal physical placement and performance preferences.\n");

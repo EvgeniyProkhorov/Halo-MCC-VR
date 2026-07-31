@@ -50,6 +50,12 @@ inline constexpr size_t kHalo3ObserverCaptureFloats = 40; // +0x100..+0x1A0
 inline constexpr uintptr_t kHalo3ObserverPosOffset = 0x11C;
 inline constexpr uintptr_t kHalo3ObserverFwdOffset = 0x144;
 inline constexpr uintptr_t kHalo3ObserverUpOffset = 0x150;
+// Measured in the C1 headset session (evidence doc, runtime results): the
+// engine-evaluated per-seat camera pivot. On foot it equals the camera
+// position exactly (focus distance 0); in a seat it is the authored pivot the
+// chase camera hangs behind. The C3 first-person camera anchors on this
+// absolute triplet — never on pos+fwd*d, which C1 proved lags during turns.
+inline constexpr uintptr_t kHalo3ObserverFocusOffset = 0x18C;
 
 // Vehicle physics-type facts (§E1/§E2/§E4): 10 authored blocks in enum order
 // human_tank..guardian; the retail accessor returns the first non-empty block

@@ -3980,6 +3980,7 @@ int main()
         "cutscene_theater_flip_depth", "cutscene_theater_width_m",
         "cutscene_theater_distance_m",
         "turn_smooth", "turn_snap_deg", "turn_smooth_deg_s", "dpad_hand",
+        "vehicle_first_person", "vehicle_cam_forward_m", "vehicle_cam_up_m",
         "crosshair", "crosshair_distance_m", "crosshair_size_deg",
         "reticle_r", "reticle_g", "reticle_b", "kill_reticle",
         "gun_scale", "left_hand_scale", "gun_pitch_deg", "gun_yaw_deg",

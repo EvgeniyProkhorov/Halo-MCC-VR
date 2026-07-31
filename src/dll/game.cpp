@@ -4900,6 +4900,11 @@ namespace
             !g_reduceCinematicFovApplied.load(std::memory_order_acquire);
     }
 
+    // C3 first-person vehicle camera helpers, defined with the vehicle probe
+    // module below (they run on this same engine camera thread).
+    bool Halo3ReadSeatAnchor(float out[3]);
+    bool Halo3VehicleFpActive();
+
     void ApplyHeadLook(void* src)
     {
         if (!src)
@@ -5017,6 +5022,30 @@ namespace
             up[0] = (-sgp * cgy) * cr + sgy * sr;
             up[1] = (-sgp * sgy) * cr - cgy * sr;
             up[2] = cgp * cr;
+        }
+
+        // First-person vehicle camera (C3): replace the chase-camera position
+        // with the engine-evaluated per-seat pivot (observer +0x18C, measured
+        // in the C1 session — the absolute focus, NOT pos+fwd*d, which C1
+        // proved lags the seat during turns), plus the user's forward/up
+        // trims along the current view heading. Forward/up were written from
+        // the HMD above and the lean block below adds full 6DOF head motion
+        // on top, so the player's head owns the view from the seat. Never
+        // active in cinematics; every input is frame-level, so anything
+        // stale or missing leaves the stock chase position untouched.
+        if (!cinematic && Halo3VehicleFpActive())
+        {
+            float anchor[3];
+            if (Halo3ReadSeatAnchor(anchor))
+            {
+                const float trimScale = g_worldScale.load();
+                const float trimFwd =
+                    g_config.vehicle_cam_forward_m * trimScale;
+                const float trimUp = g_config.vehicle_cam_up_m * trimScale;
+                pos[0] = anchor[0] + cgy * trimFwd;
+                pos[1] = anchor[1] + sgy * trimFwd;
+                pos[2] = anchor[2] + trimUp;
+            }
         }
 
         // Position (leaning): shift the camera by the headset's room-space move,
@@ -5148,9 +5177,19 @@ namespace
     {
         std::atomic<uint32_t> seq{0};      // even = stable, odd = mid-write
         std::atomic<uint32_t> valid{0};
+        std::atomic<uint64_t> captureMs{0};
         float floats[kHalo3ObserverCaptureFloats];
     };
     Halo3ObserverCapture g_halo3ObserverCapture;
+
+    // C3 first-person camera state, all owned by the engine camera thread
+    // (the sampler and ApplyHeadLook both run inside CamCopyHook). The
+    // debounce keeps seat entry/exit swings and rapid seat switches from
+    // flickering the substitution; the atomic mirror is what the camera gate
+    // reads each frame.
+    Halo3VehicleDebounce g_halo3VehicleFpDebounce;
+    std::atomic<uint32_t> g_halo3VehicleFpStable{
+        static_cast<uint32_t>(Halo3VehicleState::Unknown)};
 
     void Halo3DisableVehicleProbe(const char* /*reason logged by worker*/)
     {
@@ -5272,6 +5311,25 @@ namespace
                                  seated ? seat : -1),
             std::memory_order_release);
 
+        // C3: settle the first-person camera gate and fire the one-shot
+        // recenter on a settled seat entry/exit, so the head frame rebases to
+        // the vehicle's heading once the engine's entry swing is over. With
+        // the feature off this changes nothing — no recenter, and the gate
+        // mirror is never consumed.
+        const Halo3VehicleState previousStable = g_halo3VehicleFpDebounce.stable;
+        if (g_halo3VehicleFpDebounce.Update(state, kHalo3VehicleDebounceFrames))
+        {
+            g_halo3VehicleFpStable.store(
+                static_cast<uint32_t>(g_halo3VehicleFpDebounce.stable),
+                std::memory_order_relaxed);
+            if (g_config.vehicle_first_person &&
+                (g_halo3VehicleFpDebounce.stable == Halo3VehicleState::Vehicle ||
+                 previousStable == Halo3VehicleState::Vehicle))
+            {
+                g_needRecenter.store(true);
+            }
+        }
+
         // Publish probe fields for the worker only when something changed.
         const uint64_t key =
             (static_cast<uint64_t>(static_cast<uint32_t>(unit)) << 32) ^
@@ -5323,6 +5381,8 @@ namespace
                 memcpy(cap.floats, observer + kHalo3ObserverCaptureBase,
                        sizeof(cap.floats));
                 cap.valid.store(1, std::memory_order_relaxed);
+                cap.captureMs.store(GetTickCount64(),
+                                    std::memory_order_relaxed);
                 cap.seq.fetch_add(1, std::memory_order_release);  // -> even
             }
         }
@@ -5332,6 +5392,50 @@ namespace
         }
         if (faulted)
             Halo3DisableVehicleProbe("observer capture fault");
+    }
+
+    // C3: read the engine-evaluated per-seat camera pivot (observer record
+    // +0x18C, C1-measured) out of the latest capture. Frame-level fail-open:
+    // a missing, torn, stale (>200 ms), or non-finite anchor returns false
+    // and the caller leaves the stock chase position untouched this frame.
+    bool Halo3ReadSeatAnchor(float out[3])
+    {
+        Halo3ObserverCapture& cap = g_halo3ObserverCapture;
+        if (!cap.valid.load(std::memory_order_acquire))
+            return false;
+        if (GetTickCount64() - cap.captureMs.load(std::memory_order_relaxed) >
+            200)
+            return false;
+        constexpr size_t focusIndex =
+            (kHalo3ObserverFocusOffset - kHalo3ObserverCaptureBase) / 4;
+        static_assert(focusIndex + 2 < kHalo3ObserverCaptureFloats,
+                      "focus triplet must sit inside the capture window");
+        const uint32_t seq = cap.seq.load(std::memory_order_acquire);
+        if (seq & 1u)
+            return false;
+        const float a0 = cap.floats[focusIndex];
+        const float a1 = cap.floats[focusIndex + 1];
+        const float a2 = cap.floats[focusIndex + 2];
+        if (cap.seq.load(std::memory_order_acquire) != seq)
+            return false;
+        if (!isfinite(a0) || !isfinite(a1) || !isfinite(a2))
+            return false;
+        out[0] = a0; out[1] = a1; out[2] = a2;
+        return true;
+    }
+
+    // C3 camera gate, evaluated once per camera write on the camera thread.
+    // Both the debounced state (entry/exit settling) and the raw snapshot
+    // (immediate frame-level staleness, generation keying, 500 ms sampler
+    // heartbeat) must agree on Vehicle before the substitution runs.
+    bool Halo3VehicleFpActive()
+    {
+        if (!g_config.vehicle_first_person)
+            return false;
+        if (g_halo3VehicleFpStable.load(std::memory_order_relaxed) !=
+            static_cast<uint32_t>(Halo3VehicleState::Vehicle))
+            return false;
+        return Game_Halo3VehicleState().state == Halo3VehicleState::Vehicle;
     }
 
     const char* Halo3VehicleStateName(uint32_t state)

@@ -160,6 +160,7 @@ namespace
         Cat_Comfort,
         Cat_Theatre,
         Cat_Controls,
+        Cat_Vehicles,
         Cat_WeaponAim,
         Cat_Crosshair,
         Cat_BodyHands,
@@ -185,6 +186,7 @@ namespace
         {"Comfort",       "The flat screen you see in menus, and how head motion feels."},
         {"3D Theatre",    "A room-fixed stereo screen used only when the game locks the cinematic camera."},
         {"Controls",      "Turning, gestures, and controller vibration."},
+        {"Vehicles",      "First-person driving: sit in the seat instead of floating behind the vehicle."},
         {"Weapon & Aim",  "Where the gun sits in your hand, and two-handed aiming."},
         {"Crosshair",     "The floating reticle that shows where the weapon really shoots."},
         {"Body & Hands",  "Arms, shoulders, and how much of Chief you can see."},
@@ -700,6 +702,24 @@ namespace
             changed = true;
         }
         ImGui::TextDisabled("L3+R3 recenters and toggles this menu; the right trigger clicks the VR pointer.");
+        }
+
+        if (g_activeCategory == Cat_Vehicles)
+        {
+        ImGui::Text("First-person vehicle camera (Halo 3)");
+        changed |= ImGui::Checkbox("Sit in the seat (first person)",
+                                   &g_config.vehicle_first_person);
+        ImGui::TextDisabled(
+            "OFF restores the stock behind-the-vehicle view instantly.");
+        ImGui::Spacing();
+        changed |= ImGui::SliderFloat("Seat forward (m)",
+            &g_config.vehicle_cam_forward_m, -0.50f, 1.00f, "%.2f");
+        changed |= ImGui::SliderFloat("Seat height (m)",
+            &g_config.vehicle_cam_up_m, -0.50f, 1.00f, "%.2f");
+        ImGui::TextDisabled(
+            "Trims applied to every seat. The base position is the game's own\n"
+            "per-seat camera pivot, so each vehicle already seats you where\n"
+            "its authors placed the camera focus.");
         }
 
         if (g_activeCategory == Cat_WeaponAim)
