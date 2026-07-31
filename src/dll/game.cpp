@@ -4900,9 +4900,9 @@ namespace
             !g_reduceCinematicFovApplied.load(std::memory_order_acquire);
     }
 
-    // C3 first-person vehicle camera helpers, defined with the vehicle probe
+    // First-person vehicle camera helpers, defined with the vehicle probe
     // module below (they run on this same engine camera thread).
-    bool Halo3ReadSeatAnchor(float out[3]);
+    bool Halo3ComputeAuthoredAnchor(float out[3]);
     bool Halo3VehicleFpActive();
 
     void ApplyHeadLook(void* src)
@@ -5024,19 +5024,20 @@ namespace
             up[2] = cgp * cr;
         }
 
-        // First-person vehicle camera (C3): replace the chase-camera position
-        // with the engine-evaluated per-seat pivot (observer +0x18C, measured
-        // in the C1 session — the absolute focus, NOT pos+fwd*d, which C1
-        // proved lags the seat during turns), plus the user's forward/up
-        // trims along the current view heading. Forward/up were written from
-        // the HMD above and the lean block below adds full 6DOF head motion
-        // on top, so the player's head owns the view from the seat. Never
-        // active in cinematics; every input is frame-level, so anything
-        // stale or missing leaves the stock chase position untouched.
+        // First-person vehicle camera (C5): place the camera on the
+        // USER-AUTHORED seat point (Blender kit), carried by the measured
+        // vehicle transform, plus the forward/up trims along the current view
+        // heading. Forward/up were written from the HMD above and the lean
+        // block below adds full 6DOF head motion on top, so the player's
+        // head owns the view from the seat. Never active in cinematics;
+        // every input is frame-level, so anything stale, unproven, or
+        // lacking an authored point leaves the stock chase position
+        // untouched. (The C3 engine-focus anchor was headset-rejected —
+        // inside/under the hull on marker-less driver seats.)
         if (!cinematic && Halo3VehicleFpActive())
         {
             float anchor[3];
-            if (Halo3ReadSeatAnchor(anchor))
+            if (Halo3ComputeAuthoredAnchor(anchor))
             {
                 const float trimScale = g_worldScale.load();
                 const float trimFwd =
@@ -5195,6 +5196,24 @@ namespace
     };
     Halo3ParentCapture g_halo3ParentCapture;
 
+    // C5 vehicle transform snapshot: the measured world position and
+    // orientation basis of the seated DIRECT parent, plus the seat identity,
+    // published by the sampler each camera frame while seated and consumed by
+    // the authored-point camera. Single writer (camera thread), seqlock.
+    struct Halo3VehicleTransform
+    {
+        std::atomic<uint32_t> seq{0};      // even = stable, odd = mid-write
+        std::atomic<uint32_t> valid{0};
+        std::atomic<uint64_t> sampleMs{0};
+        float pos[3];
+        float fwd[3];
+        float up[3];
+        int32_t directType = -1;
+        int32_t seatIndex = -1;
+        int32_t nativeInVehicle = 0;
+    };
+    Halo3VehicleTransform g_halo3VehicleTransform;
+
     // C3 first-person camera state, all owned by the engine camera thread
     // (the sampler and ApplyHeadLook both run inside CamCopyHook). The
     // debounce keeps seat entry/exit swings and rapid seat switches from
@@ -5227,9 +5246,13 @@ namespace
             g_halo3RuntimeGeneration.load(std::memory_order_acquire);
         if (!generation)
             return;
+        // Seated: sample every camera frame so the authored-point camera
+        // tracks the vehicle at render rate. On foot the 15 ms latch stands.
+        const bool seatedLastSample =
+            g_halo3VehicleTransform.valid.load(std::memory_order_relaxed) != 0;
         const uint64_t last =
             g_halo3VehicleSampleMs.load(std::memory_order_relaxed);
-        if (nowMs - last < 15)
+        if (!seatedLastSample && nowMs - last < 15)
             return;
         g_halo3VehicleSampleMs.store(nowMs, std::memory_order_relaxed);
 
@@ -5326,6 +5349,36 @@ namespace
 
         const bool seated = seat >= 0 && parent != -1 &&
             parentKind == kHalo3ObjectKindVehicle;
+        // Publish the measured vehicle transform for the authored-point
+        // camera (C4-proven offsets within the captured window).
+        {
+            Halo3VehicleTransform& xf = g_halo3VehicleTransform;
+            if (seated && parentWindowValid)
+            {
+                const auto at = [&](uintptr_t off) {
+                    return parentWindow +
+                        (off - kHalo3ParentCaptureBase) / 4;
+                };
+                xf.seq.fetch_add(1, std::memory_order_acq_rel);  // -> odd
+                memcpy(xf.pos, at(kHalo3ObjectPositionOffset),
+                       3 * sizeof(float));
+                memcpy(xf.fwd, at(kHalo3ObjectForwardOffset),
+                       3 * sizeof(float));
+                memcpy(xf.up, at(kHalo3ObjectUpOffset), 3 * sizeof(float));
+                xf.directType = directType;
+                xf.seatIndex = seat;
+                xf.nativeInVehicle = static_cast<int32_t>(native);
+                xf.valid.store(1, std::memory_order_relaxed);
+                xf.sampleMs.store(nowMs, std::memory_order_relaxed);
+                xf.seq.fetch_add(1, std::memory_order_release);  // -> even
+            }
+            else if (xf.valid.load(std::memory_order_relaxed))
+            {
+                xf.seq.fetch_add(1, std::memory_order_acq_rel);  // -> odd
+                xf.valid.store(0, std::memory_order_relaxed);
+                xf.seq.fetch_add(1, std::memory_order_release);  // -> even
+            }
+        }
         const Halo3VehicleState state = unit == -1
             ? Halo3VehicleState::Unknown
             : (seated ? Halo3VehicleState::Vehicle : Halo3VehicleState::OnFoot);
@@ -5452,6 +5505,57 @@ namespace
         return true;
     }
 
+    // C5: place the user's Blender-authored seat point in the world using the
+    // measured vehicle transform. Frame-level fail-open: stale (>100 ms),
+    // torn, non-finite, or non-orthonormal inputs — or a seat without an
+    // authored point — return false and the stock chase view stands.
+    bool Halo3ComputeAuthoredAnchor(float out[3])
+    {
+        Halo3VehicleTransform& xf = g_halo3VehicleTransform;
+        if (!xf.valid.load(std::memory_order_acquire))
+            return false;
+        if (GetTickCount64() - xf.sampleMs.load(std::memory_order_relaxed) >
+            100)
+            return false;
+        float pos[3], fwd[3], up[3];
+        int type, seatIndex, native;
+        const uint32_t seq = xf.seq.load(std::memory_order_acquire);
+        if (seq & 1u)
+            return false;
+        memcpy(pos, xf.pos, sizeof(pos));
+        memcpy(fwd, xf.fwd, sizeof(fwd));
+        memcpy(up, xf.up, sizeof(up));
+        type = xf.directType;
+        seatIndex = xf.seatIndex;
+        native = xf.nativeInVehicle;
+        if (xf.seq.load(std::memory_order_acquire) != seq)
+            return false;
+        const Halo3SeatPoint* point =
+            Halo3FindSeatPoint(type, seatIndex, native);
+        if (!point)
+            return false;
+        for (int i = 0; i < 3; ++i)
+            if (!isfinite(pos[i]) || !isfinite(fwd[i]) || !isfinite(up[i]))
+                return false;
+        const float fLen = fwd[0] * fwd[0] + fwd[1] * fwd[1] + fwd[2] * fwd[2];
+        const float uLen = up[0] * up[0] + up[1] * up[1] + up[2] * up[2];
+        const float fu = fwd[0] * up[0] + fwd[1] * up[1] + fwd[2] * up[2];
+        if (fabsf(fLen - 1.0f) > 0.05f || fabsf(uLen - 1.0f) > 0.05f ||
+            fabsf(fu) > 0.15f)
+            return false;
+        const float left[3] = {
+            up[1] * fwd[2] - up[2] * fwd[1],
+            up[2] * fwd[0] - up[0] * fwd[2],
+            up[0] * fwd[1] - up[1] * fwd[0]};
+        out[0] = pos[0] + fwd[0] * point->x + left[0] * point->y +
+            up[0] * point->z;
+        out[1] = pos[1] + fwd[1] * point->x + left[1] * point->y +
+            up[1] * point->z;
+        out[2] = pos[2] + fwd[2] * point->x + left[2] * point->y +
+            up[2] * point->z;
+        return true;
+    }
+
     // C3 camera gate, evaluated once per camera write on the camera thread.
     // Both the debounced state (entry/exit settling) and the raw snapshot
     // (immediate frame-level staleness, generation keying, 500 ms sampler
@@ -5517,10 +5621,13 @@ namespace
             probe.nativeInVehicle.load(std::memory_order_relaxed);
         if (probe.seq.load(std::memory_order_acquire) != seq)
             return; // a newer capture started; re-read next tick
+        const Halo3SeatPoint* seatPoint = Halo3FindSeatPoint(
+            directType, seat, static_cast<int>(native));
         LOG("H3 vehicle probe: state=%s unit=%08X seat=%d parent=%08X "
-            "parentKind=%u directType=%d nativeInVehicle=%u",
+            "parentKind=%u directType=%d nativeInVehicle=%u seatCam=%s",
             Halo3VehicleStateName(state), (unsigned)unit, seat,
-            (unsigned)parent, parentKind, directType, native);
+            (unsigned)parent, parentKind, directType, native,
+            seatPoint ? "authored" : "none(stock)");
         g_halo3VehicleProbeLoggedSeq.store(seq, std::memory_order_relaxed);
     }
 

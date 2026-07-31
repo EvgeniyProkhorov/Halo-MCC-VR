@@ -134,6 +134,57 @@ inline constexpr int Halo3VehicleSnapshotSeat(
     return static_cast<int>(seatPlus1) - 1;
 }
 
+// Vehicle world transform, measured in the C4 drive session (evidence doc,
+// runtime results): object data +0x1C holds the world position (repeated at
+// +0x3C; +0x2C is a second, nearly identical center), +0x5C the forward unit
+// vector (tracks velocity, flips in reverse), +0x68 the up unit vector
+// (world-up on flat ground, banks with aircraft). left = up x fwd
+// (right-handed, proven by the passenger seat resolving to -Y).
+inline constexpr uintptr_t kHalo3ObjectPositionOffset = 0x1C;
+inline constexpr uintptr_t kHalo3ObjectForwardOffset = 0x5C;
+inline constexpr uintptr_t kHalo3ObjectUpOffset = 0x68;
+
+// User-authored first-person seat points (Blender kit, model-space world
+// units, relative to the DIRECT parent object's origin and basis).
+// nativeRequired: -1 = any, else the exact nativeInVehicle flag (separates
+// mounted turrets from stationary ones). Entries cover the seats whose
+// vehicle identity is certain from type/seat alone; same-type cousins
+// (mongoose, other mounted turrets) intentionally share the closest authored
+// point until their fingerprints are labeled.
+struct Halo3SeatPoint
+{
+    uint8_t directType;
+    int8_t seatIndex;
+    int8_t nativeRequired;
+    float x, y, z;
+};
+
+inline constexpr Halo3SeatPoint kHalo3SeatPoints[] = {
+    {8, 0, -1, -0.512f, 0.000f, 0.738f}, // brute chopper driver
+    {4, 0, -1, 0.563f, 0.005f, 0.435f},  // banshee pilot
+    {7, 0, -1, 0.993f, -0.003f, 0.612f}, // hornet pilot
+    {7, 1, -1, 0.521f, 0.250f, 0.524f},  // hornet left passenger
+    {7, 2, -1, 0.521f, -0.250f, 0.524f}, // hornet right passenger
+    {0, 0, -1, 0.033f, 0.189f, 1.023f},  // scorpion driver
+    {1, 0, -1, 0.053f, 0.166f, 0.614f},  // warthog driver (all human_jeep)
+    {1, 1, -1, 0.013f, -0.159f, 0.660f}, // warthog passenger (all human_jeep)
+    {5, 0, 0, -0.391f, 0.000f, 0.519f},  // stationary turret (mg point)
+    {5, 0, 1, -0.123f, 0.000f, 0.573f},  // mounted turret (chaingun point)
+};
+
+inline constexpr const Halo3SeatPoint* Halo3FindSeatPoint(
+    int directType, int seatIndex, int nativeInVehicle)
+{
+    for (const Halo3SeatPoint& p : kHalo3SeatPoints)
+    {
+        if (static_cast<int>(p.directType) == directType &&
+            static_cast<int>(p.seatIndex) == seatIndex &&
+            (p.nativeRequired < 0 || p.nativeRequired == nativeInVehicle))
+            return &p;
+    }
+    return nullptr;
+}
+
 // C4 transform probe: bounded float window of the seated DIRECT parent's
 // object data, captured so a drive session can measure where the vehicle's
 // world position and orientation vectors live (the Blender-authored seat

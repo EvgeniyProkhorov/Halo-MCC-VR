@@ -348,3 +348,44 @@ renderWindow p95 4.4–6.2 ms, stalls=0 (the C2+ +0.5 ms gate reference).
    vehicle state — only on-foot with a churning unit handle (the engine
    alternates the player unit while in monitor). No contamination of vehicle
    data; C2's mode publication stays inert there by construction.
+
+## Vehicle world transform (C4 drive session, 2026-07-31, cand 8dc7c06)
+
+Measured from the parent-object-data window across 21 seat sessions
+(chopper, warthogs, banshee, hornet all three seats, ghost-class × several,
+scorpion, turrets mounted + stationary):
+
+- **World position = object data `+0x1C`** (repeated exactly at `+0x3C`;
+  `+0x2C` holds a second, nearly identical center that diverges from `+0x1C`
+  by up to ~0.1 wu ∝ speed — consistent with a per-tick vs interpolated pair;
+  `+0x1C` ships first, revisit only if fast-vehicle judder is reported).
+- **Forward unit vector = `+0x5C`**: tracks velocity when flying forward
+  (dot 0.92), flips sign in reverse (−1.00), reads exactly (1,0,0) on parked
+  map-aligned turrets.
+- **Up unit vector = `+0x68`**: (0,0,1) on flat ground, banks with the
+  Banshee/Hornet and recovers on leveling. `+0x84` is a world-up/gravity
+  reference that goes non-rigid during maneuvers — NOT part of the basis.
+- **Handedness: left = up × fwd** — proven by the warthog passenger seat
+  resolving to negative Y (right side) in vehicle space, matching its
+  authored seat.
+- The observer `+0x15C` scalar is a GLOBAL camera constant (2.094 in every
+  measured seat of every type), not a per-vehicle chase distance — rejected
+  as a vehicle fingerprint. Observer window `+0x100..+0x118` contains
+  uninitialized garbage/NaN; meaningful fields start at `+0x11C`.
+- Per-seat focus-in-vehicle-space fingerprints extracted for every session
+  (analysis scripts + values preserved in the session scratchpad); labeling
+  of same-type cousins (ghost/wraith/mauler, mounted turret variants,
+  mongoose) awaits the user naming which they drove.
+
+## C5 — authored seat points (headset-pending)
+
+The C3 engine-focus anchor was headset-REJECTED ("inside and under" — most
+driver seats author no camera marker, so the focus sits at the chase orbit
+pivot in the hull). Replaced by USER-AUTHORED per-seat eye points, authored
+in Blender against the exported vehicle meshes (official H3EK tool exports;
+kit under out/vehicle-camera-kit) and carried at runtime by the measured
+transform above: `world = pos + R · point` with R = [fwd, up×fwd, up].
+Seats keyed by (directType, seatIndex, nativeInVehicle); certain identities
+baked (chopper, banshee, hornet ×3, scorpion, human_jeep driver+passenger,
+mounted turret, stationary turret); unresolved seats stay on the stock chase
+view and log `seatCam=none(stock)`.

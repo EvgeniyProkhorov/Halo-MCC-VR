@@ -4715,6 +4715,24 @@ int main()
               Halo3FindNearestTriplet(nullptr, 0, xformRef).index == -1,
             "Transform probe scans find planted basis and position triplets");
 
+        // C5 authored seat points: exact (type, seat) match; the native flag
+        // separates mounted from stationary turrets; unknown seats resolve to
+        // nothing so the camera stays stock.
+        const Halo3SeatPoint* hogDriver = Halo3FindSeatPoint(1, 0, 1);
+        const Halo3SeatPoint* hogPassenger = Halo3FindSeatPoint(1, 1, 1);
+        const Halo3SeatPoint* mountedTurret = Halo3FindSeatPoint(5, 0, 1);
+        const Halo3SeatPoint* stationaryTurret = Halo3FindSeatPoint(5, 0, 0);
+        Check(hogDriver && hogDriver->y > 0.1f &&
+              hogPassenger && hogPassenger->y < -0.1f &&
+              mountedTurret && stationaryTurret &&
+              mountedTurret != stationaryTurret &&
+              Halo3FindSeatPoint(3, 0, 1) == nullptr &&
+              Halo3FindSeatPoint(4, 0, 1) != nullptr &&
+              Halo3FindSeatPoint(7, 2, 1) != nullptr &&
+              Halo3FindSeatPoint(9, 0, 1) == nullptr &&
+              Halo3FindSeatPoint(1, 3, 1) == nullptr,
+            "Authored seat points resolve exactly and unknown seats stay stock");
+
         // C2 mode refinement: only a proven seated state upgrades Gameplay;
         // Turret requires the measured physics type 5 exactly; an unproven
         // type stays a plain Vehicle; Unknown and OnFoot never upgrade.
