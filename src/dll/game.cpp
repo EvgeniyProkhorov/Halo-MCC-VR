@@ -5695,7 +5695,8 @@ namespace
                 // measuring the tick rate itself.
                 const Halo3Frame smooth = Halo3InterpolateFrame(
                     g_halo3FrameInterp, world, Halo3NowSeconds(),
-                    g_config.vehicle_cam_smoothing);
+                    g_config.vehicle_cam_smoothing,
+                    g_config.vehicle_cam_lead);
                 g_halo3SmoothingActive.store(
                     g_halo3FrameInterp.tickKnown ? 1u : 0u,
                     std::memory_order_relaxed);

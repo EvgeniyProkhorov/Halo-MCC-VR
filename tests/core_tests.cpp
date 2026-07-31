@@ -3981,7 +3981,7 @@ int main()
         "cutscene_theater_distance_m",
         "turn_smooth", "turn_snap_deg", "turn_smooth_deg_s", "dpad_hand",
         "vehicle_first_person", "vehicle_cam_forward_m", "vehicle_cam_up_m",
-        "vehicle_view_follow", "vehicle_cam_smoothing",
+        "vehicle_view_follow", "vehicle_cam_smoothing", "vehicle_cam_lead",
         "vehicle_motion", "vehicle_wheel_max_deg",
         "vehicle_wheel_deadzone_deg",
         "crosshair", "crosshair_distance_m", "crosshair_size_deg",
@@ -4981,6 +4981,67 @@ int main()
             const bool basisOk = Halo3FrameOrthonormal(mid) &&
                 std::fabs(std::atan2(mid.fwd[1], mid.fwd[0]) * 57.2957795f -
                           20.0f) < 1.0f;
+
+            // The residual the C10 video exposed. A tick is only NOTICED on
+            // the first camera call after it happens, which is up to a whole
+            // camera interval late and a different amount late every time. If
+            // the blend restarts at zero on each detection, that jitter lands
+            // straight on the camera: measured in the headset as the vehicle
+            // still moving on 49% of frames whose world was stationary. With
+            // the hull travelling at a constant speed, every published frame
+            // must advance by the same amount no matter when the tick was
+            // noticed.
+            {
+                Halo3FrameInterp jit;
+                const double camDt = 1.0 / 240.0;
+                const double tickLen = 1.0 / 60.0;
+                double t = 0.0;
+                double simTime = 0.0;
+                int simTicks = 0;
+                Halo3Frame held = frameAt(0.0f, 0.0f);
+                float previousX = 0.0f;
+                bool first = true;
+                double worst = 0.0, total = 0.0;
+                int counted = 0;
+                // Camera and simulation on independent clocks: the camera runs
+                // a hair off 240 Hz, so the detection lag walks through the
+                // whole range instead of sitting still.
+                for (int i = 0; i < 2000; ++i)
+                {
+                    t += camDt * 1.017;
+                    while (simTime + tickLen <= t)
+                    {
+                        simTime += tickLen;
+                        ++simTicks;
+                        held = frameAt(simTicks * 0.1f, 0.0f);
+                    }
+                    const Halo3Frame out =
+                        Halo3InterpolateFrame(jit, held, t, true);
+                    if (i > 600)   // let the phase settle
+                    {
+                        if (!first)
+                        {
+                            const double d = out.pos[0] - previousX;
+                            total += d;
+                            ++counted;
+                            const double ideal = 0.1 * (camDt * 1.017) / tickLen;
+                            const double err = std::fabs(d - ideal);
+                            if (err > worst) worst = err;
+                        }
+                        first = false;
+                    }
+                    previousX = out.pos[0];
+                }
+                const double ideal = 0.1 * (camDt * 1.017) / tickLen;
+                // Worst single-frame deviation under a quarter of the even
+                // share. Restarting the blend at each detection puts it at a
+                // full share or more.
+                const bool locked = counted > 1000 && worst < ideal * 0.25 &&
+                    std::fabs(total / counted - ideal) < ideal * 0.05;
+                Check(locked,
+                    "Seat frame advances evenly even though each simulation "
+                    "tick is noticed a different amount late");
+            }
 
             Check(smooth && evened && settles && snaps && bypasses && basisOk,
                 "Seat frame is walked across the 60Hz simulation tick, settles "

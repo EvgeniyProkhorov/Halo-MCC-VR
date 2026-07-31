@@ -66,6 +66,8 @@ static void Clamp()
         std::clamp(g_config.vehicle_cam_up_m, -0.5f, 1.0f);
     g_config.vehicle_view_follow =
         std::clamp(g_config.vehicle_view_follow, 0.0f, 1.0f);
+    g_config.vehicle_cam_lead =
+        std::clamp(g_config.vehicle_cam_lead, 0.0f, 1.0f);
     g_config.vehicle_wheel_max_deg =
         std::clamp(g_config.vehicle_wheel_max_deg, 30.0f, 180.0f);
     g_config.vehicle_wheel_deadzone_deg =
@@ -210,6 +212,8 @@ void ConfigLoad(const wchar_t* path)
             g_config.vehicle_view_follow = (float)atof(val);
         else if (!strcmp(key, "vehicle_cam_smoothing"))
             g_config.vehicle_cam_smoothing = atoi(val) != 0;
+        else if (!strcmp(key, "vehicle_cam_lead"))
+            g_config.vehicle_cam_lead = (float)atof(val);
         else if (!strcmp(key, "vehicle_motion"))
             g_config.vehicle_motion = atoi(val) != 0;
         else if (!strcmp(key, "vehicle_wheel_max_deg"))
@@ -596,8 +600,13 @@ void ConfigSave()
     fprintf(f, "# model in between. Leave this on so your seat moves with the\n");
     fprintf(f, "# smoothed model; off, the vehicle appears to shake around you.\n");
     fprintf(f, "# (default %d)\n", d.vehicle_cam_smoothing ? 1 : 0);
-    fprintf(f, "vehicle_cam_smoothing = %d\n\n",
-            g_config.vehicle_cam_smoothing ? 1 : 0);
+    fprintf(f, "vehicle_cam_smoothing = %d\n", g_config.vehicle_cam_smoothing ? 1 : 0);
+    fprintf(f, "# Only touch this if the vehicle feels like it drags behind\n");
+    fprintf(f, "# you at speed: it advances the seat camera by this fraction\n");
+    fprintf(f, "# of one game tick (a tick is 1/60 second). 0.5 and 1.0 are\n");
+    fprintf(f, "# the values worth trying.\n");
+    fprintf(f, "# (default %.2f, range 0 to 1)\n", d.vehicle_cam_lead);
+    fprintf(f, "vehicle_cam_lead = %.2f\n\n", g_config.vehicle_cam_lead);
     fprintf(f, "# Motion steering. In a Warthog, Mongoose, Ghost, Prowler or\n");
     fprintf(f, "# Chopper, DOUBLE-CLICK both grips to take hold of an invisible\n");
     fprintf(f, "# steering wheel: hold your hands as if on a wheel and tilt it,\n");

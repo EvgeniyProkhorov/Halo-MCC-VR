@@ -911,3 +911,69 @@ underlying flap is pre-existing and untouched here.)
 
 At `vehicle_view_follow = 0` the old generic recenter is kept, so weight 0
 remains exactly what Alpha 0.3.1 shipped.
+
+## C11 — the residual shake, measured from the user's own video
+
+The C10 build still shook. The user supplied a 21.6 s screen capture
+(`Recording 2026-07-31 132458.mp4`, 2994x2160 at 30 fps) recorded inside the
+C10 session — log source `37b83d7`, `smoothing ON across a 16.67 ms tick`, so
+the interpolation was running and locked onto the right rate.
+
+### Measuring it without the head confounding the answer
+
+Head rotation sweeps the vehicle across the view exactly as a camera fault
+would, so a naive "did the mesh move" test cannot separate them. Two passes
+were needed:
+
+1. Tracking a vehicle patch against a far-world patch gave a differential with
+   a *larger* standard deviation (5.66 px) than either input (3.78 / 4.76 px),
+   which is the signature of two independent noise sources, not a shared
+   rotation. **That measurement was discarded as unreliable** rather than
+   reported.
+2. The reliable form: keep only frame pairs in which the **distant world is
+   stationary** (both components of its tracked shift within 1 px), so the view
+   is not rotating and any remaining vehicle motion is real.
+
+Over 491 tracked pairs, 325 had a stationary world. In those:
+
+| | value |
+| --- | --- |
+| vehicle dx | mean −0.08 px, std 2.26, peak 14 |
+| vehicle dy | mean −0.27 px, std 2.60, peak 13 |
+| magnitude | mean 2.34 px/frame, peak 18 of a 400 px frame |
+| frames moving 2 px or more | 159 / 325 (**49 %**) |
+
+Mean zero with the sign flipping nearly every sampled frame: an oscillation,
+not a drift, and one aliased down from above 15 Hz by the 30 fps capture. Scaled
+against a full tick's travel (up to 0.1238 wu), the residual is roughly one
+sixth of a tick.
+
+### Cause: the blend restarted at zero on a jittery detection
+
+A simulation tick is only *noticed* on the first camera call after it happens.
+At 240 camera calls/sec against a 60 Hz tick that is 0 to 4.17 ms late, and a
+different amount late every time, because the two clocks are independent. C10
+measured `alpha` from the detection instant, so every tick restarted the blend
+from a freshly randomised sub-tick offset — and that restart is a step of up to
+a quarter of a tick's travel, at 60 Hz. One sixth of a tick measured; up to a
+quarter predicted. That is the shake.
+
+### Fix: a free-running phase, gently tracked
+
+`Halo3FrameInterp` now advances `phase` on the wall clock and, on each detected
+tick, subtracts one and pulls the remainder only 5 % of the way toward where it
+should be (half a camera interval, the mean detection lag). The sub-tick offset
+therefore persists instead of being re-randomised, and the correction is spread
+over ~20 ticks instead of landing in one frame. A hitch outside [−0.5, 1.5]
+ticks relocks immediately.
+
+Tested by simulation, and the test was **verified to fail** with the tracking
+constant set to 1.0 (which reproduces C10's hard re-lock): with a camera clock
+running 1.7 % off 240 Hz so the detection lag walks through its whole range, no
+published frame may advance by more than a quarter of the even share.
+
+`vehicle_cam_lead` (default 0, range 0–1 tick) is exposed for the one thing
+this cannot determine offline: whether MCC draws the mesh at the same sub-tick
+phase we now reconstruct. A constant phase difference shows up as the vehicle
+dragging at speed, not as shake, and one config line answers it without a
+rebuild.

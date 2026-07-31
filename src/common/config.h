@@ -117,6 +117,9 @@ struct Config
     // between; without this the seat camera steps against it and the vehicle
     // appears to shake. 0 = the raw stepped position.
     bool vehicle_cam_smoothing = true;
+    // Fraction of one game tick to advance the seat camera by. Only touch this
+    // if the vehicle feels like it drags behind you at speed.
+    float vehicle_cam_lead = 0.0f;
     // Motion steering in look-steered ground driver seats: grab an invisible
     // wheel with both grips and turn it. 0 = the right stick steers.
     bool vehicle_motion = true;

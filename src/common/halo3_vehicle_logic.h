@@ -251,10 +251,18 @@ struct Halo3FrameInterp
     bool valid = false;
     Halo3Frame prev{};
     Halo3Frame cur{};
+    double lastTime = 0.0;      // previous call, for the free-running phase
     double curTime = 0.0;       // when `cur` was first seen, seconds
+    double phase = 0.0;         // ticks elapsed since `cur` became current
     double tick = 1.0 / 60.0;   // measured simulation interval
     bool tickKnown = false;
+    float correction = 0.0f;    // last phase nudge, diagnostic only
 };
+
+// How hard each detected tick pulls the free-running phase back into lock.
+// Small on purpose: the whole point is that the phase must NOT be yanked to a
+// new value every tick.
+inline constexpr double kHalo3PhaseTrack = 0.05;
 
 // Position change (wu) below which two samples count as the same state.
 inline constexpr float kHalo3FrameSameEpsilon = 1e-5f;
@@ -271,7 +279,7 @@ inline constexpr double kHalo3TickMax = 0.050;
 // its 15.6 ms steps). Returns the frame to publish.
 inline Halo3Frame Halo3InterpolateFrame(Halo3FrameInterp& state,
                                         const Halo3Frame& raw, double nowSec,
-                                        bool enabled)
+                                        bool enabled, float leadTicks = 0.0f)
 {
     if (!enabled || !std::isfinite(nowSec))
     {
@@ -283,10 +291,25 @@ inline Halo3Frame Halo3InterpolateFrame(Halo3FrameInterp& state,
         state.valid = true;
         state.prev = raw;
         state.cur = raw;
+        state.lastTime = nowSec;
         state.curTime = nowSec;
+        state.phase = 0.0;
         state.tickKnown = false;
+        state.correction = 0.0f;
         return raw;
     }
+    // The phase FREE-RUNS on the wall clock. Restarting the blend at zero on
+    // every detected tick is what the C10 video showed as a residual shake:
+    // detection lands 0 to one camera-interval after the real tick and a
+    // different amount late each time, so each restart moved the camera by up
+    // to a quarter of a tick's worth of travel. Measured on the 2026-07-31
+    // 13:16 session: the vehicle still moved on 49% of frames in which the
+    // distant world was stationary, mean zero, sign flipping nearly every
+    // frame — an oscillation about one sixth of a tick in size.
+    const double step = nowSec - state.lastTime;
+    state.lastTime = nowSec;
+    if (state.tickKnown && step > 0.0 && step < 0.25)
+        state.phase += step / state.tick;
     bool changed = false;
     float moved = 0.0f;
     for (int i = 0; i < 3; ++i)
@@ -308,6 +331,7 @@ inline Halo3Frame Halo3InterpolateFrame(Halo3FrameInterp& state,
             state.prev = raw;
             state.cur = raw;
             state.curTime = nowSec;
+            state.phase = 0.0;
             return raw;
         }
         const double interval = nowSec - state.curTime;
@@ -323,10 +347,26 @@ inline Halo3Frame Halo3InterpolateFrame(Halo3FrameInterp& state,
         state.prev = state.cur;
         state.cur = raw;
         state.curTime = nowSec;
+        // Consume the tick we just crossed, then pull the phase gently toward
+        // where it should be at this instant: the real tick happened somewhere
+        // inside the last camera interval, so on average half of one. A gentle
+        // pull keeps the sub-tick offset the phase already has instead of
+        // re-randomising it, which is the whole fix.
+        const double target = state.tick > 0.0
+            ? 0.5 * step / state.tick
+            : 0.0;
+        state.phase -= 1.0;
+        if (state.phase < -0.5 || state.phase > 1.5)
+            state.phase = target;                 // hitch: relock immediately
+        else
+            state.phase += (target - state.phase) * kHalo3PhaseTrack;
+        state.correction = static_cast<float>(state.phase - target);
+        if (state.phase < 0.0)
+            state.phase = 0.0;
     }
     if (!state.tickKnown)
         return state.cur;
-    double alpha = (nowSec - state.curTime) / state.tick;
+    double alpha = state.phase + static_cast<double>(leadTicks);
     if (!(alpha > 0.0)) alpha = 0.0;
     if (alpha > 1.0) alpha = 1.0;
     return Halo3LerpFrame(state.prev, state.cur, static_cast<float>(alpha));
