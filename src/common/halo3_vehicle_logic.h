@@ -134,13 +134,20 @@ inline constexpr int Halo3VehicleSnapshotSeat(
     return static_cast<int>(seatPlus1) - 1;
 }
 
-// Vehicle world transform, measured in the C4 drive session (evidence doc,
-// runtime results): object data +0x1C holds the world position (repeated at
-// +0x3C; +0x2C is a second, nearly identical center), +0x5C the forward unit
-// vector (tracks velocity, flips in reverse), +0x68 the up unit vector
-// (world-up on flat ground, banks with aircraft). left = up x fwd
-// (right-handed, proven by the passenger seat resolving to -Y).
-inline constexpr uintptr_t kHalo3ObjectPositionOffset = 0x1C;
+// Vehicle world transform. The C5 drive session (2026-07-31 08:26 log)
+// corrected the C4 pick, and ManagedDonkey's s_object_data confirms the
+// names (offsets re-verified by member-size arithmetic): +0x50 is
+// `position` — the object's authoritative world origin, i.e. the rigid
+// tag/authoring frame the Blender seat points live in. R^T*(+0x1C - +0x50)
+// reproduced each render model's node-0 default translation to the
+// millimetre on warthog, mongoose and banshee. +0x1C is
+// `bounding_sphere_center` (+0x3C/+0x2C the attached-bounds variants),
+// which rides the ANIMATED model (brute chopper suspension drifts it
+// ~0.09 wu) — never anchor authored points to it. +0x5C `forward` /
+// +0x68 `up` are the rigid frame's basis, contiguous with `position`.
+// left = up x fwd (right-handed, proven by the passenger seat at -Y).
+inline constexpr uintptr_t kHalo3ObjectPositionOffset = 0x50;
+inline constexpr uintptr_t kHalo3ObjectBoundingCenterOffset = 0x1C;
 inline constexpr uintptr_t kHalo3ObjectForwardOffset = 0x5C;
 inline constexpr uintptr_t kHalo3ObjectUpOffset = 0x68;
 

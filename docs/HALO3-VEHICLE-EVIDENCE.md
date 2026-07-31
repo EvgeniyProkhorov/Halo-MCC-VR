@@ -359,6 +359,8 @@ scorpion, turrets mounted + stationary):
   `+0x2C` holds a second, nearly identical center that diverges from `+0x1C`
   by up to ~0.1 wu ∝ speed — consistent with a per-tick vs interpolated pair;
   `+0x1C` ships first, revisit only if fast-vehicle judder is reported).
+  **SUPERSEDED by the C5 correction below: `+0x1C` is the bounding-sphere
+  center (animated); the authoritative rigid origin is `+0x50`.**
 - **Forward unit vector = `+0x5C`**: tracks velocity when flying forward
   (dot 0.92), flips sign in reverse (−1.00), reads exactly (1,0,0) on parked
   map-aligned turrets.
@@ -389,3 +391,50 @@ Seats keyed by (directType, seatIndex, nativeInVehicle); certain identities
 baked (chopper, banshee, hornet ×3, scorpion, human_jeep driver+passenger,
 mounted turret, stationary turret); unresolved seats stay on the stock chase
 view and log `seatCam=none(stock)`.
+
+## C5 headset result and the anchor correction (2026-07-31 08:26 Steam log)
+
+C5 (cand e8581c8 / DLL 55F23CC4…) was headset-REJECTED: seats moved but did
+not match the authored points; every camera sat too high. The C5 session log
+(source-stamp verified) contains paired object-window and observer dumps for
+chopper ×2, warthog driver ×2, warthog passenger, banshee, mongoose, ghost
+(stock-cam control) and mounted-turret sessions, which root-caused it:
+
+- **`+0x50` is the object origin** — the rigid tag/authoring-frame position.
+  For every session, `R^T · (pos1C − pos50)` (with R from `+0x5C/+0x68`) is
+  constant per vehicle and reproduces the render model's **node-0 default
+  translation** exactly:
+  warthog `(+0.025, 0.000, −0.420)` measured vs hull node `(−0.025, 0, 0.420)`
+  authored; mongoose `(+0.051, −0.001, −0.300)` vs hull `(−0.050, 0, 0.300)`;
+  banshee `(−0.014, 0.000, −0.652)` vs body `(0.013, 0, 0.652)` — all
+  millimetre-exact. This simultaneously proves `+0x5C/+0x68` are the rigid
+  tag-frame basis.
+- **Name-level confirmation (ManagedDonkey `s_object_data`, offsets
+  re-verified by member-size arithmetic):** `+0x1C bounding_sphere_center` /
+  `+0x28 bounding_sphere_radius` (the measured 1.3–1.4 scalar) /
+  `+0x2C attached_bounds_center` + radius (the speed-divergent twin — it
+  includes attached child objects) / `+0x3C attached_bounds_sphere_center` /
+  `+0x50 position` ("the object's authoritative world-space origin", written
+  by object_new / object_set_position_internal) / `+0x5C forward` /
+  `+0x68 up` / `+0x74 transitional_velocity` / `+0x80 angular_velocity`.
+- **The C5 bug:** `+0x1C` (bounding center) rides the ANIMATED model — the
+  brute chopper measured `(−0.122, −0.020, −0.389)` against a hull-node
+  default of `(0.098, 0, 0.471)`, ~0.09 wu of suspension animation — and
+  sits above the tag origin by each vehicle's node-0 height. Anchoring
+  authored (tag-frame) points at it misplaced every camera upward
+  (+0.30 wu mongoose … +0.65 wu banshee) — the reported "so high up".
+  C4 picked `+0x1C` because the bounding center tracks the chase focus
+  marginally better; SUPERSEDED. **Fix: anchor = `+0x50 position`.**
+- **Bonus discriminator:** the same measured offset identified one "warthog"
+  session as a MONGOOSE (offset matched the mongoose hull node, not the
+  warthog's). `quantize(R^T · (pos1C − pos50))` vs the render-model node-0
+  table separates every same-physics-type big-vehicle cousin (ghost / wraith
+  / mauler node-0 all >0.4 wu apart) with no new hooks. It does NOT separate
+  turret child tags (their node 0 sits at the tag origin) — turret cousins
+  need definition-resident data, and note the E1 caveat that shipped cache
+  tags author turret physics blocks the H3EK source XML lacks, so those
+  values must be measured from the loaded tag, not taken from source exports.
+- The Blender kit v1 display was MIRRORED (user report: driver seat on the
+  right): the .x export lateral axis was mapped with a negation. The authored
+  numbers themselves were unaffected (marker-derived Y; X/Z judged on a
+  laterally-symmetric view), but kit v2 re-bakes the meshes in tag space.
