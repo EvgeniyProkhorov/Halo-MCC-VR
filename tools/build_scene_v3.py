@@ -24,6 +24,7 @@ from mathutils import Matrix, Vector
 
 argv = sys.argv[sys.argv.index("--") + 1:]
 OBJS, POINTS_JSON, SEATS_JSON, MARKERS_JSON, NODES_JSON, OUT = argv[:6]
+VR_SCRIPT = argv[6] if len(argv) > 6 else None   # embedded as a text block
 
 WU_TO_M = 3.048
 EYE_UP_WU = 0.33          # seated eye above a seat marker, user-tunable
@@ -275,6 +276,14 @@ for screen in bpy.data.screens:
                 if space.type == 'VIEW_3D':
                     space.clip_start = 0.01
                     space.clip_end = 2000.0
+
+# Ship the VR seat-jumper inside the file: Scripting tab -> Run Script.
+if VR_SCRIPT and os.path.exists(VR_SCRIPT):
+    with open(VR_SCRIPT, "r", encoding="utf-8") as fh:
+        text = bpy.data.texts.new("halo3_vr_seats.py")
+        text.write(fh.read())
+else:
+    notes.append("VR script not embedded")
 
 bpy.ops.wm.save_as_mainfile(filepath=OUT)
 print("SAVED", OUT)
