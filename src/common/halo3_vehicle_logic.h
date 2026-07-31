@@ -200,6 +200,138 @@ inline void Halo3FrameRotate(const Halo3Frame& frame, const float v[3],
         out[i] = frame.fwd[i] * v[0] + left[i] * v[1] + frame.up[i] * v[2];
 }
 
+// ---- C10: render-rate smoothing of the sampled hull frame ----------------
+// MEASURED (2026-07-31 Steam session, source b25a414): the camera hook runs at
+// 240/sec and the seated parent's +0x50/+0x5C/+0x68 change on exactly 25% of
+// those calls — 60 Hz — with position steps up to 0.1238 wu (0.38 m) and
+// orientation steps up to 16 deg. Halo 3 simulates at a fixed 60 Hz and MCC
+// interpolates the drawn MESH up to the presented rate, so a camera pinned to
+// the raw sampled value staircases against a model that glides: the user's
+// "the vehicles are shaking and vibrating ... the car gyrates".
+//
+// The fix is to reconstruct the same thing the renderer does — walk linearly
+// from the previous simulation state to the current one across one tick. This
+// is continuous by construction: when a new state arrives, the point we have
+// just reached (the old current) becomes the new previous, so the output never
+// jumps. It also cannot overshoot, unlike a velocity extrapolation, which
+// would fling the camera through walls on a collision tick.
+inline Halo3Frame Halo3LerpFrame(const Halo3Frame& a, const Halo3Frame& b,
+                                 float t)
+{
+    Halo3Frame out{};
+    for (int i = 0; i < 3; ++i)
+    {
+        out.pos[i] = a.pos[i] + (b.pos[i] - a.pos[i]) * t;
+        out.fwd[i] = a.fwd[i] + (b.fwd[i] - a.fwd[i]) * t;
+        out.up[i] = a.up[i] + (b.up[i] - a.up[i]) * t;
+    }
+    // A component-wise blend of two rotations is not a rotation. Renormalize,
+    // then take the up vector perpendicular to forward (Gram-Schmidt). The
+    // per-tick angle is small, so this is indistinguishable from a slerp.
+    const float fLen = std::sqrt(out.fwd[0] * out.fwd[0] +
+                                 out.fwd[1] * out.fwd[1] +
+                                 out.fwd[2] * out.fwd[2]);
+    if (!(fLen > 1e-3f))
+        return b;
+    for (int i = 0; i < 3; ++i) out.fwd[i] /= fLen;
+    const float fu = out.fwd[0] * out.up[0] + out.fwd[1] * out.up[1] +
+        out.fwd[2] * out.up[2];
+    for (int i = 0; i < 3; ++i) out.up[i] -= out.fwd[i] * fu;
+    const float uLen = std::sqrt(out.up[0] * out.up[0] +
+                                 out.up[1] * out.up[1] +
+                                 out.up[2] * out.up[2]);
+    if (!(uLen > 1e-3f))
+        return b;
+    for (int i = 0; i < 3; ++i) out.up[i] /= uLen;
+    return out;
+}
+
+struct Halo3FrameInterp
+{
+    bool valid = false;
+    Halo3Frame prev{};
+    Halo3Frame cur{};
+    double curTime = 0.0;       // when `cur` was first seen, seconds
+    double tick = 1.0 / 60.0;   // measured simulation interval
+    bool tickKnown = false;
+};
+
+// Position change (wu) below which two samples count as the same state.
+inline constexpr float kHalo3FrameSameEpsilon = 1e-5f;
+// A single tick can never move a vehicle this far or turn it this hard; that
+// is a teleport, a respawn or a seat change, and it must snap, not slide.
+inline constexpr float kHalo3FrameSnapDistance = 2.0f;   // wu
+inline constexpr float kHalo3FrameSnapDot = 0.5f;        // ~60 degrees
+// Plausible simulation intervals. Anything outside is a hitch, not a tick.
+inline constexpr double kHalo3TickMin = 0.004;
+inline constexpr double kHalo3TickMax = 0.050;
+
+// Feed the RAW sampled frame every camera call with a monotonic clock in
+// seconds (the tick counter is far too coarse — a 60 Hz tick is under two of
+// its 15.6 ms steps). Returns the frame to publish.
+inline Halo3Frame Halo3InterpolateFrame(Halo3FrameInterp& state,
+                                        const Halo3Frame& raw, double nowSec,
+                                        bool enabled)
+{
+    if (!enabled || !std::isfinite(nowSec))
+    {
+        state.valid = false;
+        return raw;
+    }
+    if (!state.valid)
+    {
+        state.valid = true;
+        state.prev = raw;
+        state.cur = raw;
+        state.curTime = nowSec;
+        state.tickKnown = false;
+        return raw;
+    }
+    bool changed = false;
+    float moved = 0.0f;
+    for (int i = 0; i < 3; ++i)
+    {
+        const float d = raw.pos[i] - state.cur.pos[i];
+        moved += d * d;
+        if (std::fabs(d) > kHalo3FrameSameEpsilon ||
+            std::fabs(raw.fwd[i] - state.cur.fwd[i]) > kHalo3FrameSameEpsilon ||
+            std::fabs(raw.up[i] - state.cur.up[i]) > kHalo3FrameSameEpsilon)
+            changed = true;
+    }
+    if (changed)
+    {
+        const float dot = raw.fwd[0] * state.cur.fwd[0] +
+            raw.fwd[1] * state.cur.fwd[1] + raw.fwd[2] * state.cur.fwd[2];
+        if (moved > kHalo3FrameSnapDistance * kHalo3FrameSnapDistance ||
+            dot < kHalo3FrameSnapDot)
+        {
+            state.prev = raw;
+            state.cur = raw;
+            state.curTime = nowSec;
+            return raw;
+        }
+        const double interval = nowSec - state.curTime;
+        if (interval >= kHalo3TickMin && interval <= kHalo3TickMax)
+        {
+            // Detection is quantized to the camera's own rate, so smooth the
+            // estimate rather than trusting one interval.
+            state.tick = state.tickKnown
+                ? state.tick * 0.9 + interval * 0.1
+                : interval;
+            state.tickKnown = true;
+        }
+        state.prev = state.cur;
+        state.cur = raw;
+        state.curTime = nowSec;
+    }
+    if (!state.tickKnown)
+        return state.cur;
+    double alpha = (nowSec - state.curTime) / state.tick;
+    if (!(alpha > 0.0)) alpha = 0.0;
+    if (alpha > 1.0) alpha = 1.0;
+    return Halo3LerpFrame(state.prev, state.cur, static_cast<float>(alpha));
+}
+
 inline Halo3Frame Halo3ComposeFrame(const Halo3Frame& parent,
                                     const Halo3Frame& local)
 {

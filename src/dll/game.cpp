@@ -5255,6 +5255,34 @@ namespace
     };
     Halo3MotionDiag g_halo3MotionDiag;
 
+    // C10: the sampled hull frame walked across the 60 Hz simulation tick, so
+    // the seat camera moves with the interpolated mesh instead of stepping
+    // against it. Camera thread only; the atomics are for the worker log.
+    Halo3FrameInterp g_halo3FrameInterp;
+    std::atomic<uint32_t> g_halo3SmoothingActive{0};
+    std::atomic<float> g_halo3TickSeconds{0.0f};
+    // Stamped on a settled seat ENTRY; consumed once by the follow, which
+    // rebases "straight ahead" onto the vehicle's nose. Zero means nothing
+    // pending, and a request that finds no live seat within two seconds
+    // expires rather than firing later on foot.
+    std::atomic<uint64_t> g_halo3SeatEntryMs{0};
+
+    // A 60 Hz tick is barely two steps of GetTickCount's 15.6 ms clock, so the
+    // sub-tick blend needs the performance counter (same reason ApplyVrTurn
+    // uses it for smooth turning).
+    double Halo3NowSeconds()
+    {
+        static LARGE_INTEGER freq{};
+        if (!freq.QuadPart)
+            QueryPerformanceFrequency(&freq);
+        LARGE_INTEGER now;
+        QueryPerformanceCounter(&now);
+        return freq.QuadPart
+            ? static_cast<double>(now.QuadPart) /
+                  static_cast<double>(freq.QuadPart)
+            : 0.0;
+    }
+
     // C8: definition index -> vehicle identity, resolved once per distinct
     // vehicle instead of per frame. Direct-mapped and tiny; a collision only
     // costs a re-read. Tag data is immutable while a map is loaded, and the
@@ -5660,10 +5688,25 @@ namespace
                 memcpy(diag.lastPos, world.pos, sizeof(diag.lastPos));
                 memcpy(diag.lastUp, world.up, sizeof(diag.lastUp));
 
+                // C10: publish the frame walked across the simulation tick,
+                // not the raw 60 Hz staircase. The gate above and the counters
+                // above both stay on the raw value — the gate because that is
+                // what the engine actually said, the counters because they are
+                // measuring the tick rate itself.
+                const Halo3Frame smooth = Halo3InterpolateFrame(
+                    g_halo3FrameInterp, world, Halo3NowSeconds(),
+                    g_config.vehicle_cam_smoothing);
+                g_halo3SmoothingActive.store(
+                    g_halo3FrameInterp.tickKnown ? 1u : 0u,
+                    std::memory_order_relaxed);
+                g_halo3TickSeconds.store(
+                    static_cast<float>(g_halo3FrameInterp.tick),
+                    std::memory_order_relaxed);
+
                 xf.seq.fetch_add(1, std::memory_order_acq_rel);  // -> odd
-                memcpy(xf.pos, world.pos, sizeof(xf.pos));
-                memcpy(xf.fwd, world.fwd, sizeof(xf.fwd));
-                memcpy(xf.up, world.up, sizeof(xf.up));
+                memcpy(xf.pos, smooth.pos, sizeof(xf.pos));
+                memcpy(xf.fwd, smooth.fwd, sizeof(xf.fwd));
+                memcpy(xf.up, smooth.up, sizeof(xf.up));
                 xf.directType = directType;
                 xf.seatIndex = seat;
                 xf.nativeInVehicle = static_cast<int32_t>(native);
@@ -5679,7 +5722,11 @@ namespace
                 xf.valid.store(0, std::memory_order_relaxed);
                 xf.seq.fetch_add(1, std::memory_order_release);  // -> even
                 // Leaving the seat starts the diagnostic window over, so one
-                // drive's numbers never carry into the next.
+                // drive's numbers never carry into the next, and drops the
+                // interpolator so the next vehicle cannot be blended toward
+                // from this one's last known pose.
+                g_halo3FrameInterp.valid = false;
+                g_halo3SmoothingActive.store(0, std::memory_order_relaxed);
                 g_halo3MotionDiag.frames.store(0, std::memory_order_relaxed);
                 g_halo3MotionDiag.posChanged.store(
                     0, std::memory_order_relaxed);
@@ -5715,7 +5762,26 @@ namespace
                 (g_halo3VehicleFpDebounce.stable == Halo3VehicleState::Vehicle ||
                  previousStable == Halo3VehicleState::Vehicle))
             {
-                g_needRecenter.store(true);
+                if (g_config.vehicle_view_follow > 0.01f)
+                {
+                    // C10: a plain recenter takes its heading from the ENGINE
+                    // camera, which at seat entry is mid-swing around the
+                    // vehicle — the user's "the angle in which you enter
+                    // overrides the direction the camera is supposed to be
+                    // facing". Ask instead for a rebase onto the hull's own
+                    // nose, which is only meaningful now that the view follows
+                    // the hull. Only on the way IN: on the way out the follow
+                    // has already left the player facing the hull's final
+                    // heading, and a recenter there would snap that away.
+                    if (g_halo3VehicleFpDebounce.stable ==
+                        Halo3VehicleState::Vehicle)
+                        g_halo3SeatEntryMs.store(nowMs,
+                                                 std::memory_order_release);
+                }
+                else
+                {
+                    g_needRecenter.store(true);
+                }
             }
         }
 
@@ -5943,6 +6009,48 @@ namespace
             Halo3SeatFollowsHull(static_cast<Halo3VehicleId>(seat.identity),
                                  seat.seatIndex, seat.mounted);
         const float weight = g_config.vehicle_view_follow;
+
+        // C10: settled seat entry rebases "straight ahead" onto the hull's own
+        // nose. The generic recenter cannot do this — it reads the heading off
+        // the ENGINE camera, which at that moment is still swinging around the
+        // vehicle from the entry animation, so whichever way the player
+        // happened to walk in became their forward.
+        //
+        // Rate-limited on purpose. The C9 session logged 42 recenters, several
+        // of them under 200 ms apart, because the debounced seat state flaps
+        // whenever the player-unit read blips. A re-snap mid-drive would yank
+        // the world around to put the nose under wherever the head happened to
+        // be pointing, so only an entry at least 1.5 s after the last one
+        // counts; a flap is consumed and ignored. A request that never finds a
+        // live seat expires instead of firing later on foot.
+        static uint64_t lastEntryAlignMs = 0;
+        const uint64_t entryMs =
+            g_halo3SeatEntryMs.load(std::memory_order_acquire);
+        if (entryMs)
+        {
+            const uint64_t nowMs = GetTickCount64();
+            float hq[4], hp[3];
+            if (nowMs - entryMs > 2000)
+            {
+                g_halo3SeatEntryMs.store(0, std::memory_order_relaxed);
+            }
+            else if (active && VR_GetHeadPose(hq, hp))
+            {
+                if (nowMs - lastEntryAlignMs > 1500)
+                {
+                    const float x = hq[0], y = hq[1], z = hq[2], w = hq[3];
+                    const float fx = -2.0f * (w * y + x * z);
+                    const float fz = -(1.0f - 2.0f * (x * x + y * y));
+                    g_gameYawRef = atan2f(seat.fwd[1], seat.fwd[0]);
+                    g_headYawRef = atan2f(fx, -fz);
+                    lastEntryAlignMs = nowMs;
+                    LOG("H3 vehicle: seat entry aligned to the vehicle's nose "
+                        "(%.1f deg)", g_gameYawRef * 57.2958f);
+                }
+                g_halo3SeatEntryMs.store(0, std::memory_order_relaxed);
+            }
+        }
+
         const float delta =
             Halo3SeatYawDelta(g_halo3SeatYaw, seat.fwd, active, weight);
         if (delta != 0.0f)
@@ -6293,14 +6401,18 @@ namespace
         const uint32_t tilted =
             diag.tiltChanged.load(std::memory_order_relaxed);
         const double scale = 100.0 / static_cast<double>(frames);
+        const float tickMs =
+            g_halo3TickSeconds.load(std::memory_order_relaxed) * 1000.0f;
         LOG("H3 seat motion: %u sampled frames, hull moved on %u (%.0f%%), "
-            "tilted on %u (%.0f%%); largest step %.4f wu, largest tilt "
-            "%.2f deg; view follow %.2f, hull turned %.0f deg since entry, "
-            "steering by %s",
+            "tilted on %u (%.0f%%); largest raw step %.4f wu, largest raw tilt "
+            "%.2f deg; smoothing %s across a %.2f ms tick; view follow %.2f, "
+            "hull turned %.0f deg since entry, steering by %s",
             frames, moved, moved * scale, tilted, tilted * scale,
             diag.maxPosStep.load(std::memory_order_relaxed),
             diag.maxTiltDeg.load(std::memory_order_relaxed),
-            g_config.vehicle_view_follow,
+            g_halo3SmoothingActive.load(std::memory_order_relaxed) ? "ON"
+                                                                   : "off",
+            tickMs, g_config.vehicle_view_follow,
             g_halo3SeatYawTotal.load(std::memory_order_relaxed) * 57.2957795f,
             g_halo3SeatAuthorsSteering.load(std::memory_order_relaxed)
                 ? (g_halo3WheelDriving.load(std::memory_order_relaxed)

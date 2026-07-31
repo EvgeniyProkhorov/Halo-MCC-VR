@@ -208,6 +208,8 @@ void ConfigLoad(const wchar_t* path)
             g_config.vehicle_cam_up_m = (float)atof(val);
         else if (!strcmp(key, "vehicle_view_follow"))
             g_config.vehicle_view_follow = (float)atof(val);
+        else if (!strcmp(key, "vehicle_cam_smoothing"))
+            g_config.vehicle_cam_smoothing = atoi(val) != 0;
         else if (!strcmp(key, "vehicle_motion"))
             g_config.vehicle_motion = atoi(val) != 0;
         else if (!strcmp(key, "vehicle_wheel_max_deg"))
@@ -590,6 +592,12 @@ void ConfigSave()
     fprintf(f, "# every control behaves exactly as it did before this feature.\n");
     fprintf(f, "# (default %.2f, range 0 to 1)\n", d.vehicle_view_follow);
     fprintf(f, "vehicle_view_follow = %.2f\n\n", g_config.vehicle_view_follow);
+    fprintf(f, "# The game moves vehicles 60 times a second and smooths the\n");
+    fprintf(f, "# model in between. Leave this on so your seat moves with the\n");
+    fprintf(f, "# smoothed model; off, the vehicle appears to shake around you.\n");
+    fprintf(f, "# (default %d)\n", d.vehicle_cam_smoothing ? 1 : 0);
+    fprintf(f, "vehicle_cam_smoothing = %d\n\n",
+            g_config.vehicle_cam_smoothing ? 1 : 0);
     fprintf(f, "# Motion steering. In a Warthog, Mongoose, Ghost, Prowler or\n");
     fprintf(f, "# Chopper, DOUBLE-CLICK both grips to take hold of an invisible\n");
     fprintf(f, "# steering wheel: hold your hands as if on a wheel and tilt it,\n");

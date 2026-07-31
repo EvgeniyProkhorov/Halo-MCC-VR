@@ -113,6 +113,10 @@ struct Config
     // with the vehicle like a real driver; 0 = the world-locked view Alpha
     // 0.3.1 shipped, which also leaves every control exactly as it was.
     float vehicle_view_follow = 1.0f;
+    // The game moves vehicles 60 times a second and smooths the model in
+    // between; without this the seat camera steps against it and the vehicle
+    // appears to shake. 0 = the raw stepped position.
+    bool vehicle_cam_smoothing = true;
     // Motion steering in look-steered ground driver seats: grab an invisible
     // wheel with both grips and turn it. 0 = the right stick steers.
     bool vehicle_motion = true;

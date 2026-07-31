@@ -729,6 +729,12 @@ namespace
             "1 = you turn with the vehicle like a real driver. 0 = the view\n"
             "stays locked to the world and every control goes back to exactly\n"
             "what it was before this feature.");
+        changed |= ImGui::Checkbox("Smooth out the vehicle's 60Hz motion",
+                                   &g_config.vehicle_cam_smoothing);
+        ImGui::TextDisabled(
+            "The game moves vehicles 60 times a second and smooths the model\n"
+            "in between. Leave this ON so your seat moves with the smoothed\n"
+            "model; OFF, the vehicle appears to shake around you.");
         ImGui::Spacing();
         ImGui::Separator();
         ImGui::Text("Motion steering");

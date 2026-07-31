@@ -825,3 +825,89 @@ the largest step of each. Near 100 % moved means the hull advances every frame
 and (1) is refuted; well under that with a camera rate far above the move rate
 confirms it. A high move percentage with a large tilt is (2). Nothing in this
 diagnostic feeds behavior.
+
+## C10 — the shaking is MEASURED, not theorised: a 60 Hz hull under a 120 fps mesh
+
+The C9 diagnostic settled it in one drive (2026-07-31 12:41-12:47, Steam,
+source `b25a414`). While driving:
+
+```
+H3 seat motion: 2396 sampled frames, hull moved on 544 (23%), tilted on 649
+(27%); largest step 0.1238 wu, largest tilt 4.78 deg
+M1 timing: camera transforms 239.9/sec ... HMD pose samples 119.8/sec
+```
+
+2396 samples per 10 s is the camera hook's own 240/sec, and the hull's
+`+0x50/+0x5C/+0x68` change on 23-25% of them — **exactly 60 per second**, in
+every driving window of the session. Halo 3 simulates at a fixed 60 Hz; MCC
+interpolates the drawn mesh up to the presented 120 fps. A camera pinned to the
+raw sampled value therefore holds still for three frames and then jumps up to
+0.1238 wu (0.38 m), and the orientation jumps with it (up to 16 deg in one
+step, which swings a 0.67 wu seat point through ~0.19 wu). That is the user's
+"the vehicles are shaking and vibrating ... the car gyrates".
+
+Everything else in that session was clean, so nothing else is a candidate:
+frame interval p95 9.7-11.9 ms, `stalls=0`, `missed` flat, prediction error
+p95 under 0.1 ms, no `INSANE`, no `too-deep`, no faults.
+
+**Theory 2 (suspension rock) is refuted as the cause.** Tilt changes on the
+same 27-29% of frames as position — it is the same 60 Hz staircase, not a
+separate physical wobble.
+
+### The fix walks the frame across the tick
+
+`Halo3InterpolateFrame` keeps the previous and current simulation states and
+publishes `lerp(prev, cur, alpha)` with `alpha` running 0 to 1 across one
+measured tick. It is continuous by construction: when a new state arrives the
+point just reached (the old current) becomes the new previous, so the published
+frame never jumps. It cannot overshoot, unlike a velocity extrapolation, which
+would fling the camera through a wall on a collision tick. A component-wise
+blend of two rotations is not a rotation, so the result is renormalised and
+Gram-Schmidt'd back into a basis; the per-tick angle is small enough that this
+is indistinguishable from a slerp.
+
+Details that matter:
+
+- **The clock must be the performance counter.** A 60 Hz tick is under two
+  steps of `GetTickCount`'s 15.6 ms resolution, so the sub-tick blend cannot be
+  driven from it (the same reason `ApplyVrTurn` uses QPC for smooth turning).
+- **The tick length is measured, not assumed** (EMA over observed intervals,
+  clamped to 4-50 ms), because detection is quantised to the camera's own rate.
+- **A teleport, respawn or seat change snaps.** Past 2.0 wu or 60 degrees in
+  one tick, the interpolator resets instead of sliding a camera across the
+  level through the geometry between the two ends.
+- The bounding-sphere sanity gate and the motion counters both stay on the RAW
+  frame — the gate because that is what the engine actually said, the counters
+  because they are measuring the tick rate itself.
+- Published, so every consumer is smooth for free: the seat anchor, and the
+  hull-follow yaw, which was stepping at 60 Hz too.
+
+`vehicle_cam_smoothing` (default 1) turns it off for an A/B.
+
+## C10 — seat entry aligns to the vehicle's nose, not the entry swing
+
+**Report (user, 2026-07-31):** "the angle in which you enter overrides the
+direction of where the camera is supposed to be facing".
+
+C3 asked for a generic recenter on a settled seat entry, and `ApplyHeadLook`
+implements a recenter as `g_gameYawRef = atan2f(fwd[1], fwd[0])` off the
+**engine camera's** forward. At seat entry that camera is still swinging around
+the vehicle from the entry animation, so whichever way the player walked in
+became their forward. The hull's own forward is unambiguous and is already
+published, so entry now sets `g_gameYawRef` to the hull heading and
+`g_headYawRef` to the current head yaw: looking straight ahead is the nose.
+
+Only on the way **in**. On the way out the follow has already left the player
+facing the hull's final heading, and a recenter there would snap that away.
+
+**Rate-limited on purpose.** The same session logged **42** `head tracking
+recentered` lines, several under 200 ms apart, because the debounced seat state
+flaps whenever the player-unit read blips. A re-snap mid-drive would yank the
+world around to put the nose under wherever the head happened to be pointing,
+which is worse than the bug being fixed. Only an entry at least 1.5 s after the
+last alignment counts; a flap is consumed and ignored, and a request that never
+finds a live seat expires after 2 s rather than firing later on foot. (The
+underlying flap is pre-existing and untouched here.)
+
+At `vehicle_view_follow = 0` the old generic recenter is kept, so weight 0
+remains exactly what Alpha 0.3.1 shipped.

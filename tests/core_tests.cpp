@@ -3981,7 +3981,8 @@ int main()
         "cutscene_theater_distance_m",
         "turn_smooth", "turn_snap_deg", "turn_smooth_deg_s", "dpad_hand",
         "vehicle_first_person", "vehicle_cam_forward_m", "vehicle_cam_up_m",
-        "vehicle_view_follow", "vehicle_motion", "vehicle_wheel_max_deg",
+        "vehicle_view_follow", "vehicle_cam_smoothing",
+        "vehicle_motion", "vehicle_wheel_max_deg",
         "vehicle_wheel_deadzone_deg",
         "crosshair", "crosshair_distance_m", "crosshair_size_deg",
         "reticle_r", "reticle_g", "reticle_b", "kill_reticle",
@@ -4899,6 +4900,92 @@ int main()
                   loneOk,
                 "Bounding-center fingerprint is pose-invariant and refuses to "
                 "identify a vehicle when two candidates are both plausible");
+        }
+
+        // C10 frame smoothing. MEASURED: the camera samples at 240/sec while
+        // the hull only moves at 60, so three of every four published frames
+        // must be walked toward the next simulation state instead of repeating
+        // the last one. The output has to be continuous across a tick boundary
+        // (that discontinuity IS the reported shaking), must never overshoot,
+        // and must snap rather than slide on a teleport.
+        {
+            auto frameAt = [](float x, float yawDeg) {
+                Halo3Frame f{};
+                f.pos[0] = x; f.pos[1] = 0.0f; f.pos[2] = 0.0f;
+                const float r = yawDeg / 57.2957795f;
+                f.fwd[0] = std::cos(r); f.fwd[1] = std::sin(r); f.fwd[2] = 0.0f;
+                f.up[0] = 0.0f; f.up[1] = 0.0f; f.up[2] = 1.0f;
+                return f;
+            };
+            // 60 Hz simulation, 240 Hz camera: the hull advances 0.1 wu and 2
+            // degrees per tick and is sampled four times per tick.
+            Halo3FrameInterp interp;
+            const double dt = 1.0 / 240.0;
+            double now = 0.0;
+            bool smooth = true;
+            bool ordered = true;
+            float lastX = 0.0f;
+            float biggestStep = 0.0f;
+            for (int tick = 0; tick < 30; ++tick)
+            {
+                const Halo3Frame raw = frameAt(tick * 0.1f, tick * 2.0f);
+                for (int sub = 0; sub < 4; ++sub)
+                {
+                    const Halo3Frame out =
+                        Halo3InterpolateFrame(interp, raw, now, true);
+                    now += dt;
+                    if (tick < 3)   // the tick length is still being learned
+                    {
+                        lastX = out.pos[0];
+                        continue;
+                    }
+                    const float step = out.pos[0] - lastX;
+                    if (step < -1e-4f)
+                        ordered = false;               // never runs backwards
+                    if (step > biggestStep)
+                        biggestStep = step;
+                    lastX = out.pos[0];
+                    if (!Halo3FrameOrthonormal(out))
+                        smooth = false;                // blended basis is real
+                }
+            }
+            // A raw feed would stand still for three frames then jump the whole
+            // 0.1 wu. Smoothed, no single frame may move much more than the
+            // even quarter-tick share of it.
+            const bool evened = biggestStep < 0.045f && ordered;
+            // Never past the newest state: at rest the output settles exactly
+            // on it rather than drifting on.
+            Halo3Frame settled{};
+            for (int i = 0; i < 12; ++i)
+            {
+                settled = Halo3InterpolateFrame(
+                    interp, frameAt(29 * 0.1f, 29 * 2.0f), now, true);
+                now += dt;
+            }
+            const bool settles = std::fabs(settled.pos[0] - 2.9f) < 1e-4f;
+            // A teleport snaps. Sliding a camera across a level would put the
+            // player's head inside the geometry between the two ends.
+            const Halo3Frame teleported = frameAt(400.0f, 58.0f);
+            const Halo3Frame jumped =
+                Halo3InterpolateFrame(interp, teleported, now + dt, true);
+            const bool snaps = std::fabs(jumped.pos[0] - 400.0f) < 1e-3f;
+            // Switched off, the published frame is exactly the raw one.
+            Halo3FrameInterp off;
+            const Halo3Frame passthrough = Halo3InterpolateFrame(
+                off, frameAt(7.0f, 10.0f), now, false);
+            const bool bypasses = passthrough.pos[0] == 7.0f && !off.valid;
+            // Blending two orientations component-wise is not a rotation; the
+            // result must still be a usable basis.
+            const Halo3Frame mid =
+                Halo3LerpFrame(frameAt(0.0f, 0.0f), frameAt(1.0f, 40.0f), 0.5f);
+            const bool basisOk = Halo3FrameOrthonormal(mid) &&
+                std::fabs(std::atan2(mid.fwd[1], mid.fwd[0]) * 57.2957795f -
+                          20.0f) < 1.0f;
+
+            Check(smooth && evened && settles && snaps && bypasses && basisOk,
+                "Seat frame is walked across the 60Hz simulation tick, settles "
+                "on the newest state, snaps on a teleport, and stays a real "
+                "orthonormal basis");
         }
 
         // C9 seat yaw: the view must turn with the hull. The function returns
