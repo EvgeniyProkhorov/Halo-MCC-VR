@@ -480,3 +480,46 @@ stride 0xC, `cmp dword [rdx],0`, 10 iterations). Element data =
 
 Nothing keys a camera off E5 until a C7 log probe confirms the read values
 in-process on known vehicles (fail-open to stock + loud log on mismatch).
+
+## C7 — attached-object frames and the turret fix (2026-07-31 09:08 log)
+
+C6 (cand 28c7b2d) headset result: every ROOT-vehicle driver/passenger seat
+landed on its authored point (chopper, warthogs ×3 sessions, banshee — the
+anchor correction is CONFIRMED in-headset), but mounted-turret cameras
+appeared "deep in the sky" and the mongoose kept the (deliberately shared)
+warthog point.
+
+- **Root cause (from the C6 log's turret windows):** an ATTACHED child
+  object stores `position/forward/up` (+0x50/+0x5C/+0x68) PARENT-RELATIVE.
+  Both hog-turret sessions read position `(-0.500, 0.000, 0.019)`, forward
+  `(1,0,0)`, up `(0,0,1)` — the mount offset in the hog's frame — while the
+  turret's own `bounding_sphere_center` (+0x1C) carried real world
+  coordinates `(9.94, 12.06, -21.44)`. C6 therefore composed the authored
+  point against a frame sitting at the MAP origin. The turret's object
+  frame is mount-fixed: it did not follow the gun/observer aim in either
+  session (gun yaw is bone animation, not an object-frame rotation).
+- **Fix:** compose the anchor frame through the parent chain —
+  `world = carrier ∘ local` (local coordinates in the carrier's fwd/left/up
+  axes), one attachment level deep (deeper chains publish no frame, stock +
+  `frame=too-deep` log). Pure logic + tests in halo3_vehicle_logic.h
+  (`Halo3ComposeFrame`).
+- **Sanity gate (new, all seats):** the anchor frame origin must sit within
+  the seated parent's own bounding sphere (+0x1C center, +0x28 radius,
+  +2.0 wu margin) — the C6 failure class (wrong frame ⇒ tens of wu off)
+  can now only ever produce the stock chase view plus a `frame=INSANE` log,
+  never a sky camera.
+- The probe line now reports `frame=direct|composed|INSANE|too-deep` and
+  the vehicle's definition index.
+- **Identity probe (log-only):** on every seat transition the worker
+  resolves the LOADED definition via the two globals decoded rip-relatively
+  from the matched type-accessor body (instance table / tag data base, E4
+  layout) and logs the §E5 discriminator fields (`H3 defProbe:` — physics
+  block counts, jeep engine_moment/turn_rate, scout specific_type/
+  acceleration, flip/blur tail floats). Nothing keys a camera off these
+  values yet; the C7 log must first confirm them against E5's expected
+  values on known vehicles (E5 caveat: the tag-block `address*4` scaling
+  is proven for definitions generally but not exercised on the physics
+  records specifically — hence measure-before-use).
+- Mongoose was again identified by its bounding-center offset (`(+0.051,
+  −0.001, −0.300)` = mongoose hull node) and stays on the shared hog point
+  until the identity build (C8) keys its own authored point.

@@ -5155,6 +5155,11 @@ namespace
     Halo3PlayerUnitGetterFn g_halo3PlayerUnitGetter = nullptr;
     Halo3UnitInVehicleFn g_halo3UnitInVehicle = nullptr;
     Halo3VehicleTypeFn g_halo3VehicleTypeAccessor = nullptr;
+    // C7 identity probe: the tag-instance-table and tag-data-base globals,
+    // decoded from rip-relative displacements inside the MATCHED type
+    // accessor body (E4 instruction layout) — never from absolute RVAs.
+    void** g_halo3TagInstanceTable = nullptr;
+    void** g_halo3TagDataBase = nullptr;
     std::atomic<uint64_t> g_halo3VehicleSnapshot{0};
     std::atomic<uint32_t> g_halo3VehicleFaults{0};
     std::atomic<uint64_t> g_halo3VehicleSampleMs{0};
@@ -5169,6 +5174,8 @@ namespace
         std::atomic<uint32_t> parentKind{0};
         std::atomic<int32_t> directType{-1};
         std::atomic<uint32_t> nativeInVehicle{0};
+        std::atomic<uint32_t> frameStatus{0};      // Halo3FrameStatus
+        std::atomic<uint32_t> definitionIndex{0xFFFFFFFFu};
     };
     Halo3VehicleProbe g_halo3VehicleProbe;
     std::atomic<uint64_t> g_halo3VehicleProbeKey{~0ull};
@@ -5264,6 +5271,14 @@ namespace
         unsigned native = 0;
         float parentWindow[kHalo3ParentCaptureFloats];
         bool parentWindowValid = false;
+        // C7: an attached direct parent (mounted turret child) stores its
+        // +0x50 frame parent-relative, so the sampler also captures the
+        // carrier (grandparent) window to compose a world frame.
+        int parentOfParent = -1;
+        float grandWindow[kHalo3ParentCaptureFloats];
+        bool grandWindowValid = false;
+        bool chainTooDeep = false;
+        uint32_t defIndex = 0xFFFFFFFFu;
         bool faulted = false;
         __try
         {
@@ -5315,12 +5330,47 @@ namespace
                                 const uint16_t definitionIndex =
                                     *reinterpret_cast<const uint16_t*>(
                                         parentData);
+                                defIndex = definitionIndex;
                                 directType = g_halo3VehicleTypeAccessor(
                                     definitionIndex);
                                 memcpy(parentWindow,
                                        parentData + kHalo3ParentCaptureBase,
                                        sizeof(parentWindow));
                                 parentWindowValid = true;
+                                // C7: walk one attachment level. The carrier
+                                // must itself be a ROOT vehicle; a deeper
+                                // chain publishes no frame (stock + log).
+                                parentOfParent =
+                                    *reinterpret_cast<const int32_t*>(
+                                        parentData + kHalo3ObjectParentOffset);
+                                if (parentOfParent != -1)
+                                {
+                                    unsigned char* grandEntry = entries +
+                                        static_cast<size_t>(
+                                            parentOfParent & 0xFFFF) *
+                                            kHalo3ObjectEntryStride;
+                                    unsigned char* grandData =
+                                        *reinterpret_cast<unsigned char**>(
+                                            grandEntry +
+                                            kHalo3ObjectEntryDataOffset);
+                                    if (grandData)
+                                    {
+                                        memcpy(grandWindow,
+                                               grandData +
+                                                   kHalo3ParentCaptureBase,
+                                               sizeof(grandWindow));
+                                        grandWindowValid = true;
+                                        chainTooDeep =
+                                            *reinterpret_cast<const int32_t*>(
+                                                grandData +
+                                                kHalo3ObjectParentOffset) !=
+                                            -1;
+                                    }
+                                    else
+                                    {
+                                        chainTooDeep = true;
+                                    }
+                                }
                             }
                             native = g_halo3UnitInVehicle(unit);
                         }
@@ -5349,22 +5399,75 @@ namespace
 
         const bool seated = seat >= 0 && parent != -1 &&
             parentKind == kHalo3ObjectKindVehicle;
-        // Publish the measured vehicle transform for the authored-point
-        // camera (C4-proven offsets within the captured window).
+        // Publish the vehicle transform for the authored-point camera.
+        // C7: root parents publish their +0x50 frame directly; attached
+        // parents (mounted turrets) compose carrier ∘ local, since their
+        // stored frame is parent-relative (C6 log proof). Either way the
+        // frame origin must pass the bounding-sphere sanity gate or the
+        // stock chase view stands for the whole seat session.
+        Halo3FrameStatus frameStatus = Halo3FrameStatus::None;
         {
             Halo3VehicleTransform& xf = g_halo3VehicleTransform;
-            if (seated && parentWindowValid)
+            Halo3Frame world{};
+            bool frameOk = false;
+            if (seated && parentWindowValid && !chainTooDeep)
             {
-                const auto at = [&](uintptr_t off) {
-                    return parentWindow +
-                        (off - kHalo3ParentCaptureBase) / 4;
+                const auto frameFrom = [](const float* window) {
+                    const auto at = [&](uintptr_t off) {
+                        return window + (off - kHalo3ParentCaptureBase) / 4;
+                    };
+                    Halo3Frame f{};
+                    memcpy(f.pos, at(kHalo3ObjectPositionOffset),
+                           sizeof(f.pos));
+                    memcpy(f.fwd, at(kHalo3ObjectForwardOffset),
+                           sizeof(f.fwd));
+                    memcpy(f.up, at(kHalo3ObjectUpOffset), sizeof(f.up));
+                    return f;
                 };
+                const Halo3Frame local = frameFrom(parentWindow);
+                if (parentOfParent == -1)
+                {
+                    world = local;
+                    frameOk = Halo3FrameOrthonormal(world);
+                    frameStatus = frameOk ? Halo3FrameStatus::Direct
+                                          : Halo3FrameStatus::Insane;
+                }
+                else if (grandWindowValid)
+                {
+                    const Halo3Frame carrier = frameFrom(grandWindow);
+                    if (Halo3FrameOrthonormal(carrier) &&
+                        Halo3FrameOrthonormal(local))
+                    {
+                        world = Halo3ComposeFrame(carrier, local);
+                        frameOk = Halo3FrameOrthonormal(world);
+                    }
+                    frameStatus = frameOk ? Halo3FrameStatus::Composed
+                                          : Halo3FrameStatus::Insane;
+                }
+                if (frameOk)
+                {
+                    const float* center = parentWindow +
+                        (0x1C - kHalo3ParentCaptureBase) / 4;
+                    const float radius = parentWindow[
+                        (0x28 - kHalo3ParentCaptureBase) / 4];
+                    if (!Halo3AnchorWithinBounds(world.pos, center, radius,
+                                                 2.0f))
+                    {
+                        frameOk = false;
+                        frameStatus = Halo3FrameStatus::Insane;
+                    }
+                }
+            }
+            else if (seated && chainTooDeep)
+            {
+                frameStatus = Halo3FrameStatus::TooDeep;
+            }
+            if (frameOk)
+            {
                 xf.seq.fetch_add(1, std::memory_order_acq_rel);  // -> odd
-                memcpy(xf.pos, at(kHalo3ObjectPositionOffset),
-                       3 * sizeof(float));
-                memcpy(xf.fwd, at(kHalo3ObjectForwardOffset),
-                       3 * sizeof(float));
-                memcpy(xf.up, at(kHalo3ObjectUpOffset), 3 * sizeof(float));
+                memcpy(xf.pos, world.pos, sizeof(xf.pos));
+                memcpy(xf.fwd, world.fwd, sizeof(xf.fwd));
+                memcpy(xf.up, world.up, sizeof(xf.up));
                 xf.directType = directType;
                 xf.seatIndex = seat;
                 xf.nativeInVehicle = static_cast<int32_t>(native);
@@ -5419,7 +5522,9 @@ namespace
             (static_cast<uint64_t>(static_cast<uint32_t>(state)) << 60) ^
             (static_cast<uint64_t>(parentKind & 0xFFu) << 52) ^
             (static_cast<uint64_t>(static_cast<uint8_t>(directType)) << 44) ^
-            (static_cast<uint64_t>(native & 1u) << 43);
+            (static_cast<uint64_t>(native & 1u) << 43) ^
+            (static_cast<uint64_t>(static_cast<uint32_t>(frameStatus) & 0x7u)
+                 << 40);
         if (g_halo3VehicleProbeKey.load(std::memory_order_relaxed) == key)
             return;
         g_halo3VehicleProbeKey.store(key, std::memory_order_relaxed);
@@ -5433,6 +5538,9 @@ namespace
         probe.parentKind.store(parentKind, std::memory_order_relaxed);
         probe.directType.store(directType, std::memory_order_relaxed);
         probe.nativeInVehicle.store(native, std::memory_order_relaxed);
+        probe.frameStatus.store(static_cast<uint32_t>(frameStatus),
+                                std::memory_order_relaxed);
+        probe.definitionIndex.store(defIndex, std::memory_order_relaxed);
         probe.seq.fetch_add(1, std::memory_order_release);   // -> even
     }
 
@@ -5580,6 +5688,104 @@ namespace
         }
     }
 
+    // C7 identity probe (log-only, worker thread, transition-gated by the
+    // caller): resolve the seated vehicle's LOADED definition and dump the
+    // §E5 discriminator fields so the values can be verified in-process
+    // before any camera keys off them. Tag data is immutable while a map is
+    // loaded (the probe only runs while seated); SEH covers unload races.
+    bool Halo3ReadDefinitionFields(uint32_t defIndex, int32_t counts[10],
+                                   float jeepFields[2], int32_t* scoutSpecific,
+                                   float* scoutAccel, float tails[3])
+    {
+        bool ok = false;
+        __try
+        {
+            void** instSlot = g_halo3TagInstanceTable;
+            void** baseSlot = g_halo3TagDataBase;
+            unsigned char* instTable =
+                instSlot ? static_cast<unsigned char*>(*instSlot) : nullptr;
+            unsigned char* tagBase =
+                baseSlot ? static_cast<unsigned char*>(*baseSlot) : nullptr;
+            if (instTable && tagBase && defIndex <= 0xFFFFu)
+            {
+                const uint32_t instanceDword =
+                    *reinterpret_cast<const uint32_t*>(
+                        instTable + static_cast<size_t>(defIndex) * 8 + 4);
+                if (instanceDword)
+                {
+                    unsigned char* def =
+                        tagBase + static_cast<size_t>(instanceDword) * 4;
+                    for (int t = 0; t < 10; ++t)
+                        counts[t] = *reinterpret_cast<const int32_t*>(
+                            def + kHalo3VehiclePhysicsBlocksOffset +
+                            static_cast<size_t>(t) *
+                                kHalo3VehiclePhysicsBlockStride);
+                    const uint32_t jeepAddr =
+                        *reinterpret_cast<const uint32_t*>(
+                            def + kHalo3VehiclePhysicsBlocksOffset +
+                            1 * kHalo3VehiclePhysicsBlockStride + 4);
+                    if (counts[1] == 1 && jeepAddr)
+                    {
+                        unsigned char* elem =
+                            tagBase + static_cast<size_t>(jeepAddr) * 4;
+                        jeepFields[0] = *reinterpret_cast<const float*>(
+                            elem + kHalo3JeepEngineMomentOffset);
+                        jeepFields[1] = *reinterpret_cast<const float*>(
+                            elem + kHalo3JeepTurnRateOffset);
+                    }
+                    const uint32_t scoutAddr =
+                        *reinterpret_cast<const uint32_t*>(
+                            def + kHalo3VehiclePhysicsBlocksOffset +
+                            3 * kHalo3VehiclePhysicsBlockStride + 4);
+                    if (counts[3] == 1 && scoutAddr)
+                    {
+                        unsigned char* elem =
+                            tagBase + static_cast<size_t>(scoutAddr) * 4;
+                        *scoutSpecific = *reinterpret_cast<const int8_t*>(
+                            elem + kHalo3ScoutSpecificTypeOffset);
+                        *scoutAccel = *reinterpret_cast<const float*>(
+                            elem + kHalo3ScoutAccelerationOffset);
+                    }
+                    tails[0] = *reinterpret_cast<const float*>(
+                        def + kHalo3DefMinFlipVelocityOffset);
+                    tails[1] = *reinterpret_cast<const float*>(
+                        def + kHalo3DefMaxFlipVelocityOffset);
+                    tails[2] = *reinterpret_cast<const float*>(
+                        def + kHalo3DefBlurSpeedOffset);
+                    ok = true;
+                }
+            }
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            ok = false;
+        }
+        return ok;
+    }
+
+    void LogHalo3DefinitionProbe(uint32_t defIndex, int32_t directType)
+    {
+        int32_t counts[10] = {};
+        float jeep[2] = {-1.0f, -1.0f};
+        int32_t scoutSpecific = -1;
+        float scoutAccel = -1.0f;
+        float tails[3] = {-1.0f, -1.0f, -1.0f};
+        if (!Halo3ReadDefinitionFields(defIndex, counts, jeep, &scoutSpecific,
+                                       &scoutAccel, tails))
+        {
+            LOG("H3 defProbe: def=%04X directType=%d UNREADABLE", defIndex,
+                directType);
+            return;
+        }
+        LOG("H3 defProbe: def=%04X directType=%d counts=[%d%d%d%d%d%d%d%d%d%d] "
+            "jeepMoment=%.1f jeepTurn=%.1f scoutSpecific=%d scoutAccel=%.2f "
+            "minFlip=%.1f maxFlip=%.1f blur=%.2f",
+            defIndex, directType, counts[0], counts[1], counts[2], counts[3],
+            counts[4], counts[5], counts[6], counts[7], counts[8], counts[9],
+            jeep[0], jeep[1], scoutSpecific, scoutAccel, tails[0], tails[1],
+            tails[2]);
+    }
+
     // Called from the 50 ms worker (NOT a hot hook), so logging is safe here.
     // Transition-gated exactly like LogOdstNonFpCameraIfNew: one line per
     // distinct probe capture, plus a one-shot StockFallback notice.
@@ -5619,16 +5825,26 @@ namespace
             probe.directType.load(std::memory_order_relaxed);
         const uint32_t native =
             probe.nativeInVehicle.load(std::memory_order_relaxed);
+        const uint32_t frameStatus =
+            probe.frameStatus.load(std::memory_order_relaxed);
+        const uint32_t defIndex =
+            probe.definitionIndex.load(std::memory_order_relaxed);
         if (probe.seq.load(std::memory_order_acquire) != seq)
             return; // a newer capture started; re-read next tick
         const Halo3SeatPoint* seatPoint = Halo3FindSeatPoint(
             directType, seat, static_cast<int>(native));
+        static const char* const frameNames[] = {
+            "none", "direct", "composed", "INSANE", "too-deep"};
         LOG("H3 vehicle probe: state=%s unit=%08X seat=%d parent=%08X "
-            "parentKind=%u directType=%d nativeInVehicle=%u seatCam=%s",
+            "parentKind=%u directType=%d nativeInVehicle=%u seatCam=%s "
+            "frame=%s def=%04X",
             Halo3VehicleStateName(state), (unsigned)unit, seat,
             (unsigned)parent, parentKind, directType, native,
-            seatPoint ? "authored" : "none(stock)");
+            seatPoint ? "authored" : "none(stock)",
+            frameStatus < 5 ? frameNames[frameStatus] : "?", defIndex);
         g_halo3VehicleProbeLoggedSeq.store(seq, std::memory_order_relaxed);
+        if (state == static_cast<uint32_t>(Halo3VehicleState::Vehicle))
+            LogHalo3DefinitionProbe(defIndex, directType);
     }
 
     // Called from the 50 ms worker. While the probe reports a seated state,
@@ -8614,6 +8830,8 @@ namespace
             g_halo3PlayerUnitGetter = nullptr;
             g_halo3UnitInVehicle = nullptr;
             g_halo3VehicleTypeAccessor = nullptr;
+            g_halo3TagInstanceTable = nullptr;
+            g_halo3TagDataBase = nullptr;
             const uintptr_t nativeHit =
                 sig::Find(base, size, kHalo3UnitInVehicleSig);
             const uintptr_t getterHit =
@@ -8637,19 +8855,38 @@ namespace
                     reinterpret_cast<Halo3PlayerUnitGetterFn>(getterHit);
                 g_halo3VehicleTypeAccessor =
                     reinterpret_cast<Halo3VehicleTypeFn>(typeHit);
+                // C7: decode the two rip-relative globals from the matched
+                // accessor body (E4 instruction layout: mov rax,[rip+d] at
+                // +0 ends +7 = tag instance table; mov rax,[rip+d] at +22
+                // ends +29 = tag data base). Self-anchoring, no absolute
+                // address is shipped.
+                g_halo3TagInstanceTable = reinterpret_cast<void**>(
+                    typeHit + 7 +
+                    *reinterpret_cast<const int32_t*>(typeHit + 3));
+                g_halo3TagDataBase = reinterpret_cast<void**>(
+                    typeHit + 29 +
+                    *reinterpret_cast<const int32_t*>(typeHit + 25));
                 g_halo3VehicleProbeKey.store(~0ull, std::memory_order_relaxed);
                 g_halo3VehicleBinding.store(
                     static_cast<uint8_t>(Halo3VehicleBindingState::Installed),
                     std::memory_order_release);
                 LOG("H3 vehicle evidence: resolved unit_in_vehicle=+0x%llX "
                     "player_unit=+0x%llX type_accessor=+0x%llX [unique; "
-                    "expected +0x%llX/+0x%llX/+0x%llX]",
+                    "expected +0x%llX/+0x%llX/+0x%llX]; tag globals "
+                    "instanceTable=+0x%llX tagBase=+0x%llX (decoded from the "
+                    "matched body)",
                     (unsigned long long)(nativeHit - base),
                     (unsigned long long)(getterHit - base),
                     (unsigned long long)(typeHit - base),
                     (unsigned long long)kHalo3UnitInVehicleNativeRva,
                     (unsigned long long)kHalo3PlayerUnitGetterRva,
-                    (unsigned long long)kHalo3VehicleTypeAccessorRva);
+                    (unsigned long long)kHalo3VehicleTypeAccessorRva,
+                    (unsigned long long)(
+                        reinterpret_cast<uintptr_t>(g_halo3TagInstanceTable) -
+                        base),
+                    (unsigned long long)(
+                        reinterpret_cast<uintptr_t>(g_halo3TagDataBase) -
+                        base));
             }
             else
             {

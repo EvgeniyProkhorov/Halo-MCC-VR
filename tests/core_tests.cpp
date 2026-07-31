@@ -4733,6 +4733,53 @@ int main()
               Halo3FindSeatPoint(1, 3, 1) == nullptr,
             "Authored seat points resolve exactly and unknown seats stay stock");
 
+        // C7 frame composition: a mounted turret's parent-relative frame must
+        // compose through the carrier. Carrier at (10, 20, -5) yawed 90° left
+        // (fwd = +Y world), turret mounted 0.5 behind carrier origin, 0.02 up,
+        // facing carrier-forward: world origin = carrier + fwd*(-0.5) + up*0.02.
+        {
+            Halo3Frame carrier{};
+            carrier.pos[0] = 10.0f; carrier.pos[1] = 20.0f;
+            carrier.pos[2] = -5.0f;
+            carrier.fwd[1] = 1.0f;          // facing world +Y
+            carrier.up[2] = 1.0f;
+            Halo3Frame local{};
+            local.pos[0] = -0.5f; local.pos[2] = 0.02f;
+            local.fwd[0] = 1.0f;
+            local.up[2] = 1.0f;
+            const Halo3Frame world = Halo3ComposeFrame(carrier, local);
+            // carrier left = up × fwd = (-1, 0, 0); local x rides carrier fwd.
+            const bool posOk =
+                std::fabs(world.pos[0] - 10.0f) < 1e-4f &&
+                std::fabs(world.pos[1] - 19.5f) < 1e-4f &&
+                std::fabs(world.pos[2] - (-4.98f)) < 1e-4f;
+            const bool axesOk =
+                std::fabs(world.fwd[1] - 1.0f) < 1e-4f &&
+                std::fabs(world.up[2] - 1.0f) < 1e-4f &&
+                Halo3FrameOrthonormal(world);
+            // Identity carrier: composition must be exact pass-through.
+            Halo3Frame ident{};
+            ident.fwd[0] = 1.0f; ident.up[2] = 1.0f;
+            const Halo3Frame same = Halo3ComposeFrame(ident, local);
+            const bool identOk =
+                std::fabs(same.pos[0] - local.pos[0]) < 1e-6f &&
+                std::fabs(same.pos[2] - local.pos[2]) < 1e-6f;
+            // Sanity gate: the C6 sky failure (frame near the map origin,
+            // bounds at the real vehicle) must be rejected; a frame origin
+            // inside the bounding sphere must pass; junk radius rejects.
+            const float boundsCenter[3] = {9.9f, 12.1f, -21.4f};
+            const float skyPos[3] = {-0.5f, 0.0f, 0.019f};
+            Halo3Frame degenerate = local;
+            degenerate.up[2] = 0.0f;        // zero-length up
+            Check(posOk && axesOk && identOk &&
+                  !Halo3FrameOrthonormal(degenerate) &&
+                  !Halo3AnchorWithinBounds(skyPos, boundsCenter, 0.8f, 2.0f) &&
+                  Halo3AnchorWithinBounds(world.pos, world.pos, 0.8f, 2.0f) &&
+                  !Halo3AnchorWithinBounds(skyPos, boundsCenter, 1e9f, 2.0f),
+                "Frame composition carries mounted turrets and the sanity "
+                "gate rejects wrong-frame anchors");
+        }
+
         // C2 mode refinement: only a proven seated state upgrades Gameplay;
         // Turret requires the measured physics type 5 exactly; an unproven
         // type stays a plain Vehicle; Unknown and OnFoot never upgrade.

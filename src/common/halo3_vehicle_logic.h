@@ -151,6 +151,113 @@ inline constexpr uintptr_t kHalo3ObjectBoundingCenterOffset = 0x1C;
 inline constexpr uintptr_t kHalo3ObjectForwardOffset = 0x5C;
 inline constexpr uintptr_t kHalo3ObjectUpOffset = 0x68;
 
+// C7: object frames and parent-chain composition. A ROOT object stores its
+// world transform at +0x50/+0x5C/+0x68 (C6 headset-proven on every driver
+// seat). An ATTACHED child object (mounted turret) stores the SAME fields
+// PARENT-RELATIVE — the C6 log's hog chaingun read position (-0.5, 0, 0.019)
+// / forward (1,0,0) / up (0,0,1) while riding at world (9.9, 12.1, -21.4),
+// which is why the C6 turret camera composed against the map origin ("deep
+// in the sky"). The anchor frame must therefore be composed through the
+// parent chain: world = parent ∘ local, with local coordinates expressed in
+// the parent's (fwd, left, up) axes.
+struct Halo3Frame
+{
+    float pos[3];
+    float fwd[3];
+    float up[3];
+};
+
+inline void Halo3FrameLeft(const Halo3Frame& f, float out[3])
+{
+    out[0] = f.up[1] * f.fwd[2] - f.up[2] * f.fwd[1];
+    out[1] = f.up[2] * f.fwd[0] - f.up[0] * f.fwd[2];
+    out[2] = f.up[0] * f.fwd[1] - f.up[1] * f.fwd[0];
+}
+
+inline bool Halo3FrameOrthonormal(const Halo3Frame& f)
+{
+    for (int i = 0; i < 3; ++i)
+        if (!std::isfinite(f.pos[i]) || !std::isfinite(f.fwd[i]) ||
+            !std::isfinite(f.up[i]))
+            return false;
+    const float fLen = f.fwd[0] * f.fwd[0] + f.fwd[1] * f.fwd[1] +
+        f.fwd[2] * f.fwd[2];
+    const float uLen = f.up[0] * f.up[0] + f.up[1] * f.up[1] +
+        f.up[2] * f.up[2];
+    const float fu = f.fwd[0] * f.up[0] + f.fwd[1] * f.up[1] +
+        f.fwd[2] * f.up[2];
+    return std::fabs(fLen - 1.0f) <= 0.05f && std::fabs(uLen - 1.0f) <= 0.05f &&
+        std::fabs(fu) <= 0.15f;
+}
+
+// Map a point/vector expressed in `frame` axes (x fwd, y left, z up) to world.
+inline void Halo3FrameRotate(const Halo3Frame& frame, const float v[3],
+                             float out[3])
+{
+    float left[3];
+    Halo3FrameLeft(frame, left);
+    for (int i = 0; i < 3; ++i)
+        out[i] = frame.fwd[i] * v[0] + left[i] * v[1] + frame.up[i] * v[2];
+}
+
+inline Halo3Frame Halo3ComposeFrame(const Halo3Frame& parent,
+                                    const Halo3Frame& local)
+{
+    Halo3Frame world{};
+    Halo3FrameRotate(parent, local.pos, world.pos);
+    for (int i = 0; i < 3; ++i)
+        world.pos[i] += parent.pos[i];
+    Halo3FrameRotate(parent, local.fwd, world.fwd);
+    Halo3FrameRotate(parent, local.up, world.up);
+    return world;
+}
+
+// Anchor-frame sanity: the frame origin must sit inside the seated parent's
+// own bounding sphere (+0x1C center / +0x28 radius) plus a margin generous
+// enough for every authored point yet far below any wrong-frame miss (the C6
+// sky camera was tens of wu off). Insane -> the stock chase view stands.
+inline bool Halo3AnchorWithinBounds(const float pos[3], const float center[3],
+                                    float radius, float margin)
+{
+    if (!std::isfinite(radius) || radius < 0.0f || radius > 100.0f)
+        return false;
+    float d2 = 0.0f;
+    for (int i = 0; i < 3; ++i)
+    {
+        if (!std::isfinite(pos[i]) || !std::isfinite(center[i]))
+            return false;
+        const float d = pos[i] - center[i];
+        d2 += d * d;
+    }
+    const float limit = radius + margin;
+    return d2 <= limit * limit;
+}
+
+// Frame provenance, published for the probe log so a headset report can be
+// matched to how its anchor was built.
+enum class Halo3FrameStatus : uint32_t
+{
+    None = 0,
+    Direct = 1,     // root object: +0x50 frame used as-is
+    Composed = 2,   // attached child: parent ∘ local
+    Insane = 3,     // sanity gate rejected the frame -> stock
+    TooDeep = 4,    // more than one attachment level -> stock
+};
+
+// C7 identity-probe field map (log-only; §E5, offline-verified, nothing keys
+// a camera off these until a headset log confirms the in-process reads).
+// Definition-relative tag_block records: +0x2C0 + type*0xC {count, address};
+// element = tagDataBase + address*4. Discriminating fields:
+inline constexpr uintptr_t kHalo3VehiclePhysicsBlocksOffset = 0x2C0;
+inline constexpr size_t kHalo3VehiclePhysicsBlockStride = 0xC;
+inline constexpr uintptr_t kHalo3JeepEngineMomentOffset = 0x14;   // element
+inline constexpr uintptr_t kHalo3JeepTurnRateOffset = 0x10;       // element
+inline constexpr uintptr_t kHalo3ScoutSpecificTypeOffset = 0x28;  // int8
+inline constexpr uintptr_t kHalo3ScoutAccelerationOffset = 0x10;  // element
+inline constexpr uintptr_t kHalo3DefMinFlipVelocityOffset = 0x39C;
+inline constexpr uintptr_t kHalo3DefMaxFlipVelocityOffset = 0x3A0;
+inline constexpr uintptr_t kHalo3DefBlurSpeedOffset = 0x3B4;
+
 // User-authored first-person seat points (Blender kit, model-space world
 // units, relative to the DIRECT parent object's origin and basis).
 // nativeRequired: -1 = any, else the exact nativeInVehicle flag (separates
