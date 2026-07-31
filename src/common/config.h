@@ -48,6 +48,15 @@ inline constexpr float kMenuWidthMax = 4.00f;
 // Lateral/vertical travel of the grab handle, measured from straight ahead.
 inline constexpr float kMenuOffsetLimit = 3.00f;
 
+// Per-vehicle seat-trim overrides, indexed by Halo3VehicleId - 1. Config stays
+// decoupled from the enum header, so the order here mirrors it by contract and
+// game.cpp static_asserts the two never drift. "prowler" is the Mauler enum
+// entry (its user-facing name); "turret" is every walk-up turret.
+inline constexpr int kVehicleTrimCount = 10;
+inline constexpr const char* kVehicleTrimNames[kVehicleTrimCount] = {
+    "scorpion", "warthog", "mongoose", "ghost", "wraith",
+    "prowler",  "banshee", "hornet",   "chopper", "turret"};
+
 struct Config
 {
     int config_version = 5;
@@ -109,6 +118,15 @@ struct Config
     bool vehicle_first_person = true;
     float vehicle_cam_forward_m = 0.10f; // + = toward the windshield
     float vehicle_cam_up_m = 0.05f;      // + = raise out of the seat
+    // Per-vehicle overrides of the two trims above. An entry only exists once
+    // the user adjusts the F1 sliders while SITTING IN that vehicle (or writes
+    // the config line by hand); every other vehicle keeps following the
+    // universal trim, including live edits to it. The F1 sliders are the same
+    // two widgets always — they simply bind to whichever vehicle is under you.
+    float vehicle_cam_forward_v[kVehicleTrimCount] = {};
+    float vehicle_cam_up_v[kVehicleTrimCount] = {};
+    bool vehicle_cam_forward_set[kVehicleTrimCount] = {};
+    bool vehicle_cam_up_set[kVehicleTrimCount] = {};
     // How much of the vehicle's turning the view takes with it. 1 = you turn
     // with the vehicle like a real driver; 0 = the world-locked view Alpha
     // 0.3.1 shipped, which also leaves every control exactly as it was.
@@ -117,9 +135,9 @@ struct Config
     // between; without this the seat camera steps against it and the vehicle
     // appears to shake. 0 = the raw stepped position.
     bool vehicle_cam_smoothing = true;
-    // Fraction of one game tick to advance the seat camera by. Only touch this
-    // if the vehicle feels like it drags behind you at speed.
-    float vehicle_cam_lead = 0.0f;
+    // (vehicle_cam_lead removed in C12: the renderer's display phase is now
+    // MEASURED live and matched automatically; the hand-tuned knob both
+    // dragged at zero and sawtoothed at any other value.)
     // Motion steering in look-steered ground driver seats: grab an invisible
     // wheel with both grips and turn it. 0 = the right stick steers.
     bool vehicle_motion = true;
@@ -416,6 +434,25 @@ struct Config
 };
 
 extern Config g_config;
+
+// The seat trim a given vehicle actually uses: its own override when one has
+// been set, the universal trim otherwise. vehicleId is Halo3VehicleId as an
+// int; 0/out-of-range (on foot, unknown) reads the universal trim.
+inline float ConfigVehicleCamForward(const Config& c, int vehicleId)
+{
+    const int i = vehicleId - 1;
+    if (i >= 0 && i < kVehicleTrimCount && c.vehicle_cam_forward_set[i])
+        return c.vehicle_cam_forward_v[i];
+    return c.vehicle_cam_forward_m;
+}
+
+inline float ConfigVehicleCamUp(const Config& c, int vehicleId)
+{
+    const int i = vehicleId - 1;
+    if (i >= 0 && i < kVehicleTrimCount && c.vehicle_cam_up_set[i])
+        return c.vehicle_cam_up_v[i];
+    return c.vehicle_cam_up_m;
+}
 
 void ConfigLoad(const wchar_t* path); // missing file -> file is created with defaults
 void ConfigLoadMigrating(const wchar_t* primaryPath, const wchar_t* legacyPath);

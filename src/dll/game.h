@@ -141,6 +141,13 @@ void Game_Halo3UpdateVehicleWheel(const VrPadState& pad);
 bool Game_Halo3VehicleSwallowsGrips();
 // True while the wheel, rather than the turn stick, authors the steering.
 bool Game_Halo3VehicleWheelActive();
+// C12 per-vehicle seat trim: the vehicle the player is seated in right now
+// (Halo3VehicleId as an int; a mounted gunner reports the carrier), 0 when on
+// foot or unidentified, plus its display name. The F1 seat sliders bind to
+// whichever vehicle this reports, so the same two widgets edit every
+// vehicle's own trim without a per-vehicle menu.
+int Game_Halo3CurrentVehicleId();
+const char* Game_Halo3VehicleName(int vehicleId);
 // True while an armed tracked camera consumes the OpenXR turn action. The
 // XInput hook must then suppress stock RX/RY so the game cannot create a second
 // camera motion underneath the HMD-owned view.

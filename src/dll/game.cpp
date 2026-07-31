@@ -4902,7 +4902,8 @@ namespace
 
     // First-person vehicle camera helpers, defined with the vehicle probe
     // module below (they run on this same engine camera thread).
-    bool Halo3ComputeAuthoredAnchor(float out[3]);
+    bool Halo3ComputeAuthoredAnchor(float out[3],
+                                    uint32_t* outIdentity = nullptr);
     bool Halo3VehicleFpActive();
     // C9: folds the hull's rotation into the shared yaw reference and decides
     // whether this seat's steering is authored instead of closed-loop aimed.
@@ -5041,12 +5042,20 @@ namespace
         if (!cinematic && Halo3VehicleFpActive())
         {
             float anchor[3];
-            if (Halo3ComputeAuthoredAnchor(anchor))
+            uint32_t anchorIdentity = 0;
+            if (Halo3ComputeAuthoredAnchor(anchor, &anchorIdentity))
             {
+                // C12: each vehicle may carry its own trim; anything without
+                // one follows the universal pair (config.h accessors).
                 const float trimScale = g_worldScale.load();
                 const float trimFwd =
-                    g_config.vehicle_cam_forward_m * trimScale;
-                const float trimUp = g_config.vehicle_cam_up_m * trimScale;
+                    ConfigVehicleCamForward(
+                        g_config, static_cast<int>(anchorIdentity)) *
+                    trimScale;
+                const float trimUp =
+                    ConfigVehicleCamUp(g_config,
+                                       static_cast<int>(anchorIdentity)) *
+                    trimScale;
                 pos[0] = anchor[0] + cgy * trimFwd;
                 pos[1] = anchor[1] + sgy * trimFwd;
                 pos[2] = anchor[2] + trimUp;
@@ -5261,6 +5270,14 @@ namespace
     Halo3FrameInterp g_halo3FrameInterp;
     std::atomic<uint32_t> g_halo3SmoothingActive{0};
     std::atomic<float> g_halo3TickSeconds{0.0f};
+    // C12: the measured display-phase lock (halo3_vehicle_logic.h). Camera
+    // thread only; the two atomics mirror its state for the worker log.
+    // 0 = smoothing off/no ticks, 1 = waiting for a parked latch,
+    // 2 = latched, still measuring, 3 = bounds centre proven NOT
+    // render-interpolated (C11 pacing stands, loudly), 4 = locked.
+    Halo3PhaseLock g_halo3PhaseLock;
+    std::atomic<uint32_t> g_halo3PhaseLockState{0};
+    std::atomic<float> g_halo3PhaseLeadTicks{0.0f};
     // Stamped on a settled seat ENTRY; consumed once by the follow, which
     // rebases "straight ahead" onto the vehicle's nose. Zero means nothing
     // pending, and a request that finds no live seat within two seconds
@@ -5563,6 +5580,10 @@ namespace
             Halo3VehicleTransform& xf = g_halo3VehicleTransform;
             Halo3Frame world{};
             bool frameOk = false;
+            // C12: the raw bounding centre from the same capture window,
+            // handed to the phase lock as the render-side witness.
+            float rawBounds[3] = {0.0f, 0.0f, 0.0f};
+            bool rawBoundsOk = false;
             if (seated && parentWindowValid && !chainTooDeep)
             {
                 const auto frameFrom = [](const float* window) {
@@ -5631,6 +5652,10 @@ namespace
                         frameOk = false;
                         frameStatus = Halo3FrameStatus::Insane;
                     }
+                    rawBounds[0] = center[0];
+                    rawBounds[1] = center[1];
+                    rawBounds[2] = center[2];
+                    rawBoundsOk = true;
                 }
             }
             else if (seated && chainTooDeep)
@@ -5696,13 +5721,35 @@ namespace
                 const Halo3Frame smooth = Halo3InterpolateFrame(
                     g_halo3FrameInterp, world, Halo3NowSeconds(),
                     g_config.vehicle_cam_smoothing,
-                    g_config.vehicle_cam_lead);
+                    &g_halo3PhaseLock,
+                    rawBoundsOk ? rawBounds : nullptr);
                 g_halo3SmoothingActive.store(
                     g_halo3FrameInterp.tickKnown ? 1u : 0u,
                     std::memory_order_relaxed);
                 g_halo3TickSeconds.store(
                     static_cast<float>(g_halo3FrameInterp.tick),
                     std::memory_order_relaxed);
+                // C12: mirror the phase lock for the worker log. Every state
+                // short of "locked" is reported, per the no-silent-fallback
+                // rule, and "not render-smooth" is only claimed once a tick
+                // window actually judged it.
+                uint32_t phaseState = 0;
+                if (g_halo3FrameInterp.tickKnown)
+                {
+                    const Halo3PhaseLock& pl = g_halo3PhaseLock;
+                    if (pl.leadValid)
+                        phaseState = 4;
+                    else if (pl.refValid && pl.smoothEvaluated && !pl.smooth)
+                        phaseState = 3;
+                    else if (pl.refValid)
+                        phaseState = 2;
+                    else
+                        phaseState = 1;
+                }
+                g_halo3PhaseLockState.store(phaseState,
+                                            std::memory_order_relaxed);
+                g_halo3PhaseLeadTicks.store(g_halo3PhaseLock.lead,
+                                            std::memory_order_relaxed);
 
                 xf.seq.fetch_add(1, std::memory_order_acq_rel);  // -> odd
                 memcpy(xf.pos, smooth.pos, sizeof(xf.pos));
@@ -5727,6 +5774,8 @@ namespace
                 // interpolator so the next vehicle cannot be blended toward
                 // from this one's last known pose.
                 g_halo3FrameInterp.valid = false;
+                g_halo3PhaseLock = Halo3PhaseLock{};
+                g_halo3PhaseLockState.store(0, std::memory_order_relaxed);
                 g_halo3SmoothingActive.store(0, std::memory_order_relaxed);
                 g_halo3MotionDiag.frames.store(0, std::memory_order_relaxed);
                 g_halo3MotionDiag.posChanged.store(
@@ -5942,11 +5991,13 @@ namespace
     // C5: place the user's Blender-authored seat point in the world using the
     // measured vehicle transform. A seat with no authored point returns false
     // and the stock chase view stands.
-    bool Halo3ComputeAuthoredAnchor(float out[3])
+    bool Halo3ComputeAuthoredAnchor(float out[3], uint32_t* outIdentity)
     {
         Halo3SeatSnapshot seat;
         if (!Halo3ReadSeatSnapshot(seat))
             return false;
+        if (outIdentity)
+            *outIdentity = seat.identity;
         // A mounted gunner's point is keyed and framed by its CARRIER, so its
         // seat index on the gun tag (always 0) is the right key there too.
         const Halo3SeatPoint* point = Halo3FindSeatPoint(
@@ -6404,16 +6455,30 @@ namespace
         const double scale = 100.0 / static_cast<double>(frames);
         const float tickMs =
             g_halo3TickSeconds.load(std::memory_order_relaxed) * 1000.0f;
+        // C12: which stage the display-phase lock reached. Stage 2 sticking
+        // around means the bounding centre is NOT render-interpolated on this
+        // machine and the C11 pacing stands — that is the loud signal to go
+        // find the real render transform instead.
+        static const char* const kPhaseNames[5] = {
+            "off", "waiting for a parked latch", "latched, measuring",
+            "bounds not render-smooth, C11 pacing", "locked"};
+        uint32_t phaseState =
+            g_halo3PhaseLockState.load(std::memory_order_relaxed);
+        if (phaseState > 4)
+            phaseState = 0;
         LOG("H3 seat motion: %u sampled frames, hull moved on %u (%.0f%%), "
             "tilted on %u (%.0f%%); largest raw step %.4f wu, largest raw tilt "
-            "%.2f deg; smoothing %s across a %.2f ms tick; view follow %.2f, "
+            "%.2f deg; smoothing %s across a %.2f ms tick; phase %s, render "
+            "lead %+.2f ticks; view follow %.2f, "
             "hull turned %.0f deg since entry, steering by %s",
             frames, moved, moved * scale, tilted, tilted * scale,
             diag.maxPosStep.load(std::memory_order_relaxed),
             diag.maxTiltDeg.load(std::memory_order_relaxed),
             g_halo3SmoothingActive.load(std::memory_order_relaxed) ? "ON"
                                                                    : "off",
-            tickMs, g_config.vehicle_view_follow,
+            tickMs, kPhaseNames[phaseState],
+            g_halo3PhaseLeadTicks.load(std::memory_order_relaxed),
+            g_config.vehicle_view_follow,
             g_halo3SeatYawTotal.load(std::memory_order_relaxed) * 57.2957795f,
             g_halo3SeatAuthorsSteering.load(std::memory_order_relaxed)
                 ? (g_halo3WheelDriving.load(std::memory_order_relaxed)
@@ -21333,6 +21398,46 @@ bool Game_Halo3VehicleSwallowsGrips()
 bool Game_Halo3VehicleWheelActive()
 {
     return g_halo3WheelDriving.load(std::memory_order_acquire) != 0;
+}
+
+// C12: the per-vehicle trim table in config.h mirrors Halo3VehicleId by
+// contract; if the enum ever grows or reorders, this is the tripwire.
+static_assert(static_cast<int>(Halo3VehicleId::Scorpion) == 1 &&
+                  static_cast<int>(Halo3VehicleId::StationaryTurret) ==
+                      kVehicleTrimCount,
+              "kVehicleTrimNames must mirror Halo3VehicleId order");
+
+// The vehicle the player is seated in right now — the anchor owner, so a
+// mounted gunner reports the CARRIER. 0 when on foot, unidentified, or the
+// seat frame is stale/torn. The F1 seat sliders bind to this.
+int Game_Halo3CurrentVehicleId()
+{
+    if (!Halo3VehicleFpActive())
+        return 0;
+    Halo3SeatSnapshot seat;
+    if (!Halo3ReadSeatSnapshot(seat))
+        return 0;
+    return static_cast<int>(seat.identity);
+}
+
+// Display name for the F1 label. Takes the int form so menu.cpp needs no
+// enum include.
+const char* Game_Halo3VehicleName(int vehicleId)
+{
+    switch (static_cast<Halo3VehicleId>(vehicleId))
+    {
+    case Halo3VehicleId::Scorpion:         return "Scorpion";
+    case Halo3VehicleId::Warthog:          return "Warthog";
+    case Halo3VehicleId::Mongoose:         return "Mongoose";
+    case Halo3VehicleId::Ghost:            return "Ghost";
+    case Halo3VehicleId::Wraith:           return "Wraith";
+    case Halo3VehicleId::Mauler:           return "Prowler";
+    case Halo3VehicleId::Banshee:          return "Banshee";
+    case Halo3VehicleId::Hornet:           return "Hornet";
+    case Halo3VehicleId::Chopper:          return "Chopper";
+    case Halo3VehicleId::StationaryTurret: return "Turret";
+    default:                               return "vehicle";
+    }
 }
 
 bool Game_ComputeAimStick(float& outRx, float& outRy)

@@ -977,3 +977,113 @@ this cannot determine offline: whether MCC draws the mesh at the same sub-tick
 phase we now reconstruct. A constant phase difference shows up as the vehicle
 dragging at speed, not as shake, and one config line answers it without a
 rebuild.
+
+## C12 — the lead knob replaced by a measured display-phase lock, and per-vehicle seat trim
+
+The user rejected `vehicle_cam_lead` outright: "a weird method i dont like it
+... doesnt make the vehicle drag but also not bouces repeatily from the origin
+to behing me at rapid small speeds". Both halves of that sentence are real
+defects of the knob, not taste:
+
+- **Drag at 0**: C11 paces the blend evenly but displays between the two most
+  recent simulation states, on average roughly half a tick behind. Wherever
+  the renderer actually draws the mesh inside the tick, a constant phase
+  difference remains, and at speed it reads as the vehicle sitting displaced.
+- **Sawtooth at any other value**: the C11 blend clamped its fraction at 1.0
+  (the newest state). Any positive lead therefore SLID for the first part of
+  each tick and FROZE at the newest state for the rest — a 60 Hz
+  slide-and-freeze, worst at low speeds where the freeze is a visible
+  fraction of the motion. That is the reported "bounces repeatedly ... at
+  rapid small speeds".
+
+No fixed number can be right, because the quantity is unknowable offline:
+which sub-tick fraction MCC's renderer displays. C12 measures it instead.
+
+### The witness: the bounding-sphere centre
+
+The sampler already reads the object's bounding-sphere centre (`+0x1C`) every
+camera call, from the same capture window as the hull frame, to sanity-gate
+the anchor. That centre is ANIMATED data. If MCC render-interpolates the
+model, the centre glides BETWEEN the 60 Hz hull states — which makes it a
+per-call witness of exactly what the renderer is displaying. The lock uses it
+in three runtime-proved steps (`Halo3PhaseLock`, halo3_vehicle_logic.h):
+
+1. **Latch at rest.** While neither the hull frame nor the centre has moved
+   for ~1/8 s, sim and render provably show the same pose, so the centre's
+   hull-frame offset is read exactly. No authored data, no guess.
+2. **Prove render-rate.** Per tick window, count camera calls vs calls on
+   which the centre moved. Only a render-interpolated value moves BETWEEN
+   hull ticks; a 60 Hz value moves only on the tick itself. No proof, no
+   lock — and the worker log says so in words ("bounds not render-smooth,
+   C11 pacing"), per the no-silent-fallback rule.
+3. **Measure and learn.** Each call where the centre freshly moved (a stale
+   read biases the phase low), project the live centre onto the segment
+   between the centres computed from the two held sim states: the result is
+   the blend fraction the renderer is displaying RIGHT NOW. Its offset from
+   the free-running C11 phase is EMA-learned (2% per sample) as `lead`.
+
+The displayed fraction becomes `min(phase, 1) + lead·ramp`, allowed past 1.0
+(a true extrapolation of the newest state) up to 1.75 — but only while ticks
+are actually arriving, and scaled by `ramp`, which is zero below ~walking
+pace per tick of hull travel and full above roughly twice that. So:
+
+- at speed, the camera rides wherever the renderer draws the mesh (drag gone);
+- at rest or a crawl, the lead disengages entirely — erratic millimetre
+  physics steps are interpolated, never extrapolated (bounce impossible);
+- with the witness absent, unproven, or the vehicle unidentified, lead stays
+  0 and the behaviour is bit-for-bit C11.
+
+Frame status nuance: the witness and the published frame always come from the
+same object pair — a mounted gunner's frame IS the carrier frame and its
+bounds window IS the carrier's, so the latch/projection stay self-consistent
+in every branch (Direct/Carrier/Composed).
+
+Tests (core_tests.cpp): a simulated renderer presenting at 120 fps drawing
+0.6 of a tick AHEAD of the sim, on a camera clock 1.7% off — the lock latches
+the offset from rest, learns a lead in (0.2, 1.1), and tracks the on-screen
+position within 0.45 of a tick worst-case / 0.15 mean (VERIFIED to FAIL with
+the witness removed: the same drive then drags by the full renderer lead).
+A rocking vehicle (±4 mm steps) produces no amplified motion, and a 60 Hz
+witness leaves the output bit-identical to C11 with the lock never armed.
+
+`vehicle_cam_lead` is retired: parsed quietly from old configs, never written
+back, no longer anywhere in the runtime.
+
+### Per-vehicle seat trim behind the same two sliders
+
+The seat trim pair (`vehicle_cam_forward_m` / `vehicle_cam_up_m`) stays the
+universal base. New sparse overrides `vehicle_cam_forward_m_<vehicle>` /
+`vehicle_cam_up_m_<vehicle>` (scorpion, warthog, mongoose, ghost, wraith,
+prowler, banshee, hornet, chopper, turret — mirroring `Halo3VehicleId`, with
+a `static_assert` tripwire in game.cpp) exist only for the axis and vehicle
+the user actually adjusted. The F1 menu keeps exactly the two existing
+sliders: seated, they bind to the occupied vehicle's own trim (label names
+it; a mounted gunner binds the carrier; a button hands the vehicle back to
+the universal pair); on foot they edit the universal base. ApplyHeadLook
+resolves the effective trim per anchor identity via `ConfigVehicleCamForward/
+Up`. An unknown vehicle name in the config is dropped, not misfiled; the
+overrides round-trip through save/load (tested).
+
+### C12 adversarial review (16-agent, pre-package)
+
+Confirmed and FIXED before packaging: the applied lead was a step function at
+the ticks-stopped boundary (a sim hitch at speed would have snapped the
+camera by up to 0.75 tick of travel in one frame — it now glides over ~40 ms,
+regression-tested); the F1 seat binding could rebind to the universal trim on
+a one-frame stale-snapshot blip mid-drag (now sticky: only a sustained
+on-foot read rebinds); a malformed per-vehicle config value invented an
+override and NaN passed the clamp (now ParseFloatSetting-validated, loudly);
+an unknown vehicle name was swallowed silently (now logged); and the phase
+log could claim "bounds not render-smooth" before any tick window had
+judged it, or claim anything at all with smoothing toggled off (states split,
+tickKnown cleared on disable).
+
+Confirmed and ACCEPTED as a bounded limitation: the bounding centre rides the
+ANIMATED model, so a sustained animation displacement along the travel
+direction (the chopper's ~0.09 wu suspension drift is the measured worst
+case) biases the measured phase by up to a few tenths of a tick while it
+lasts — a slow cm-scale seat offset at speed, not a shake, self-correcting
+within ~0.4 s of the pose relaxing, bounded by the [-0.5, 1.5] lead clamp,
+and visible in the logged lead value. Rejecting it would need a hull-rigid
+render-rate witness, which is exactly the render-transform RE this design
+avoided.

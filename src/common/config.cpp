@@ -66,8 +66,13 @@ static void Clamp()
         std::clamp(g_config.vehicle_cam_up_m, -0.5f, 1.0f);
     g_config.vehicle_view_follow =
         std::clamp(g_config.vehicle_view_follow, 0.0f, 1.0f);
-    g_config.vehicle_cam_lead =
-        std::clamp(g_config.vehicle_cam_lead, 0.0f, 1.0f);
+    for (int i = 0; i < kVehicleTrimCount; ++i)
+    {
+        g_config.vehicle_cam_forward_v[i] =
+            std::clamp(g_config.vehicle_cam_forward_v[i], -0.5f, 1.0f);
+        g_config.vehicle_cam_up_v[i] =
+            std::clamp(g_config.vehicle_cam_up_v[i], -0.5f, 1.0f);
+    }
     g_config.vehicle_wheel_max_deg =
         std::clamp(g_config.vehicle_wheel_max_deg, 30.0f, 180.0f);
     g_config.vehicle_wheel_deadzone_deg =
@@ -198,7 +203,8 @@ void ConfigLoad(const wchar_t* path)
             g_config.turn_smooth_deg_s = (float)atof(val);
         else if (!strcmp(key, "ghost_fix") || !strcmp(key, "stereo_alternate_order") ||
                  !strcmp(key, "stereo_warmup_pass") || !strcmp(key, "per_eye_history") ||
-                 !strcmp(key, "stereo_sun_shafts") || !strcmp(key, "gun_length_scale"))
+                 !strcmp(key, "stereo_sun_shafts") || !strcmp(key, "gun_length_scale") ||
+                 !strcmp(key, "vehicle_cam_lead"))
             continue; // retired switches; accept old config files quietly
         else if (!strcmp(key, "dpad_hand"))
             g_config.dpad_hand = atoi(val) != 0 ? 1 : 0;
@@ -208,12 +214,43 @@ void ConfigLoad(const wchar_t* path)
             g_config.vehicle_cam_forward_m = (float)atof(val);
         else if (!strcmp(key, "vehicle_cam_up_m"))
             g_config.vehicle_cam_up_m = (float)atof(val);
+        // Per-vehicle trim overrides: vehicle_cam_forward_m_warthog etc. The
+        // exact matches above cannot fire for these (different length). A
+        // malformed value must NOT invent an override (the vehicle keeps
+        // following the universal trim), and an unknown vehicle name is
+        // reported, not silently swallowed.
+        else if (!strncmp(key, "vehicle_cam_forward_m_", 22))
+        {
+            bool known = false;
+            for (int i = 0; i < kVehicleTrimCount; ++i)
+                if (!strcmp(key + 22, kVehicleTrimNames[i]))
+                {
+                    known = true;
+                    if (ParseFloatSetting(key, val,
+                                          g_config.vehicle_cam_forward_v[i]))
+                        g_config.vehicle_cam_forward_set[i] = true;
+                }
+            if (!known)
+                LOG("config: unknown vehicle in '%s' ignored", key);
+        }
+        else if (!strncmp(key, "vehicle_cam_up_m_", 17))
+        {
+            bool known = false;
+            for (int i = 0; i < kVehicleTrimCount; ++i)
+                if (!strcmp(key + 17, kVehicleTrimNames[i]))
+                {
+                    known = true;
+                    if (ParseFloatSetting(key, val,
+                                          g_config.vehicle_cam_up_v[i]))
+                        g_config.vehicle_cam_up_set[i] = true;
+                }
+            if (!known)
+                LOG("config: unknown vehicle in '%s' ignored", key);
+        }
         else if (!strcmp(key, "vehicle_view_follow"))
             g_config.vehicle_view_follow = (float)atof(val);
         else if (!strcmp(key, "vehicle_cam_smoothing"))
             g_config.vehicle_cam_smoothing = atoi(val) != 0;
-        else if (!strcmp(key, "vehicle_cam_lead"))
-            g_config.vehicle_cam_lead = (float)atof(val);
         else if (!strcmp(key, "vehicle_motion"))
             g_config.vehicle_motion = atoi(val) != 0;
         else if (!strcmp(key, "vehicle_wheel_max_deg"))
@@ -590,6 +627,22 @@ void ConfigSave()
             d.vehicle_cam_forward_m, d.vehicle_cam_up_m);
     fprintf(f, "vehicle_cam_forward_m = %.2f\n", g_config.vehicle_cam_forward_m);
     fprintf(f, "vehicle_cam_up_m = %.2f\n\n", g_config.vehicle_cam_up_m);
+    fprintf(f, "# Per-vehicle seat trim. A line appears here when you adjust\n");
+    fprintf(f, "# the two seat sliders while SITTING IN that vehicle; every\n");
+    fprintf(f, "# vehicle without a line keeps using the universal trim above.\n");
+    fprintf(f, "# Delete a line (or use the F1 button) to hand that vehicle\n");
+    fprintf(f, "# back to the universal trim. Vehicle names: scorpion warthog\n");
+    fprintf(f, "# mongoose ghost wraith prowler banshee hornet chopper turret.\n");
+    for (int i = 0; i < kVehicleTrimCount; ++i)
+    {
+        if (g_config.vehicle_cam_forward_set[i])
+            fprintf(f, "vehicle_cam_forward_m_%s = %.2f\n",
+                    kVehicleTrimNames[i], g_config.vehicle_cam_forward_v[i]);
+        if (g_config.vehicle_cam_up_set[i])
+            fprintf(f, "vehicle_cam_up_m_%s = %.2f\n",
+                    kVehicleTrimNames[i], g_config.vehicle_cam_up_v[i]);
+    }
+    fprintf(f, "\n");
     fprintf(f, "# How much of the vehicle's turning your view takes with it.\n");
     fprintf(f, "# 1 = you turn with the vehicle like a real driver; 0.5 = half,\n");
     fprintf(f, "# for a gentler ride; 0 = the view stays locked to the world and\n");
@@ -600,13 +653,7 @@ void ConfigSave()
     fprintf(f, "# model in between. Leave this on so your seat moves with the\n");
     fprintf(f, "# smoothed model; off, the vehicle appears to shake around you.\n");
     fprintf(f, "# (default %d)\n", d.vehicle_cam_smoothing ? 1 : 0);
-    fprintf(f, "vehicle_cam_smoothing = %d\n", g_config.vehicle_cam_smoothing ? 1 : 0);
-    fprintf(f, "# Only touch this if the vehicle feels like it drags behind\n");
-    fprintf(f, "# you at speed: it advances the seat camera by this fraction\n");
-    fprintf(f, "# of one game tick (a tick is 1/60 second). 0.5 and 1.0 are\n");
-    fprintf(f, "# the values worth trying.\n");
-    fprintf(f, "# (default %.2f, range 0 to 1)\n", d.vehicle_cam_lead);
-    fprintf(f, "vehicle_cam_lead = %.2f\n\n", g_config.vehicle_cam_lead);
+    fprintf(f, "vehicle_cam_smoothing = %d\n\n", g_config.vehicle_cam_smoothing ? 1 : 0);
     fprintf(f, "# Motion steering. In a Warthog, Mongoose, Ghost, Prowler or\n");
     fprintf(f, "# Chopper, DOUBLE-CLICK both grips to take hold of an invisible\n");
     fprintf(f, "# steering wheel: hold your hands as if on a wheel and tilt it,\n");

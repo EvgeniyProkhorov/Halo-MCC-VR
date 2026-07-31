@@ -213,8 +213,10 @@ inline void Halo3FrameRotate(const Halo3Frame& frame, const float v[3],
 // from the previous simulation state to the current one across one tick. This
 // is continuous by construction: when a new state arrives, the point we have
 // just reached (the old current) becomes the new previous, so the output never
-// jumps. It also cannot overshoot, unlike a velocity extrapolation, which
-// would fling the camera through walls on a collision tick.
+// jumps. A t past 1 extrapolates linearly beyond the newest state; the caller
+// only ever asks for that by the amount the renderer itself was MEASURED to
+// draw ahead (the C12 phase lock below), and only at speed, so a collision
+// tick can never fling the camera further than the renderer flings the mesh.
 inline Halo3Frame Halo3LerpFrame(const Halo3Frame& a, const Halo3Frame& b,
                                  float t)
 {
@@ -257,7 +259,75 @@ struct Halo3FrameInterp
     double tick = 1.0 / 60.0;   // measured simulation interval
     bool tickKnown = false;
     float correction = 0.0f;    // last phase nudge, diagnostic only
+    float lastStepLen = 0.0f;   // |cur - prev| position step, wu
 };
+
+// ---- C12: measured display-phase lock ------------------------------------
+// C11 paced the camera evenly but could not know WHERE inside the tick the
+// renderer draws the mesh, so the constant offset between the two was left as
+// a hand-tuned config knob — and because the blend was clamped at the newest
+// state, any non-zero knob slid for part of each tick and froze for the rest,
+// a 60 Hz sawtooth ("bounces repeatedly at rapid small speeds", user,
+// 2026-07-31). Both are replaced by measuring the renderer directly.
+//
+// The witness is the object's bounding-sphere centre (+0x1C), sampled every
+// camera call in the same capture window as the hull frame. It is ANIMATED
+// data: if MCC render-interpolates the model, this value glides between the
+// two simulation states we already hold — so projecting it onto the segment
+// between those states reads off the exact sub-tick fraction the renderer is
+// displaying right now. Every assumption is checked at runtime:
+//  - the centre's hull-frame offset is latched only while PARKED, when sim
+//    and render provably show the same pose;
+//  - the phase is measured only when the centre was seen moving BETWEEN hull
+//    ticks (a 60 Hz value cannot), only at a driving pace, and only against a
+//    per-tick travel big enough to project on;
+//  - the learned lead is a 2%-per-sample average, applied only at speed, so
+//    a parked or crawling vehicle never extrapolates its own physics jitter.
+// Anything unproven leaves lead at zero, which is exactly C11.
+struct Halo3PhaseLock
+{
+    // Bounding-centre offset in hull axes, latched at rest.
+    bool refValid = false;
+    float refLocal[3] = {0.0f, 0.0f, 0.0f};
+    int stillCalls = 0;
+    // Previous call's raw centre, for change detection.
+    bool lastBValid = false;
+    float lastB[3] = {0.0f, 0.0f, 0.0f};
+    // Render-rate proof, per tick window.
+    int callsSinceTick = 0;
+    int bMovesSinceTick = 0;
+    bool smooth = false;
+    // The learned constant: how far ahead of the free-running phase the
+    // renderer actually draws, in ticks.
+    bool leadValid = false;
+    float lead = 0.0f;
+    // What is actually added to the blend this call: glides toward
+    // lead*ramp (or zero when ticks stop) a step per call, so engaging and
+    // disengaging is a ~40 ms slide, never a one-frame snap.
+    float leadApplied = 0.0f;
+    // True once at least one tick window was long enough to judge `smooth`,
+    // so the log can tell "not render-interpolated" from "not measured yet".
+    bool smoothEvaluated = false;
+    float lastMeasured = 0.0f;  // diagnostic only
+};
+
+// Consecutive unchanged calls (hull AND centre) that count as parked;
+// ~1/8 second at the measured 240 calls/sec.
+inline constexpr int kHalo3PhaseStillCalls = 30;
+// Bounding-centre movement below this is standing still (wu).
+inline constexpr float kHalo3PhaseStillEpsilon = 1e-4f;
+// Per-tick travel (wu) below which no phase is measured and no lead applied:
+// 0.01 wu/tick is walking pace, where a phase error is invisible anyway.
+inline constexpr float kHalo3PhaseMinStep = 0.01f;
+inline constexpr float kHalo3PhaseLeadTrack = 0.02f;  // EMA per fresh sample
+// How fast the APPLIED lead glides toward its target, per camera call:
+// ~10 calls (40 ms) to engage or let go, so a simulation hitch or a stop can
+// never step the camera by the whole lead in one frame.
+inline constexpr float kHalo3PhaseApplyTrack = 0.1f;
+inline constexpr float kHalo3PhaseLeadMin = -0.5f;
+inline constexpr float kHalo3PhaseLeadMax = 1.5f;
+// Hard ceiling on the displayed blend fraction while ticks are arriving.
+inline constexpr double kHalo3PhaseAlphaMax = 1.75;
 
 // How hard each detected tick pulls the free-running phase back into lock.
 // Small on purpose: the whole point is that the phase must NOT be yanked to a
@@ -279,11 +349,16 @@ inline constexpr double kHalo3TickMax = 0.050;
 // its 15.6 ms steps). Returns the frame to publish.
 inline Halo3Frame Halo3InterpolateFrame(Halo3FrameInterp& state,
                                         const Halo3Frame& raw, double nowSec,
-                                        bool enabled, float leadTicks = 0.0f)
+                                        bool enabled,
+                                        Halo3PhaseLock* lock = nullptr,
+                                        const float* rawBounds = nullptr)
 {
     if (!enabled || !std::isfinite(nowSec))
     {
         state.valid = false;
+        state.tickKnown = false; // the log mirror keys off this: OFF is OFF
+        if (lock)
+            *lock = Halo3PhaseLock{};
         return raw;
     }
     if (!state.valid)
@@ -296,6 +371,9 @@ inline Halo3Frame Halo3InterpolateFrame(Halo3FrameInterp& state,
         state.phase = 0.0;
         state.tickKnown = false;
         state.correction = 0.0f;
+        state.lastStepLen = 0.0f;
+        if (lock)
+            *lock = Halo3PhaseLock{};
         return raw;
     }
     // The phase FREE-RUNS on the wall clock. Restarting the blend at zero on
@@ -321,6 +399,59 @@ inline Halo3Frame Halo3InterpolateFrame(Halo3FrameInterp& state,
             std::fabs(raw.up[i] - state.cur.up[i]) > kHalo3FrameSameEpsilon)
             changed = true;
     }
+    // C12 bookkeeping: the raw bounding centre is the render-side witness.
+    const bool haveB = lock && rawBounds &&
+        std::isfinite(rawBounds[0]) && std::isfinite(rawBounds[1]) &&
+        std::isfinite(rawBounds[2]);
+    bool bMoved = false;
+    if (lock)
+    {
+        if (haveB)
+        {
+            if (lock->lastBValid)
+                bMoved =
+                    std::fabs(rawBounds[0] - lock->lastB[0]) >
+                        kHalo3PhaseStillEpsilon ||
+                    std::fabs(rawBounds[1] - lock->lastB[1]) >
+                        kHalo3PhaseStillEpsilon ||
+                    std::fabs(rawBounds[2] - lock->lastB[2]) >
+                        kHalo3PhaseStillEpsilon;
+            ++lock->callsSinceTick;
+            if (bMoved)
+                ++lock->bMovesSinceTick;
+            if (!changed && !bMoved && lock->lastBValid)
+            {
+                // Parked, the simulation and the renderer provably show the
+                // same pose, so the centre's hull-frame offset can be read
+                // exactly — the reference every moving measurement projects
+                // against.
+                if (++lock->stillCalls >= kHalo3PhaseStillCalls)
+                {
+                    float rel[3], left[3];
+                    for (int i = 0; i < 3; ++i)
+                        rel[i] = rawBounds[i] - state.cur.pos[i];
+                    Halo3FrameLeft(state.cur, left);
+                    lock->refLocal[0] = rel[0] * state.cur.fwd[0] +
+                        rel[1] * state.cur.fwd[1] + rel[2] * state.cur.fwd[2];
+                    lock->refLocal[1] =
+                        rel[0] * left[0] + rel[1] * left[1] + rel[2] * left[2];
+                    lock->refLocal[2] = rel[0] * state.cur.up[0] +
+                        rel[1] * state.cur.up[1] + rel[2] * state.cur.up[2];
+                    lock->refValid = true;
+                }
+            }
+            else
+                lock->stillCalls = 0;
+            for (int i = 0; i < 3; ++i)
+                lock->lastB[i] = rawBounds[i];
+            lock->lastBValid = true;
+        }
+        else
+        {
+            lock->lastBValid = false;
+            lock->stillCalls = 0;
+        }
+    }
     if (changed)
     {
         const float dot = raw.fwd[0] * state.cur.fwd[0] +
@@ -332,6 +463,16 @@ inline Halo3Frame Halo3InterpolateFrame(Halo3FrameInterp& state,
             state.cur = raw;
             state.curTime = nowSec;
             state.phase = 0.0;
+            state.lastStepLen = 0.0f;
+            if (lock)
+            {
+                // A teleport invalidates the between-tick statistics but not
+                // the vehicle-shape reference or the learned lead.
+                lock->callsSinceTick = 0;
+                lock->bMovesSinceTick = 0;
+                lock->stillCalls = 0;
+                lock->smooth = false;
+            }
             return raw;
         }
         const double interval = nowSec - state.curTime;
@@ -344,9 +485,32 @@ inline Halo3Frame Halo3InterpolateFrame(Halo3FrameInterp& state,
                 : interval;
             state.tickKnown = true;
         }
+        // C12: was the centre seen moving BETWEEN hull ticks? Only a
+        // render-interpolated value can be; a 60 Hz value moves only on the
+        // tick itself.
+        if (lock)
+        {
+            if (lock->callsSinceTick >= 3)
+            {
+                lock->smooth =
+                    lock->bMovesSinceTick * 2 >= lock->callsSinceTick;
+                lock->smoothEvaluated = true;
+            }
+            lock->callsSinceTick = 0;
+            lock->bMovesSinceTick = 0;
+        }
         state.prev = state.cur;
         state.cur = raw;
         state.curTime = nowSec;
+        {
+            float d2 = 0.0f;
+            for (int i = 0; i < 3; ++i)
+            {
+                const float d = state.cur.pos[i] - state.prev.pos[i];
+                d2 += d * d;
+            }
+            state.lastStepLen = std::sqrt(d2);
+        }
         // Consume the tick we just crossed, then pull the phase gently toward
         // where it should be at this instant: the real tick happened somewhere
         // inside the last camera interval, so on average half of one. A gentle
@@ -366,9 +530,75 @@ inline Halo3Frame Halo3InterpolateFrame(Halo3FrameInterp& state,
     }
     if (!state.tickKnown)
         return state.cur;
-    double alpha = state.phase + static_cast<double>(leadTicks);
-    if (!(alpha > 0.0)) alpha = 0.0;
-    if (alpha > 1.0) alpha = 1.0;
+    // C12 measurement: project the render-side centre onto the segment
+    // between the same centre computed from the two simulation states. The
+    // result is the blend fraction the renderer is displaying RIGHT NOW;
+    // its constant offset from our free-running phase is the lead. Sampled
+    // only on calls where the centre freshly moved (a stale read would bias
+    // the phase low), only while ticks are actually arriving, and only when
+    // the tick's travel is long enough to project against.
+    const bool ticksLive = nowSec - state.curTime <= state.tick * 1.5;
+    if (haveB && bMoved && ticksLive && lock->refValid && lock->smooth)
+    {
+        float bPrev[3], bCur[3], rot[3];
+        Halo3FrameRotate(state.prev, lock->refLocal, rot);
+        for (int i = 0; i < 3; ++i)
+            bPrev[i] = state.prev.pos[i] + rot[i];
+        Halo3FrameRotate(state.cur, lock->refLocal, rot);
+        for (int i = 0; i < 3; ++i)
+            bCur[i] = state.cur.pos[i] + rot[i];
+        float dir[3], d2 = 0.0f, num = 0.0f;
+        for (int i = 0; i < 3; ++i)
+        {
+            dir[i] = bCur[i] - bPrev[i];
+            d2 += dir[i] * dir[i];
+            num += (rawBounds[i] - bPrev[i]) * dir[i];
+        }
+        if (d2 > kHalo3PhaseMinStep * kHalo3PhaseMinStep)
+        {
+            const float alphaMeas = num / d2;
+            if (alphaMeas > -0.5f && alphaMeas < 2.5f)
+            {
+                const float sample =
+                    alphaMeas - static_cast<float>(state.phase);
+                lock->lead = lock->leadValid
+                    ? lock->lead + (sample - lock->lead) * kHalo3PhaseLeadTrack
+                    : sample;
+                if (lock->lead < kHalo3PhaseLeadMin)
+                    lock->lead = kHalo3PhaseLeadMin;
+                if (lock->lead > kHalo3PhaseLeadMax)
+                    lock->lead = kHalo3PhaseLeadMax;
+                lock->leadValid = true;
+                lock->lastMeasured = alphaMeas;
+            }
+        }
+    }
+    double alpha = state.phase < 1.0 ? state.phase : 1.0;
+    if (lock)
+    {
+        // The measured lead engages only at a driving pace: below walking
+        // speed a phase error is invisible, while extrapolating erratic
+        // sub-centimetre physics steps is exactly the bouncing the manual
+        // knob produced. The APPLIED value glides toward its target a step
+        // per call rather than switching, so a simulation hitch, a stop or
+        // an engage can never move the camera by the whole lead in one
+        // headset frame (the ticksLive gate used to be a step function
+        // worth up to 0.75 of a tick's travel).
+        float target = 0.0f;
+        if (lock->leadValid && ticksLive)
+        {
+            float ramp =
+                (state.lastStepLen - kHalo3PhaseMinStep) / kHalo3PhaseMinStep;
+            if (ramp < 0.0f) ramp = 0.0f;
+            if (ramp > 1.0f) ramp = 1.0f;
+            target = lock->lead * ramp;
+        }
+        lock->leadApplied +=
+            (target - lock->leadApplied) * kHalo3PhaseApplyTrack;
+        alpha += static_cast<double>(lock->leadApplied);
+    }
+    if (alpha < -0.25) alpha = -0.25;
+    if (alpha > kHalo3PhaseAlphaMax) alpha = kHalo3PhaseAlphaMax;
     return Halo3LerpFrame(state.prev, state.cur, static_cast<float>(alpha));
 }
 

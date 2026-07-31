@@ -712,14 +712,74 @@ namespace
         ImGui::TextDisabled(
             "OFF restores the stock behind-the-vehicle view instantly.");
         ImGui::Spacing();
-        changed |= ImGui::SliderFloat("Seat forward (m)",
-            &g_config.vehicle_cam_forward_m, -0.50f, 1.00f, "%.2f");
-        changed |= ImGui::SliderFloat("Seat height (m)",
-            &g_config.vehicle_cam_up_m, -0.50f, 1.00f, "%.2f");
+        // C12: the same two sliders always, bound to whichever vehicle is
+        // under you. Seated, they edit THAT vehicle's own trim (created on
+        // first touch, saved to the config, reloaded whenever you sit in it
+        // again); on foot they edit the universal trim every unadjusted
+        // vehicle follows.
+        // The binding is STICKY: the id read is a fail-closed snapshot that
+        // can blip to 0 for a frame (stale/torn sampler read), and rebinding
+        // on that frame would silently rewrite the universal trim mid-drag.
+        // Only a sustained 0 (a real exit) rebinds to the universal pair.
+        static int s_seatBind = 0;
+        static int s_seatZeroFrames = 0;
+        const int liveVehicle = Game_Halo3CurrentVehicleId();
+        if (liveVehicle > 0)
+        {
+            s_seatBind = liveVehicle;
+            s_seatZeroFrames = 0;
+        }
+        else if (++s_seatZeroFrames > 30)
+            s_seatBind = 0;
+        const int seatVehicle = s_seatBind;
+        const int seatTrim = seatVehicle - 1;
+        const bool perVehicle = seatTrim >= 0 && seatTrim < kVehicleTrimCount;
+        if (perVehicle)
+            ImGui::Text("Adjusting: %s (this vehicle only)",
+                        Game_Halo3VehicleName(seatVehicle));
+        else
+            ImGui::Text("Adjusting: all vehicles (universal trim)");
+        float seatFwd = ConfigVehicleCamForward(g_config, seatVehicle);
+        if (ImGui::SliderFloat("Seat forward (m)", &seatFwd,
+                               -0.50f, 1.00f, "%.2f"))
+        {
+            if (perVehicle)
+            {
+                g_config.vehicle_cam_forward_v[seatTrim] = seatFwd;
+                g_config.vehicle_cam_forward_set[seatTrim] = true;
+            }
+            else
+                g_config.vehicle_cam_forward_m = seatFwd;
+            changed = true;
+        }
+        float seatUp = ConfigVehicleCamUp(g_config, seatVehicle);
+        if (ImGui::SliderFloat("Seat height (m)", &seatUp,
+                               -0.50f, 1.00f, "%.2f"))
+        {
+            if (perVehicle)
+            {
+                g_config.vehicle_cam_up_v[seatTrim] = seatUp;
+                g_config.vehicle_cam_up_set[seatTrim] = true;
+            }
+            else
+                g_config.vehicle_cam_up_m = seatUp;
+            changed = true;
+        }
+        if (perVehicle && (g_config.vehicle_cam_forward_set[seatTrim] ||
+                           g_config.vehicle_cam_up_set[seatTrim]))
+        {
+            if (ImGui::SmallButton("Back to the universal trim##seattrim"))
+            {
+                g_config.vehicle_cam_forward_set[seatTrim] = false;
+                g_config.vehicle_cam_up_set[seatTrim] = false;
+                changed = true;
+            }
+        }
         ImGui::TextDisabled(
-            "Trims applied to every seat. The base position is the game's own\n"
-            "per-seat camera pivot, so each vehicle already seats you where\n"
-            "its authors placed the camera focus.");
+            "Sit in a vehicle and these sliders adjust that vehicle alone,\n"
+            "remembered per vehicle. On foot they set the shared base trim.\n"
+            "The base position is the game's own per-seat camera pivot, so\n"
+            "each vehicle already seats you where its authors placed it.");
         ImGui::Spacing();
         ImGui::Separator();
         ImGui::Text("Turning with the vehicle");
