@@ -5182,6 +5182,19 @@ namespace
     };
     Halo3ObserverCapture g_halo3ObserverCapture;
 
+    // C4 transform probe capture (log-only): a bounded window of the seated
+    // DIRECT parent's object data, so the worker can measure the vehicle's
+    // world position/orientation offsets against the C1-proven observer
+    // focus. Nothing consumes these values; the log is the deliverable.
+    struct Halo3ParentCapture
+    {
+        std::atomic<uint32_t> seq{0};      // even = stable, odd = mid-write
+        std::atomic<uint32_t> valid{0};
+        std::atomic<uint64_t> captureMs{0};
+        float floats[kHalo3ParentCaptureFloats];
+    };
+    Halo3ParentCapture g_halo3ParentCapture;
+
     // C3 first-person camera state, all owned by the engine camera thread
     // (the sampler and ApplyHeadLook both run inside CamCopyHook). The
     // debounce keeps seat entry/exit swings and rapid seat switches from
@@ -5226,6 +5239,8 @@ namespace
         int directType = -1;
         unsigned parentKind = 0;
         unsigned native = 0;
+        float parentWindow[kHalo3ParentCaptureFloats];
+        bool parentWindowValid = false;
         bool faulted = false;
         __try
         {
@@ -5279,6 +5294,10 @@ namespace
                                         parentData);
                                 directType = g_halo3VehicleTypeAccessor(
                                     definitionIndex);
+                                memcpy(parentWindow,
+                                       parentData + kHalo3ParentCaptureBase,
+                                       sizeof(parentWindow));
+                                parentWindowValid = true;
                             }
                             native = g_halo3UnitInVehicle(unit);
                         }
@@ -5294,6 +5313,15 @@ namespace
         {
             Halo3DisableVehicleProbe("sampler fault");
             return;
+        }
+        if (parentWindowValid)
+        {
+            Halo3ParentCapture& pcap = g_halo3ParentCapture;
+            pcap.seq.fetch_add(1, std::memory_order_acq_rel);   // -> odd
+            memcpy(pcap.floats, parentWindow, sizeof(pcap.floats));
+            pcap.valid.store(1, std::memory_order_relaxed);
+            pcap.captureMs.store(nowMs, std::memory_order_relaxed);
+            pcap.seq.fetch_add(1, std::memory_order_release);   // -> even
         }
 
         const bool seated = seat >= 0 && parent != -1 &&
@@ -5575,6 +5603,87 @@ namespace
                 LOG("H3 observer raw[+0x%X..]: %s",
                     (unsigned)(kHalo3ObserverCaptureBase +
                                half * (kHalo3ObserverCaptureFloats / 2) * 4),
+                    line);
+            }
+        }
+    }
+
+    // Called from the 50 ms worker. While seated, measure the parent object
+    // data window against the C1-proven observer focus: the vehicle's world
+    // position should be the triplet nearest the focus, and its orientation
+    // basis shows up as sustained unit-length triplets. One drive session
+    // names the transform offsets; the Blender-authored seat points cannot be
+    // consumed until this log proves them.
+    void LogHalo3ParentXformIfDriving()
+    {
+        static uint64_t nextAnalysisMs = 0;
+        static uint64_t nextDumpMs = 0;
+        if (g_halo3VehicleBinding.load(std::memory_order_acquire) !=
+            static_cast<uint8_t>(Halo3VehicleBindingState::Installed))
+            return;
+        if (g_halo3VehicleProbe.state.load(std::memory_order_relaxed) !=
+            static_cast<uint32_t>(Halo3VehicleState::Vehicle))
+            return;
+        const uint64_t nowMs = GetTickCount64();
+        if (nowMs < nextAnalysisMs)
+            return;
+        Halo3ParentCapture& pcap = g_halo3ParentCapture;
+        if (!pcap.valid.load(std::memory_order_acquire) ||
+            nowMs - pcap.captureMs.load(std::memory_order_relaxed) > 500)
+            return;
+        float window[kHalo3ParentCaptureFloats];
+        const uint32_t seq = pcap.seq.load(std::memory_order_acquire);
+        if (seq & 1u)
+            return;
+        memcpy(window, pcap.floats, sizeof(window));
+        if (pcap.seq.load(std::memory_order_acquire) != seq)
+            return;
+        float focus[3];
+        if (!Halo3ReadSeatAnchor(focus))
+            return;
+        nextAnalysisMs = nowMs + 1000;
+        const Halo3NearestTriplet posCand = Halo3FindNearestTriplet(
+            window, kHalo3ParentCaptureFloats, focus);
+        const Halo3UnitTripletScan units = Halo3FindUnitTriplets(
+            window, kHalo3ParentCaptureFloats, 0.01f);
+        char unitList[160];
+        unitList[0] = '\0';
+        const int unitCount = units.count < 12 ? units.count : 12;
+        for (int i = 0; i < unitCount; ++i)
+        {
+            const size_t used = strlen(unitList);
+            _snprintf_s(unitList + used, sizeof(unitList) - used, _TRUNCATE,
+                        "%s+0x%X", i ? "," : "",
+                        (unsigned)(kHalo3ParentCaptureBase +
+                                   units.indices[i] * 4));
+        }
+        LOG("H3 xform probe: posCand=+0x%X dist=%.3f unitTriplets[%d]=%s",
+            posCand.index >= 0
+                ? (unsigned)(kHalo3ParentCaptureBase + posCand.index * 4)
+                : 0u,
+            posCand.distance, units.count, unitList);
+        if (nowMs >= nextDumpMs)
+        {
+            nextDumpMs = nowMs + 5000;
+            char line[512];
+            for (int half = 0; half < 2; ++half)
+            {
+                size_t used = 0;
+                line[0] = '\0';
+                for (size_t i = 0; i < kHalo3ParentCaptureFloats / 2; ++i)
+                {
+                    const size_t index =
+                        half * (kHalo3ParentCaptureFloats / 2) + i;
+                    const int written = _snprintf_s(
+                        line + used, sizeof(line) - used, _TRUNCATE,
+                        "%s%.3f", i ? " " : "", window[index]);
+                    if (written < 0)
+                        break;
+                    used += static_cast<size_t>(written);
+                }
+                LOG("H3 xform raw[+0x%X..]: %s",
+                    (unsigned)(kHalo3ParentCaptureBase +
+                               half * (kHalo3ParentCaptureFloats / 2) * 4),
                     line);
             }
         }
@@ -19059,11 +19168,13 @@ namespace
             LogOdstNativeHudRouteOnce();    // bounded in-place CHUD route result
             LogHalo3VehicleProbeIfNew();   // H3 vehicle probe transitions
             LogHalo3ObserverIfDriving();   // H3 observer focus-field analysis
+            LogHalo3ParentXformIfDriving(); // H3 vehicle-transform measurement
             VR_FramePacingWorkerPoll();
             Sleep(50);
 #else
             LogHalo3VehicleProbeIfNew();   // H3 vehicle probe transitions
             LogHalo3ObserverIfDriving();   // H3 observer focus-field analysis
+            LogHalo3ParentXformIfDriving(); // H3 vehicle-transform measurement
             VR_FramePacingWorkerPoll();
             Sleep(50);
 #endif

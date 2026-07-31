@@ -134,6 +134,75 @@ inline constexpr int Halo3VehicleSnapshotSeat(
     return static_cast<int>(seatPlus1) - 1;
 }
 
+// C4 transform probe: bounded float window of the seated DIRECT parent's
+// object data, captured so a drive session can measure where the vehicle's
+// world position and orientation vectors live (the Blender-authored seat
+// points are in the direct parent's model space and need that transform).
+// Nothing downstream consumes offsets until the log proves them.
+inline constexpr uintptr_t kHalo3ParentCaptureBase = 0x14;
+inline constexpr size_t kHalo3ParentCaptureFloats = 56; // +0x14..+0xF4
+
+// Pure analysis for the C4 worker: find float triplets of ~unit length (the
+// signature of orientation basis vectors) and the triplet nearest a reference
+// point (the signature of the object position, referenced against the
+// C1-proven observer focus).
+struct Halo3UnitTripletScan
+{
+    int count = 0;
+    int indices[12] = {};
+};
+
+inline Halo3UnitTripletScan Halo3FindUnitTriplets(
+    const float* window, size_t floatCount, float tolerance)
+{
+    Halo3UnitTripletScan scan{};
+    if (!window)
+        return scan;
+    for (int i = 0; i + 2 < static_cast<int>(floatCount); ++i)
+    {
+        const float a = window[i], b = window[i + 1], c = window[i + 2];
+        if (!std::isfinite(a) || !std::isfinite(b) || !std::isfinite(c))
+            continue;
+        const float len = std::sqrt(a * a + b * b + c * c);
+        if (std::fabs(len - 1.0f) <= tolerance)
+        {
+            if (scan.count < 12)
+                scan.indices[scan.count] = i;
+            ++scan.count;
+        }
+    }
+    return scan;
+}
+
+struct Halo3NearestTriplet
+{
+    int index = -1;
+    float distance = 0.0f;
+};
+
+inline Halo3NearestTriplet Halo3FindNearestTriplet(
+    const float* window, size_t floatCount, const float reference[3])
+{
+    Halo3NearestTriplet best{};
+    if (!window || !reference)
+        return best;
+    for (int i = 0; i + 2 < static_cast<int>(floatCount); ++i)
+    {
+        const float dx = window[i] - reference[0];
+        const float dy = window[i + 1] - reference[1];
+        const float dz = window[i + 2] - reference[2];
+        if (!std::isfinite(dx) || !std::isfinite(dy) || !std::isfinite(dz))
+            continue;
+        const float d = std::sqrt(dx * dx + dy * dy + dz * dz);
+        if (best.index < 0 || d < best.distance)
+        {
+            best.index = i;
+            best.distance = d;
+        }
+    }
+    return best;
+}
+
 // C2 mode refinement: how the Present-tick publisher upgrades Gameplay when
 // the sampler proves a seated state. 0 = leave Gameplay (not seated, unknown,
 // or stale), 1 = Vehicle, 2 = Turret. Turret requires the measured physics

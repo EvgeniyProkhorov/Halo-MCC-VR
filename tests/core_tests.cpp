@@ -4686,6 +4686,35 @@ int main()
                   observerWindow, 2, 0, 1).tripletIndex == -1,
             "Observer focus scan rejects degenerate windows");
 
+        // C4 transform-probe analysis: unit-length triplets (orientation
+        // basis signature) and the triplet nearest a reference point
+        // (position signature) must be found exactly and never invented.
+        float xformWindow[kHalo3ParentCaptureFloats];
+        for (size_t i = 0; i < kHalo3ParentCaptureFloats; ++i)
+            xformWindow[i] = 500.0f + static_cast<float>(i);
+        xformWindow[8] = 0.0f;  xformWindow[9] = 0.6f;   // unit triplet A
+        xformWindow[10] = 0.8f;
+        xformWindow[20] = 1.0f; xformWindow[21] = 0.0f;  // unit triplet B
+        xformWindow[22] = 0.0f;
+        xformWindow[40] = 101.0f; xformWindow[41] = 202.0f; // position
+        xformWindow[42] = 303.5f;
+        const float xformRef[3] = {100.0f, 202.0f, 303.0f};
+        const Halo3UnitTripletScan unitScan = Halo3FindUnitTriplets(
+            xformWindow, kHalo3ParentCaptureFloats, 0.01f);
+        bool sawA = false, sawB = false;
+        for (int i = 0; i < unitScan.count && i < 12; ++i)
+        {
+            if (unitScan.indices[i] == 8) sawA = true;
+            if (unitScan.indices[i] == 20) sawB = true;
+        }
+        const Halo3NearestTriplet nearest = Halo3FindNearestTriplet(
+            xformWindow, kHalo3ParentCaptureFloats, xformRef);
+        Check(sawA && sawB && nearest.index == 40 &&
+              nearest.distance < 1.5f &&
+              Halo3FindUnitTriplets(nullptr, 0, 0.01f).count == 0 &&
+              Halo3FindNearestTriplet(nullptr, 0, xformRef).index == -1,
+            "Transform probe scans find planted basis and position triplets");
+
         // C2 mode refinement: only a proven seated state upgrades Gameplay;
         // Turret requires the measured physics type 5 exactly; an unproven
         // type stays a plain Vehicle; Unknown and OnFoot never upgrade.
