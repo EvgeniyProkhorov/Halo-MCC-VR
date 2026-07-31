@@ -5932,7 +5932,8 @@ namespace
     // Steering the author is publishing this frame, + = right. Written by the
     // input thread's wheel update, read by the aim-stick author.
     std::atomic<float> g_halo3SteerAxis{0.0f};
-    std::atomic<uint32_t> g_halo3WheelGripped{0};
+    std::atomic<uint32_t> g_halo3WheelDriving{0};
+    std::atomic<uint32_t> g_halo3WheelSwallowsGrips{0};
 
     void Halo3ApplySeatYawFollow()
     {
@@ -5959,7 +5960,7 @@ namespace
         if (!authors)
         {
             g_halo3SteerAxis.store(0.0f, std::memory_order_relaxed);
-            g_halo3WheelGripped.store(0, std::memory_order_relaxed);
+            g_halo3WheelDriving.store(0, std::memory_order_relaxed);
         }
         g_halo3SeatAuthorsSteering.store(authors ? 1u : 0u,
                                          std::memory_order_release);
@@ -6302,7 +6303,7 @@ namespace
             g_config.vehicle_view_follow,
             g_halo3SeatYawTotal.load(std::memory_order_relaxed) * 57.2957795f,
             g_halo3SeatAuthorsSteering.load(std::memory_order_relaxed)
-                ? (g_halo3WheelGripped.load(std::memory_order_relaxed)
+                ? (g_halo3WheelDriving.load(std::memory_order_relaxed)
                        ? "wheel"
                        : "stick")
                 : "hand aim");
@@ -21160,19 +21161,36 @@ static bool ReachControllerAimActive()
 static bool ReachControllerAimActive() { return false; }
 #endif
 
-// C9: the virtual steering wheel. Two gripped hands make a wheel out of the
-// line between them — no fixed pivot, so it is wherever the player's hands are
-// and grabbing it never snaps the steering. Called once per XInput poll before
-// the grip buttons are built, so the same poll that grabs the wheel also keeps
-// those grips from reaching the game as bumpers.
-void Game_Halo3UpdateVehicleWheel()
+// C9: the virtual steering wheel. Two hands make a wheel out of the line
+// between them — no fixed pivot, so it is wherever the player's hands are and
+// taking it never snaps the steering. Double-click both grips to take it,
+// double-click again to let go: the right grip is the dismount, so a sustained
+// squeeze would either eject the driver or cost them the dismount entirely.
+//
+// Called once per XInput poll with THAT poll's pad, before the buttons below
+// are built. One shared sample is load-bearing: sampling the pad again here
+// could see a grip on one side of the press threshold and the button code the
+// other, which is exactly the frame that would fire the dismount.
+void Game_Halo3UpdateVehicleWheel(const VrPadState& pad)
 {
-    VrPadState pad;
-    VR_GetPadState(pad);
     const bool eligible = pad.valid && g_config.vehicle_motion &&
         g_enabled.load() && g_vrAim.load() && Halo3SeatUsesWheel();
+    if (Halo3UpdateWheelToggle(g_halo3Wheel, eligible, pad.gripL, pad.gripR,
+                               GetTickCount64()))
+    {
+        // The only feedback a toggle can give. VR_SetGameHaptics peak-holds,
+        // so this lands as one blip and the game's own rumble resumes.
+        VR_SetGameHaptics(g_halo3Wheel.engaged ? 0.6f : 0.35f);
+        LOG("H3 vehicle: steering wheel %s (double-click both grips)",
+            g_halo3Wheel.engaged ? "taken" : "released");
+    }
+    g_halo3WheelSwallowsGrips.store(
+        Halo3WheelSwallowsGrips(g_halo3Wheel) ? 1u : 0u,
+        std::memory_order_release);
+
     float lq[4]{}, lp[3]{}, rq[4]{}, rp[3]{}, hq[4]{}, hp[3]{};
-    const bool posesOk = eligible && VR_GetLeftControllerPose(lq, lp) &&
+    const bool posesOk = g_halo3Wheel.engaged &&
+        VR_GetLeftControllerPose(lq, lp) &&
         VR_GetRightControllerPose(rq, rp) && VR_GetHeadPose(hq, hp);
     float headYaw = 0.0f;
     if (posesOk)
@@ -21182,19 +21200,26 @@ void Game_Halo3UpdateVehicleWheel()
         const float fz = -(1.0f - 2.0f * (x * x + y * y));
         headYaw = atan2f(fx, -fz);
     }
-    const bool driving = Halo3UpdateWheel(
-        g_halo3Wheel, posesOk, pad.gripL, pad.gripR, lp, rp, headYaw,
-        g_config.vehicle_wheel_max_deg, g_config.vehicle_wheel_deadzone_deg);
-    g_halo3WheelGripped.store(driving ? 1u : 0u, std::memory_order_release);
+    const bool driving = posesOk && Halo3ComputeWheelSteer(
+        g_halo3Wheel, lp, rp, headYaw, g_config.vehicle_wheel_max_deg,
+        g_config.vehicle_wheel_deadzone_deg);
+    g_halo3WheelDriving.store(driving ? 1u : 0u, std::memory_order_release);
     if (driving)
         g_halo3SteerAxis.store(g_halo3Wheel.steer, std::memory_order_relaxed);
 }
 
-// True while the wheel owns both grips, so the input hook can withhold them
-// from the game (holding a wheel must not spam the bumpers).
+// The input hook withholds the grip buttons ONLY while both grips are down at
+// once, which is the wheel gesture itself. A lone right grip is never touched,
+// so the dismount it performs keeps working whether the wheel is held or not.
+bool Game_Halo3VehicleSwallowsGrips()
+{
+    return g_halo3WheelSwallowsGrips.load(std::memory_order_acquire) != 0;
+}
+
+// True while the wheel, not the stick, is authoring the steering.
 bool Game_Halo3VehicleWheelActive()
 {
-    return g_halo3WheelGripped.load(std::memory_order_acquire) != 0;
+    return g_halo3WheelDriving.load(std::memory_order_acquire) != 0;
 }
 
 bool Game_ComputeAimStick(float& outRx, float& outRy)

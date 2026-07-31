@@ -407,49 +407,87 @@ inline float Halo3SeatYawDelta(Halo3SeatYaw& state, const float fwd[3],
 // never snaps the steering.
 struct Halo3Wheel
 {
-    bool gripped = false;
-    float steer = 0.0f;     // last authored steer, [-1, 1], + = right
+    bool bothHeld = false;      // both grips are down right now
+    bool engaged = false;       // the wheel is in your hands
+    int clicks = 0;             // clicks banked toward a double-click
+    uint64_t lastReleaseMs = 0;
+    float steer = 0.0f;         // last authored steer, [-1, 1], + = right
 };
 
-inline constexpr float kHalo3WheelEngageGrip = 0.6f;
+inline constexpr float kHalo3WheelPressGrip = 0.6f;
 inline constexpr float kHalo3WheelReleaseGrip = 0.4f;
+inline constexpr uint64_t kHalo3WheelDoubleClickMs = 450;
 inline constexpr float kHalo3WheelMinSpan = 0.15f;  // metres between hands
+
+// Taking the wheel is a DOUBLE-CLICK of both grips, and letting go is another;
+// it is not a hold. Two reasons, both from the user (2026-07-31):
+//   * the right grip is already the dismount, so a sustained two-hand squeeze
+//     would either eject the player or have to disable dismounting outright;
+//   * nothing should have to be squeezed for the length of a drive.
+// The grip BUTTONS are withheld from the game only while BOTH grips are down
+// at once (Halo3WheelSwallowsGrips) — which is exactly this gesture and
+// nothing else, so a lone right grip always dismounts, wheel on or off.
+inline bool Halo3UpdateWheelToggle(Halo3Wheel& state, bool available,
+                                   float gripLeft, float gripRight,
+                                   uint64_t nowMs)
+{
+    if (!available || !std::isfinite(gripLeft) || !std::isfinite(gripRight))
+    {
+        state.bothHeld = false;
+        state.engaged = false;
+        state.clicks = 0;
+        state.steer = 0.0f;
+        return false;
+    }
+    // Hysteresis on the pair: down past 0.6, up below 0.4, so a hand resting
+    // near the threshold cannot rattle out a click it never meant.
+    const bool both = state.bothHeld
+        ? (gripLeft >= kHalo3WheelReleaseGrip &&
+           gripRight >= kHalo3WheelReleaseGrip)
+        : (gripLeft > kHalo3WheelPressGrip &&
+           gripRight > kHalo3WheelPressGrip);
+    bool toggled = false;
+    if (state.bothHeld && !both)
+    {
+        // A click completes on release, so the second release is the toggle.
+        if (state.clicks == 1 &&
+            nowMs - state.lastReleaseMs <= kHalo3WheelDoubleClickMs)
+        {
+            state.engaged = !state.engaged;
+            state.clicks = 0;
+            if (!state.engaged)
+                state.steer = 0.0f;
+            toggled = true;
+        }
+        else
+        {
+            state.clicks = 1;
+            state.lastReleaseMs = nowMs;
+        }
+    }
+    state.bothHeld = both;
+    return toggled;
+}
+
+// The one condition under which the input hook withholds the grip buttons.
+inline constexpr bool Halo3WheelSwallowsGrips(const Halo3Wheel& state)
+{
+    return state.bothHeld;
+}
 
 // left/right = tracked hand positions in OpenXR room space (Y up, -Z forward).
 // headYaw = the room-space head heading (atan2(fwd.x, -fwd.z)), which is the
 // plane the wheel is read in, so it works whichever way the player is facing.
 // Returns true while the wheel owns steering; state.steer holds the value.
-inline bool Halo3UpdateWheel(Halo3Wheel& state, bool enabled,
-                             float gripLeft, float gripRight,
-                             const float left[3], const float right[3],
-                             float headYaw, float maxDeg, float deadzoneDeg)
+inline bool Halo3ComputeWheelSteer(Halo3Wheel& state, const float left[3],
+                                   const float right[3], float headYaw,
+                                   float maxDeg, float deadzoneDeg)
 {
-    const bool finite = std::isfinite(gripLeft) && std::isfinite(gripRight) &&
-        std::isfinite(headYaw) && std::isfinite(left[0]) &&
+    const bool finite = std::isfinite(headYaw) && std::isfinite(left[0]) &&
         std::isfinite(left[1]) && std::isfinite(left[2]) &&
         std::isfinite(right[0]) && std::isfinite(right[1]) &&
         std::isfinite(right[2]);
-    if (!enabled || !finite)
-    {
-        state.gripped = false;
-        state.steer = 0.0f;
-        return false;
-    }
-    // Hysteresis: grabbing takes both grips past 0.6, letting go takes either
-    // below 0.4, so a hand hovering at the threshold cannot chatter the
-    // steering owner on and off.
-    if (state.gripped)
-    {
-        if (gripLeft < kHalo3WheelReleaseGrip ||
-            gripRight < kHalo3WheelReleaseGrip)
-            state.gripped = false;
-    }
-    else if (gripLeft > kHalo3WheelEngageGrip &&
-             gripRight > kHalo3WheelEngageGrip)
-    {
-        state.gripped = true;
-    }
-    if (!state.gripped)
+    if (!state.engaged || !finite)
     {
         state.steer = 0.0f;
         return false;
@@ -461,8 +499,10 @@ inline bool Halo3UpdateWheel(Halo3Wheel& state, bool enabled,
     const float span = std::sqrt(dx * dx + dy * dy + dz * dz);
     if (span < kHalo3WheelMinSpan)
     {
-        // Hands together is not a wheel. Hold the last steer rather than
-        // snapping to centre while the player shuffles their grip.
+        // Hands together is not a wheel. Because this is a toggle rather than
+        // a hold, hands dropped into a lap must read as straight ahead — a
+        // held-over steer would keep turning with nobody driving.
+        state.steer = 0.0f;
         return true;
     }
     // Room right at the head's heading: forward is (sin, 0, -cos), so right is

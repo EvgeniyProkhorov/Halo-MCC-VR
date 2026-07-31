@@ -5095,79 +5095,99 @@ int main()
             Halo3Wheel wheel;
             const float level[2][3] = {{-0.20f, 1.00f, -0.40f},
                                        {0.20f, 1.00f, -0.40f}};
-            // Not gripped: the wheel never steers.
-            const bool idle = !Halo3UpdateWheel(wheel, true, 0.0f, 0.0f,
-                                                level[0], level[1], 0.0f,
-                                                75.0f, 6.0f) &&
-                wheel.steer == 0.0f;
-            // One grip is not a wheel, and neither is a half squeeze.
-            const bool oneHand = !Halo3UpdateWheel(wheel, true, 0.9f, 0.1f,
-                                                   level[0], level[1], 0.0f,
-                                                   75.0f, 6.0f) &&
-                !Halo3UpdateWheel(wheel, true, 0.5f, 0.5f, level[0], level[1],
-                                  0.0f, 75.0f, 6.0f);
-            // Both grips: held, and level hands are dead centre.
-            const bool centred = Halo3UpdateWheel(wheel, true, 0.9f, 0.9f,
-                                                  level[0], level[1], 0.0f,
-                                                  75.0f, 6.0f) &&
-                wheel.steer == 0.0f;
-            // Hysteresis: easing to 0.5 keeps the wheel, dropping to 0.3
-            // lets go, so a hand resting near the threshold cannot chatter.
-            const bool holds = Halo3UpdateWheel(wheel, true, 0.5f, 0.5f,
-                                                level[0], level[1], 0.0f,
-                                                75.0f, 6.0f);
-            const bool releases = !Halo3UpdateWheel(wheel, true, 0.5f, 0.3f,
-                                                    level[0], level[1], 0.0f,
-                                                    75.0f, 6.0f);
+            auto click = [&](uint64_t at) {
+                Halo3UpdateWheelToggle(wheel, true, 0.9f, 0.9f, at);
+                return Halo3UpdateWheelToggle(wheel, true, 0.0f, 0.0f, at + 5);
+            };
+            // A single click is not a toggle, and neither is a slow pair.
+            const bool singleIgnored = !click(1000) && !wheel.engaged;
+            const bool slowPairIgnored = !click(3000) && !wheel.engaged;
+            // Two clicks inside the window take the wheel; two more let go.
+            const bool takes = click(3100) && wheel.engaged;
+            const bool releases = !click(3300) && click(3400) &&
+                !wheel.engaged && wheel.steer == 0.0f;
+            // Squeezing ONE grip is never the gesture, so it is never
+            // swallowed — that is the dismount.
+            Halo3Wheel lone;
+            Halo3UpdateWheelToggle(lone, true, 0.0f, 0.9f, 10);
+            const bool loneGripFree = !Halo3WheelSwallowsGrips(lone) &&
+                !lone.engaged;
+            // Both grips down IS the gesture, so those buttons are withheld
+            // for exactly that window — including the very first click, before
+            // anything has toggled.
+            Halo3Wheel gesture;
+            Halo3UpdateWheelToggle(gesture, true, 0.9f, 0.9f, 20);
+            const bool gestureSwallows = Halo3WheelSwallowsGrips(gesture);
+            Halo3UpdateWheelToggle(gesture, true, 0.0f, 0.0f, 25);
+            const bool freedOnRelease = !Halo3WheelSwallowsGrips(gesture);
+            // Leaving the seat drops the wheel and frees the grips.
+            Halo3UpdateWheelToggle(gesture, false, 0.9f, 0.9f, 30);
+            const bool dropsWhenUnavailable = !gesture.engaged &&
+                !Halo3WheelSwallowsGrips(gesture);
+
+            // Steering. Take the wheel with a real double-click, then read
+            // hand poses only — nothing is squeezed while driving.
+            Halo3Wheel driving;
+            Halo3UpdateWheelToggle(driving, true, 0.9f, 0.9f, 100);
+            Halo3UpdateWheelToggle(driving, true, 0.0f, 0.0f, 105);
+            Halo3UpdateWheelToggle(driving, true, 0.9f, 0.9f, 200);
+            const bool tookIt =
+                Halo3UpdateWheelToggle(driving, true, 0.0f, 0.0f, 205) &&
+                driving.engaged;
+            const bool centred = Halo3ComputeWheelSteer(
+                driving, level[0], level[1], 0.0f, 75.0f, 6.0f) &&
+                driving.steer == 0.0f;
             // Right hand 45 deg up = counter-clockwise = steer LEFT.
             const float up45[3] = {-0.20f + 0.28284f, 1.0f + 0.28284f, -0.40f};
-            Halo3UpdateWheel(wheel, true, 0.9f, 0.9f, level[0], up45, 0.0f,
-                             75.0f, 6.0f);
+            Halo3ComputeWheelSteer(driving, level[0], up45, 0.0f, 75.0f, 6.0f);
             const float expected = -(45.0f - 6.0f) / (75.0f - 6.0f);
-            const bool steersLeft = std::fabs(wheel.steer - expected) < 2e-3f;
+            const bool steersLeft = std::fabs(driving.steer - expected) < 2e-3f;
             // Mirror image steers right by the same amount.
             const float down45[3] = {-0.20f + 0.28284f, 1.0f - 0.28284f,
                                      -0.40f};
-            Halo3UpdateWheel(wheel, true, 0.9f, 0.9f, level[0], down45, 0.0f,
-                             75.0f, 6.0f);
+            Halo3ComputeWheelSteer(driving, level[0], down45, 0.0f, 75.0f,
+                                   6.0f);
             const bool steersRight =
-                std::fabs(wheel.steer + expected) < 2e-3f;
+                std::fabs(driving.steer + expected) < 2e-3f;
             // Past full lock saturates instead of wrapping.
             const float over[3] = {-0.20f + 0.02f, 1.0f + 0.40f, -0.40f};
-            Halo3UpdateWheel(wheel, true, 0.9f, 0.9f, level[0], over, 0.0f,
-                             75.0f, 6.0f);
-            const bool saturates = std::fabs(wheel.steer + 1.0f) < 1e-4f;
+            Halo3ComputeWheelSteer(driving, level[0], over, 0.0f, 75.0f, 6.0f);
+            const bool saturates = std::fabs(driving.steer + 1.0f) < 1e-4f;
             // The same physical wheel, with the player turned 90 degrees in
             // the room, reads exactly the same.
-            Halo3Wheel turned;
             const float leftTurned[3] = {0.0f, 1.0f, -0.20f};
             const float rightTurned[3] = {0.0f, 1.0f + 0.28284f,
                                           -0.20f + 0.28284f};
-            Halo3UpdateWheel(turned, true, 0.9f, 0.9f, leftTurned, rightTurned,
-                             1.5707963f, 75.0f, 6.0f);
+            Halo3ComputeWheelSteer(driving, leftTurned, rightTurned,
+                                   1.5707963f, 75.0f, 6.0f);
             const bool headRelative =
-                std::fabs(turned.steer - expected) < 2e-3f;
-            // Hands brought together hold the last steer rather than snapping
-            // to centre while the player shuffles their grip.
+                std::fabs(driving.steer - expected) < 2e-3f;
+            // Hands dropped into a lap must read as straight ahead. Holding
+            // the last steer would keep the vehicle turning with nobody
+            // driving — a hold could get away with it, a toggle cannot.
             const float together[3] = {0.0f, 1.05f, -0.15f};
-            const bool holdsOnCollapse =
-                Halo3UpdateWheel(turned, true, 0.9f, 0.9f, leftTurned,
-                                 together, 1.5707963f, 75.0f, 6.0f) &&
-                std::fabs(turned.steer - expected) < 2e-3f;
-            // Disabled or non-finite input always lets go.
-            Halo3Wheel junkWheel;
+            const bool straightOnCollapse =
+                Halo3ComputeWheelSteer(driving, leftTurned, together,
+                                       1.5707963f, 75.0f, 6.0f) &&
+                driving.steer == 0.0f;
+            // Not taken, or non-finite input: the stick steers instead.
+            Halo3Wheel idleWheel;
             const float nanHand[3] = {std::nanf(""), 1.0f, 0.0f};
             const bool failsOpen =
-                !Halo3UpdateWheel(junkWheel, false, 0.9f, 0.9f, level[0],
-                                  level[1], 0.0f, 75.0f, 6.0f) &&
-                !Halo3UpdateWheel(junkWheel, true, 0.9f, 0.9f, level[0],
-                                  nanHand, 0.0f, 75.0f, 6.0f);
+                !Halo3ComputeWheelSteer(idleWheel, level[0], level[1], 0.0f,
+                                        75.0f, 6.0f) &&
+                !Halo3ComputeWheelSteer(driving, level[0], nanHand, 0.0f,
+                                        75.0f, 6.0f) &&
+                driving.steer == 0.0f;
 
-            Check(idle && oneHand && centred && holds && releases &&
-                  steersLeft && steersRight && saturates && headRelative &&
-                  holdsOnCollapse && failsOpen,
-                "Virtual wheel engages on both grips with hysteresis, steers "
-                "from the hand line in the head's plane, and fails open");
+            Check(singleIgnored && slowPairIgnored && takes && releases &&
+                  loneGripFree && gestureSwallows && freedOnRelease &&
+                  dropsWhenUnavailable && tookIt && centred && steersLeft &&
+                  steersRight && saturates && headRelative &&
+                  straightOnCollapse && failsOpen,
+                "Double-clicking both grips toggles the wheel, a lone grip is "
+                "never swallowed so the dismount survives, and the wheel "
+                "steers from the hand line in the head's own plane");
         }
 
         // C2 mode refinement: only a proven seated state upgrades Gameplay;

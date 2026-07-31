@@ -735,10 +735,12 @@ namespace
         changed |= ImGui::Checkbox("Virtual steering wheel",
                                    &g_config.vehicle_motion);
         ImGui::TextDisabled(
-            "Warthog, Mongoose, Ghost, Prowler and Chopper: squeeze both grips\n"
-            "to take hold of an invisible wheel and turn it. Let go and the\n"
-            "right stick steers again. Aircraft and the Scorpion/Wraith keep\n"
-            "their own controls.");
+            "Warthog, Mongoose, Ghost, Prowler and Chopper: DOUBLE-CLICK both\n"
+            "grips to take an invisible wheel, then just hold your hands on it\n"
+            "and tilt - no squeezing. Double-click again to let go and the\n"
+            "right stick steers. A single right grip still gets you out of the\n"
+            "vehicle either way. Aircraft and the Scorpion/Wraith keep their\n"
+            "own controls.");
         changed |= ImGui::SliderFloat("Full lock at (deg)",
             &g_config.vehicle_wheel_max_deg, 30.0f, 180.0f, "%.0f");
         changed |= ImGui::SliderFloat("Wheel deadzone (deg)",

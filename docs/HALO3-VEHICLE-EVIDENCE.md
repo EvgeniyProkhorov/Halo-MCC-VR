@@ -775,10 +775,30 @@ gunner is published in the CARRIER's frame, so it is unaffected.
 
 ### What authors a look-steered driver's yaw now
 
-Wheel while both grips are held (ground only), Halo's own turn stick otherwise.
-`ApplyVrTurn` stops consuming the turn stick in those seats so one flick cannot
-both spin the view and swerve, and the input hook withholds the grips from the
-game while the wheel is held. **Pitch keeps the closed loop everywhere** — it
+The virtual wheel when it has been taken (ground only), Halo's own turn stick
+otherwise. `ApplyVrTurn` stops consuming the turn stick in those seats so one
+flick cannot both spin the view and swerve.
+
+**The wheel is a double-click toggle, not a hold, and that is a control-mapping
+requirement rather than a preference.** The right grip is `RB`, which is how the
+player gets out of a vehicle (user, 2026-07-31). A hold-to-grip wheel therefore
+had to choose between ejecting the driver the moment they took it and disabling
+the dismount for as long as they held it. The shipped rule avoids both: the grip
+buttons are withheld **only while both grips are down at once**, which is
+precisely the wheel's own gesture, so a lone right grip always reaches the game
+— wheel taken or not. Double-click both grips to take the wheel, double-click
+again to let go; in between, nothing is squeezed, so a long drive costs no grip
+strength. One haptic blip through the peak-holding `VR_SetGameHaptics` is the
+only feedback a toggle can give.
+
+Two consequences of the toggle that the hold model did not have: the pad must be
+sampled **once** and shared between the wheel update and the button build (two
+samples could straddle the 0.6 press threshold, and that frame is exactly the
+one that fires the dismount), and hands brought closer than 0.15 m must read as
+straight ahead rather than holding the last steer — hands dropped into a lap
+would otherwise keep the vehicle turning with nobody driving.
+
+**Pitch keeps the closed loop everywhere** — it
 never passed through the yaw reference — so a Banshee still climbs and dives
 from the hand, and aircraft take the plain stick for yaw until a two-hand yoke
 lands.

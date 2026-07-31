@@ -591,9 +591,12 @@ void ConfigSave()
     fprintf(f, "# (default %.2f, range 0 to 1)\n", d.vehicle_view_follow);
     fprintf(f, "vehicle_view_follow = %.2f\n\n", g_config.vehicle_view_follow);
     fprintf(f, "# Motion steering. In a Warthog, Mongoose, Ghost, Prowler or\n");
-    fprintf(f, "# Chopper, squeeze both grips to take hold of an invisible\n");
-    fprintf(f, "# steering wheel and turn it; let go and the right stick steers\n");
-    fprintf(f, "# again. Aircraft and the Scorpion/Wraith are unaffected.\n");
+    fprintf(f, "# Chopper, DOUBLE-CLICK both grips to take hold of an invisible\n");
+    fprintf(f, "# steering wheel: hold your hands as if on a wheel and tilt it,\n");
+    fprintf(f, "# nothing needs squeezing. Double-click again to let go and the\n");
+    fprintf(f, "# right stick steers. A single right grip still gets you out of\n");
+    fprintf(f, "# the vehicle either way. Aircraft and the Scorpion and Wraith\n");
+    fprintf(f, "# are unaffected.\n");
     fprintf(f, "# (default %d)\n", d.vehicle_motion ? 1 : 0);
     fprintf(f, "vehicle_motion = %d\n", g_config.vehicle_motion ? 1 : 0);
     fprintf(f, "# Wheel angle for full lock, and the slack around centre.\n");

@@ -109,12 +109,13 @@ namespace
             return;
         }
 
-        // C9 (Halo 3 driver seats only; inert everywhere else): read the
-        // virtual steering wheel from this poll's grips and hand poses BEFORE
-        // the buttons below are built, so the same poll that grabs the wheel
-        // also stops those grips reaching the game as bumpers.
-        Game_Halo3UpdateVehicleWheel();
-        const bool wheelHeld = Game_Halo3VehicleWheelActive();
+        // C9 (Halo 3 ground driver seats only; inert everywhere else): read the
+        // virtual steering wheel from THIS poll's pad, before the buttons below
+        // are built. Both grips down together is the wheel's own gesture and is
+        // the only case where their buttons are withheld — a lone right grip is
+        // never touched, so it keeps dismounting the vehicle.
+        Game_Halo3UpdateVehicleWheel(pad);
+        const bool wheelGesture = Game_Halo3VehicleSwallowsGrips();
 
         MenuChordResult pauseChord{};
         if (Game_AllowsPauseToggleInput())
@@ -179,7 +180,7 @@ namespace
         previousMenu = pad.menu;
         if (pad.menu || inputNow < g_startPulseUntilMs.load())
             btn |= XINPUT_GAMEPAD_START;
-        if (!wheelHeld)
+        if (!wheelGesture)
         {
             if (pad.gripL > 0.6f) btn |= XINPUT_GAMEPAD_LEFT_SHOULDER;
             if (pad.gripR > 0.6f) btn |= XINPUT_GAMEPAD_RIGHT_SHOULDER;
