@@ -523,3 +523,70 @@ warthog point.
 - Mongoose was again identified by its bounding-center offset (`(+0.051,
   −0.001, −0.300)` = mongoose hull node) and stays on the shared hog point
   until the identity build (C8) keys its own authored point.
+
+## C9 — why the seat camera does not turn with the vehicle (code-read, 2026-07-31)
+
+User report: *"the camera does not rotate with the car"*, together with the
+observation that the camera and the motion controls are one problem because
+"in vanilla halo you use the camera stick to drive around". Both halves are
+confirmed by reading the shipped code — no runtime probe needed, and nothing
+here is inferred from behaviour.
+
+**Why the view stays pinned to the map.** `ApplyHeadLook` builds the camera
+yaw as
+
+```
+gy = g_gameYawRef + yawSign * WrapPi(headYaw - g_headYawRef)
+```
+
+`g_gameYawRef` is rebased only by a manual recenter or a cinematic shot
+boundary. The C5/C6/C7 seat camera substitutes **position** onto the authored
+point and deliberately leaves `fwd`/`up` HMD-owned, so the hull rotates
+underneath a view whose reference is the map. After a 90° turn "straight
+ahead" points out of the side of the vehicle. This is a design gap in the FP
+camera, not a bad seat point, and no camera-position change can fix it.
+
+**Why it is the same knob as steering.** `Game_ComputeAimStick` maps the
+controller ray into game space through *the same reference*:
+
+```
+desiredYaw = g_gameYawRef + yawSign * WrapPi(controllerYaw - g_headYawRef)
+errYaw     = desiredYaw - aimYaw            // -> injected right stick
+```
+
+so three things are welded to one angle: the view, the hand-aim ray, and —
+because Halo 3 vehicles are look-steered and that injected stick *is* the
+steering input — the vehicle's heading.
+
+Consequences, and they decide the candidate shape:
+
+- View and aim **must** share the reference. Rotating only the view slides
+  the reticle off what the player is looking at by exactly the hull angle.
+- Once the reference follows the hull, a driver's aim error becomes
+  `handOffset + const`: `aimYaw` for a driver *is* the hull heading, so it
+  cancels the hull term and a fixed hand offset produces a fixed stick
+  deflection — a constant turn **rate** rather than a heading. Hull-follow
+  therefore cannot ship before a motion-control steering author; it would
+  turn driving into "hold your hand off-centre to keep turning".
+- In a gunner or weapon-capable passenger seat the same change is simply
+  correct and needs nothing else: `aimYaw` there is the turret/weapon facing,
+  independent of the hull, so holding the hand steady relative to the seat
+  swings the gun with the vehicle exactly as a real occupant's arm would.
+
+**Mechanism.** `g_halo3VehicleTransform` already publishes the seated
+parent's measured world `fwd` every camera frame (C5), so the hull heading is
+`atan2f(fwd[1], fwd[0])` — no new engine read, no new signature. The pure
+logic is `Halo3UpdateSeatYaw` (`src/common/halo3_vehicle_logic.h`, tested):
+it references the hull heading on the first seated frame, accumulates the
+rotation since, and returns the yaw to add to the shared reference, scaled by
+a follow weight (0 = today's world-locked view, 1 = locked to the hull).
+Accumulate-then-wrap, not wrap-then-scale: a partial weight applied to a
+wrapped difference snaps 2π·weight every time the hull crosses the wrap.
+
+**Not attempted:** hull pitch and roll are deliberately excluded. The horizon
+stays HMD-stable (the accepted comfort rule), so a flipping vehicle never
+rolls the player's world.
+
+Status: logic and tests landed; **nothing calls it yet**. It ships with the
+motion-control steering author, after the authored-point camera bake (C8) has
+a headset confirmation.

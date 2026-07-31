@@ -244,6 +244,73 @@ enum class Halo3FrameStatus : uint32_t
     TooDeep = 4,    // more than one attachment level -> stock
 };
 
+// C9 seat yaw — "the camera does not rotate with the car" (user, 2026-07-31).
+// The FP seat camera moves the eye onto the authored point but leaves facing
+// entirely HMD-owned in WORLD space (ApplyHeadLook builds its yaw from
+// g_gameYawRef, which only a recenter or a cutscene boundary ever rebases).
+// Drive a circle and the hull turns underneath a view pinned to the map, so
+// "straight ahead" ends up out of the side of the vehicle. The fix is to add
+// the hull's rotation since you sat down to that yaw reference.
+//
+// CRITICAL: the SAME offset must reach the hand-aim ray (Game_ComputeAimStick
+// maps the controller through g_gameYawRef too). View and aim sharing one
+// reference is what keeps the reticle on what you are looking at; rotating
+// only the view would slide them apart by exactly this angle. That shared
+// reference is also the vehicle's steering channel — which is why this cannot
+// ship before the motion-control steering author (see §C9 in the evidence
+// doc): with the reference following the hull, a driver's fixed hand offset
+// becomes a constant turn RATE instead of a heading.
+//
+// Continuous accumulation, not a wrapped difference: a partial follow weight
+// applied to a wrapped angle would snap 2*pi*weight every time the hull passed
+// the wrap point. The total is wrapped only on the way out, where it is
+// consumed as cos/sin and a 2*pi difference is invisible.
+inline float Halo3WrapPi(float a)
+{
+    constexpr float kPi = 3.14159265f;
+    constexpr float kTwoPi = 6.28318531f;
+    if (!std::isfinite(a))
+        return 0.0f;
+    while (a > kPi) a -= kTwoPi;
+    while (a < -kPi) a += kTwoPi;
+    return a;
+}
+
+struct Halo3SeatYaw
+{
+    bool armed = false;
+    float lastYaw = 0.0f;   // previous hull heading
+    float total = 0.0f;     // hull rotation accumulated since seat entry
+};
+
+// hullYaw = atan2(fwd[1], fwd[0]) of the seated parent's measured frame.
+// active = the FP seat camera owns the view this frame (a stale, torn or
+// unproven transform must pass false, which re-references on the next entry).
+// weight = vehicle_view_follow, 0 = today's world-locked view, 1 = locked to
+// the hull. Returns the yaw to ADD to the shared reference.
+inline float Halo3UpdateSeatYaw(Halo3SeatYaw& state, float hullYaw,
+                                bool active, float weight)
+{
+    if (!active || !std::isfinite(hullYaw) || !std::isfinite(weight))
+    {
+        state.armed = false;
+        state.total = 0.0f;
+        return 0.0f;
+    }
+    if (!state.armed)
+    {
+        // First seated frame: this heading is "straight ahead" from now on.
+        state.armed = true;
+        state.lastYaw = hullYaw;
+        state.total = 0.0f;
+        return 0.0f;
+    }
+    state.total += Halo3WrapPi(hullYaw - state.lastYaw);
+    state.lastYaw = hullYaw;
+    const float w = weight < 0.0f ? 0.0f : (weight > 1.0f ? 1.0f : weight);
+    return Halo3WrapPi(state.total * w);
+}
+
 // C7 identity-probe field map (log-only; §E5, offline-verified, nothing keys
 // a camera off these until a headset log confirms the in-process reads).
 // Definition-relative tag_block records: +0x2C0 + type*0xC {count, address};

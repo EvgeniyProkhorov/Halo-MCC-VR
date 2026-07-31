@@ -4780,6 +4780,82 @@ int main()
                 "gate rejects wrong-frame anchors");
         }
 
+        // C9 seat yaw: the view must turn with the hull. Entry references the
+        // current heading (offset 0), rotation since entry is reported, an
+        // exit disarms so re-entry re-references, and a partial follow weight
+        // must stay continuous across the +/-pi wrap (a wrapped difference
+        // scaled by weight would snap 2*pi*weight there).
+        {
+            Halo3SeatYaw seat;
+            const bool idleZero =
+                Halo3UpdateSeatYaw(seat, 1.0f, false, 1.0f) == 0.0f &&
+                !seat.armed;
+            // Sitting down at heading 1.0 rad: straight ahead is 1.0 rad.
+            const bool entryZero =
+                std::fabs(Halo3UpdateSeatYaw(seat, 1.0f, true, 1.0f)) < 1e-6f &&
+                seat.armed;
+            // Hull swings 90 deg left -> the view follows exactly.
+            const bool followsHull = std::fabs(
+                Halo3UpdateSeatYaw(seat, 1.0f + 1.5707963f, true, 1.0f) -
+                1.5707963f) < 1e-4f;
+            // Getting out re-references: sitting in a car facing the other
+            // way must read straight ahead again, not 180 degrees out.
+            Halo3UpdateSeatYaw(seat, 0.0f, false, 1.0f);
+            const bool reentryZero = !seat.armed &&
+                std::fabs(Halo3UpdateSeatYaw(seat, -2.5f, true, 1.0f)) < 1e-6f;
+
+            // Two full left turns at full weight: the offset stays exactly the
+            // hull's rotation (mod 2pi) and never jumps between frames.
+            Halo3SeatYaw spin;
+            Halo3UpdateSeatYaw(spin, 0.0f, true, 1.0f);
+            bool fullOk = true;
+            float previous = 0.0f;
+            for (int i = 1; i <= 240; ++i)
+            {
+                const float hull = Halo3WrapPi(static_cast<float>(i) * 0.05236f);
+                const float out = Halo3UpdateSeatYaw(spin, hull, true, 1.0f);
+                if (std::fabs(Halo3WrapPi(out - hull)) > 1e-3f ||
+                    std::fabs(Halo3WrapPi(out - previous)) > 0.1f)
+                    fullOk = false;
+                previous = out;
+            }
+            // Half weight through the same two turns: still no discontinuity,
+            // and a half turn of hull reads as a quarter turn of view.
+            Halo3SeatYaw half;
+            Halo3UpdateSeatYaw(half, 0.0f, true, 0.5f);
+            bool halfOk = true;
+            previous = 0.0f;
+            float atHalfTurn = 0.0f;
+            for (int i = 1; i <= 240; ++i)
+            {
+                const float hull = Halo3WrapPi(static_cast<float>(i) * 0.05236f);
+                const float out = Halo3UpdateSeatYaw(half, hull, true, 0.5f);
+                if (std::fabs(Halo3WrapPi(out - previous)) > 0.1f)
+                    halfOk = false;
+                if (i == 60)
+                    atHalfTurn = out;   // hull turned pi -> view pi/2
+                previous = out;
+            }
+            halfOk = halfOk &&
+                std::fabs(atHalfTurn - 1.5707963f) < 2e-3f;
+            // Zero weight is exactly today's world-locked view; junk inputs
+            // fail open to no rotation at all.
+            Halo3SeatYaw off;
+            Halo3UpdateSeatYaw(off, 0.0f, true, 0.0f);
+            const bool weightZero =
+                Halo3UpdateSeatYaw(off, 2.0f, true, 0.0f) == 0.0f;
+            Halo3SeatYaw junk;
+            Halo3UpdateSeatYaw(junk, 0.0f, true, 1.0f);
+            const bool junkSafe =
+                Halo3UpdateSeatYaw(junk, std::nanf(""), true, 1.0f) == 0.0f &&
+                !junk.armed;
+
+            Check(idleZero && entryZero && followsHull && reentryZero &&
+                  fullOk && halfOk && weightZero && junkSafe,
+                "Seat yaw turns the view with the hull, re-references on "
+                "entry, and stays continuous at partial follow weight");
+        }
+
         // C2 mode refinement: only a proven seated state upgrades Gameplay;
         // Turret requires the measured physics type 5 exactly; an unproven
         // type stays a plain Vehicle; Unknown and OnFoot never upgrade.
