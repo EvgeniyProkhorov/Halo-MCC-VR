@@ -4904,6 +4904,10 @@ namespace
     // module below (they run on this same engine camera thread).
     bool Halo3ComputeAuthoredAnchor(float out[3]);
     bool Halo3VehicleFpActive();
+    // C9: folds the hull's rotation into the shared yaw reference and decides
+    // whether this seat's steering is authored instead of closed-loop aimed.
+    void Halo3ApplySeatYawFollow();
+    bool Halo3SeatAuthorsSteeringNow();
 
     void ApplyHeadLook(void* src)
     {
@@ -5090,6 +5094,11 @@ namespace
             return;
         if (!pad.valid)
             return;
+        // C9: in a seat whose steering this build authors, the turn stick IS
+        // the steering wheel's fallback. Snap/smooth turning must not consume
+        // it as well, or one flick would both spin the view and swerve.
+        if (Halo3SeatAuthorsSteeringNow())
+            return;
         // Smooth turn needs a sub-frame timebase. GetTickCount only updates on
         // the ~15.6 ms system tick, but this runs several times per 11 ms (90 Hz)
         // frame from CamCopyHook, so a GetTickCount delta was 0 on most frames
@@ -5230,6 +5239,21 @@ namespace
         int32_t mountedTurret = 0;
     };
     Halo3VehicleTransform g_halo3VehicleTransform;
+
+    // C9 vibration diagnostic. Counters are written only by the camera thread
+    // and read/reset by the 50 ms worker; lastPos/lastUp never leave the
+    // camera thread. Nothing here feeds behavior.
+    struct Halo3MotionDiag
+    {
+        std::atomic<uint32_t> frames{0};
+        std::atomic<uint32_t> posChanged{0};
+        std::atomic<uint32_t> tiltChanged{0};
+        std::atomic<float> maxPosStep{0.0f};   // world units
+        std::atomic<float> maxTiltDeg{0.0f};
+        float lastPos[3] = {0.0f, 0.0f, 0.0f};
+        float lastUp[3] = {0.0f, 0.0f, 0.0f};
+    };
+    Halo3MotionDiag g_halo3MotionDiag;
 
     // C8: definition index -> vehicle identity, resolved once per distinct
     // vehicle instead of per frame. Direct-mapped and tiny; a collision only
@@ -5587,6 +5611,55 @@ namespace
             }
             if (frameOk)
             {
+                // C9 diagnostic (log-only): the user reports the vehicle mesh
+                // "vibrating, fighting against the camera override". The two
+                // candidate causes look completely different here. If the
+                // engine advances the hull only on its own simulation tick
+                // while MCC renders faster and INTERPOLATES the mesh, the
+                // camera steps in a staircase the mesh does not follow and
+                // posChanged lands far below the camera-frame count. If it is
+                // instead the hull rocking on its suspension — which the
+                // anchor tracks but the deliberately horizon-stable view does
+                // not — posChanged tracks the frame count and the tilt step is
+                // what is large. One drive answers it.
+                Halo3MotionDiag& diag = g_halo3MotionDiag;
+                const uint32_t seen =
+                    diag.frames.load(std::memory_order_relaxed);
+                if (seen)
+                {
+                    const float dx = world.pos[0] - diag.lastPos[0];
+                    const float dy = world.pos[1] - diag.lastPos[1];
+                    const float dz = world.pos[2] - diag.lastPos[2];
+                    const float step = sqrtf(dx * dx + dy * dy + dz * dz);
+                    if (step > 1e-5f)
+                    {
+                        diag.posChanged.fetch_add(1, std::memory_order_relaxed);
+                        if (step < 5.0f &&
+                            step > diag.maxPosStep.load(
+                                       std::memory_order_relaxed))
+                            diag.maxPosStep.store(step,
+                                                  std::memory_order_relaxed);
+                    }
+                    const float dot = world.up[0] * diag.lastUp[0] +
+                        world.up[1] * diag.lastUp[1] +
+                        world.up[2] * diag.lastUp[2];
+                    const float tilt =
+                        acosf(Clamp(dot, -1.0f, 1.0f)) * 57.2957795f;
+                    if (tilt > 0.001f)
+                    {
+                        diag.tiltChanged.fetch_add(1,
+                                                   std::memory_order_relaxed);
+                        if (tilt < 90.0f &&
+                            tilt > diag.maxTiltDeg.load(
+                                       std::memory_order_relaxed))
+                            diag.maxTiltDeg.store(tilt,
+                                                  std::memory_order_relaxed);
+                    }
+                }
+                diag.frames.store(seen + 1, std::memory_order_relaxed);
+                memcpy(diag.lastPos, world.pos, sizeof(diag.lastPos));
+                memcpy(diag.lastUp, world.up, sizeof(diag.lastUp));
+
                 xf.seq.fetch_add(1, std::memory_order_acq_rel);  // -> odd
                 memcpy(xf.pos, world.pos, sizeof(xf.pos));
                 memcpy(xf.fwd, world.fwd, sizeof(xf.fwd));
@@ -5605,6 +5678,13 @@ namespace
                 xf.seq.fetch_add(1, std::memory_order_acq_rel);  // -> odd
                 xf.valid.store(0, std::memory_order_relaxed);
                 xf.seq.fetch_add(1, std::memory_order_release);  // -> even
+                // Leaving the seat starts the diagnostic window over, so one
+                // drive's numbers never carry into the next.
+                g_halo3MotionDiag.frames.store(0, std::memory_order_relaxed);
+                g_halo3MotionDiag.posChanged.store(
+                    0, std::memory_order_relaxed);
+                g_halo3MotionDiag.tiltChanged.store(
+                    0, std::memory_order_relaxed);
             }
         }
         const Halo3VehicleState state = unit == -1
@@ -5742,11 +5822,22 @@ namespace
         return true;
     }
 
-    // C5: place the user's Blender-authored seat point in the world using the
-    // measured vehicle transform. Frame-level fail-open: stale (>100 ms),
-    // torn, non-finite, or non-orthonormal inputs — or a seat without an
-    // authored point — return false and the stock chase view stands.
-    bool Halo3ComputeAuthoredAnchor(float out[3])
+    // C9: one seqlock read of the published vehicle frame, shared by the
+    // authored-point camera, the hull-follow view and the steering author, so
+    // those three can never disagree about which seat is live. Frame-level
+    // fail-open: stale (>100 ms), torn, non-finite or non-orthonormal inputs
+    // return false and every caller keeps its stock behaviour.
+    struct Halo3SeatSnapshot
+    {
+        float pos[3] = {0.0f, 0.0f, 0.0f};
+        float fwd[3] = {0.0f, 0.0f, 0.0f};
+        float up[3] = {0.0f, 0.0f, 0.0f};
+        int seatIndex = -1;
+        uint32_t identity = static_cast<uint32_t>(Halo3VehicleId::Unknown);
+        bool mounted = false;
+    };
+
+    bool Halo3ReadSeatSnapshot(Halo3SeatSnapshot& out)
     {
         Halo3VehicleTransform& xf = g_halo3VehicleTransform;
         if (!xf.valid.load(std::memory_order_acquire))
@@ -5754,46 +5845,58 @@ namespace
         if (GetTickCount64() - xf.sampleMs.load(std::memory_order_relaxed) >
             100)
             return false;
-        float pos[3], fwd[3], up[3];
-        int seatIndex;
-        uint32_t identity;
-        bool mounted;
         const uint32_t seq = xf.seq.load(std::memory_order_acquire);
         if (seq & 1u)
             return false;
-        memcpy(pos, xf.pos, sizeof(pos));
-        memcpy(fwd, xf.fwd, sizeof(fwd));
-        memcpy(up, xf.up, sizeof(up));
-        seatIndex = xf.seatIndex;
-        identity = xf.vehicleId;
-        mounted = xf.mountedTurret != 0;
+        memcpy(out.pos, xf.pos, sizeof(out.pos));
+        memcpy(out.fwd, xf.fwd, sizeof(out.fwd));
+        memcpy(out.up, xf.up, sizeof(out.up));
+        out.seatIndex = xf.seatIndex;
+        out.identity = xf.vehicleId;
+        out.mounted = xf.mountedTurret != 0;
         if (xf.seq.load(std::memory_order_acquire) != seq)
+            return false;
+        for (int i = 0; i < 3; ++i)
+            if (!isfinite(out.pos[i]) || !isfinite(out.fwd[i]) ||
+                !isfinite(out.up[i]))
+                return false;
+        const float fLen = out.fwd[0] * out.fwd[0] + out.fwd[1] * out.fwd[1] +
+            out.fwd[2] * out.fwd[2];
+        const float uLen = out.up[0] * out.up[0] + out.up[1] * out.up[1] +
+            out.up[2] * out.up[2];
+        const float fu = out.fwd[0] * out.up[0] + out.fwd[1] * out.up[1] +
+            out.fwd[2] * out.up[2];
+        if (fabsf(fLen - 1.0f) > 0.05f || fabsf(uLen - 1.0f) > 0.05f ||
+            fabsf(fu) > 0.15f)
+            return false;
+        return true;
+    }
+
+    // C5: place the user's Blender-authored seat point in the world using the
+    // measured vehicle transform. A seat with no authored point returns false
+    // and the stock chase view stands.
+    bool Halo3ComputeAuthoredAnchor(float out[3])
+    {
+        Halo3SeatSnapshot seat;
+        if (!Halo3ReadSeatSnapshot(seat))
             return false;
         // A mounted gunner's point is keyed and framed by its CARRIER, so its
         // seat index on the gun tag (always 0) is the right key there too.
         const Halo3SeatPoint* point = Halo3FindSeatPoint(
-            static_cast<Halo3VehicleId>(identity), seatIndex, mounted);
+            static_cast<Halo3VehicleId>(seat.identity), seat.seatIndex,
+            seat.mounted);
         if (!point)
             return false;
-        for (int i = 0; i < 3; ++i)
-            if (!isfinite(pos[i]) || !isfinite(fwd[i]) || !isfinite(up[i]))
-                return false;
-        const float fLen = fwd[0] * fwd[0] + fwd[1] * fwd[1] + fwd[2] * fwd[2];
-        const float uLen = up[0] * up[0] + up[1] * up[1] + up[2] * up[2];
-        const float fu = fwd[0] * up[0] + fwd[1] * up[1] + fwd[2] * up[2];
-        if (fabsf(fLen - 1.0f) > 0.05f || fabsf(uLen - 1.0f) > 0.05f ||
-            fabsf(fu) > 0.15f)
-            return false;
         const float left[3] = {
-            up[1] * fwd[2] - up[2] * fwd[1],
-            up[2] * fwd[0] - up[0] * fwd[2],
-            up[0] * fwd[1] - up[1] * fwd[0]};
-        out[0] = pos[0] + fwd[0] * point->x + left[0] * point->y +
-            up[0] * point->z;
-        out[1] = pos[1] + fwd[1] * point->x + left[1] * point->y +
-            up[1] * point->z;
-        out[2] = pos[2] + fwd[2] * point->x + left[2] * point->y +
-            up[2] * point->z;
+            seat.up[1] * seat.fwd[2] - seat.up[2] * seat.fwd[1],
+            seat.up[2] * seat.fwd[0] - seat.up[0] * seat.fwd[2],
+            seat.up[0] * seat.fwd[1] - seat.up[1] * seat.fwd[0]};
+        out[0] = seat.pos[0] + seat.fwd[0] * point->x + left[0] * point->y +
+            seat.up[0] * point->z;
+        out[1] = seat.pos[1] + seat.fwd[1] * point->x + left[1] * point->y +
+            seat.up[1] * point->z;
+        out[2] = seat.pos[2] + seat.fwd[2] * point->x + left[2] * point->y +
+            seat.up[2] * point->z;
         return true;
     }
 
@@ -5809,6 +5912,80 @@ namespace
             static_cast<uint32_t>(Halo3VehicleState::Vehicle))
             return false;
         return Game_Halo3VehicleState().state == Halo3VehicleState::Vehicle;
+    }
+
+    // ---- C9: the view turns with the vehicle -------------------------------
+    // "the camera does not rotate with the car" (user, 2026-07-31). C8 put the
+    // eye on the authored seat point but left facing world-locked, so driving a
+    // circle left "straight ahead" pointing out of the side of the vehicle.
+    //
+    // The hull's rotation is folded into g_gameYawRef one frame step at a time.
+    // Everything the player sees is already expressed against that one
+    // reference — view, hand-aim ray, rendered hands and gun, crosshair, move
+    // stick — so they all turn together and the reticle stays under the hand.
+    // Owned by the engine camera thread, like every other writer of that
+    // reference.
+    Halo3SeatYaw g_halo3SeatYaw;
+    Halo3Wheel g_halo3Wheel;
+    std::atomic<uint32_t> g_halo3SeatAuthorsSteering{0};
+    std::atomic<float> g_halo3SeatYawTotal{0.0f};
+    // Steering the author is publishing this frame, + = right. Written by the
+    // input thread's wheel update, read by the aim-stick author.
+    std::atomic<float> g_halo3SteerAxis{0.0f};
+    std::atomic<uint32_t> g_halo3WheelGripped{0};
+
+    void Halo3ApplySeatYawFollow()
+    {
+        Halo3SeatSnapshot seat;
+        const bool active =
+            Halo3VehicleFpActive() && Halo3ReadSeatSnapshot(seat) &&
+            Halo3SeatFollowsHull(static_cast<Halo3VehicleId>(seat.identity),
+                                 seat.seatIndex, seat.mounted);
+        const float weight = g_config.vehicle_view_follow;
+        const float delta =
+            Halo3SeatYawDelta(g_halo3SeatYaw, seat.fwd, active, weight);
+        if (delta != 0.0f)
+            g_gameYawRef = WrapPi(g_gameYawRef + delta);
+        g_halo3SeatYawTotal.store(g_halo3SeatYaw.total,
+                                  std::memory_order_relaxed);
+        // Steering ownership switches on exactly the condition that removes
+        // the closed loop's feedback, so the two can never be out of step.
+        const bool authors = active && Halo3SeatAuthorsSteering(
+            static_cast<Halo3VehicleId>(seat.identity), seat.seatIndex,
+            seat.mounted, weight);
+        // The wheel state itself belongs to the input thread, which releases it
+        // on the same condition; only the published atomics are cleared here,
+        // so a game that stopped polling input cannot leave a steer latched.
+        if (!authors)
+        {
+            g_halo3SteerAxis.store(0.0f, std::memory_order_relaxed);
+            g_halo3WheelGripped.store(0, std::memory_order_relaxed);
+        }
+        g_halo3SeatAuthorsSteering.store(authors ? 1u : 0u,
+                                         std::memory_order_release);
+    }
+
+    // Is the wheel available in this seat? Aircraft are look-steered but take
+    // the plain flight stick, not a wheel.
+    bool Halo3SeatUsesWheel()
+    {
+        if (!g_halo3SeatAuthorsSteering.load(std::memory_order_acquire))
+            return false;
+        Halo3SeatSnapshot seat;
+        if (!Halo3ReadSeatSnapshot(seat))
+            return false;
+        return Halo3VehicleUsesWheel(
+            static_cast<Halo3VehicleId>(seat.identity));
+    }
+
+    // ApplyVrTurn and the aim author are shared with ODST and Reach, so this
+    // re-checks the live Halo 3 gate rather than trusting the latched flag: a
+    // title change that stopped the camera hook mid-drive could otherwise
+    // leave a stale "authored" flag suppressing another title's snap turn.
+    bool Halo3SeatAuthorsSteeringNow()
+    {
+        return g_halo3SeatAuthorsSteering.load(std::memory_order_acquire) !=
+            0 && Halo3VehicleFpActive();
     }
 
     const char* Halo3VehicleIdName(uint32_t id)
@@ -6086,6 +6263,56 @@ namespace
         }
     }
 
+    // C9 (log-only), called from the 50 ms worker. One line per 10 s of
+    // driving that tells the two candidate causes of the reported mesh
+    // vibration apart. "hull moved on N%" of sampled camera frames near 100%
+    // means the hull advances every frame and the anchor is in step with the
+    // renderer; well under that means the engine only moves it on its own
+    // simulation tick while MCC renders faster, so a camera pinned to the raw
+    // value staircases against an interpolated mesh. A large tilt with a high
+    // move percentage is suspension rock instead — which the anchor follows
+    // and the deliberately horizon-stable view does not.
+    void LogHalo3SeatMotionIfDriving()
+    {
+        static uint64_t nextMs = 0;
+        Halo3MotionDiag& diag = g_halo3MotionDiag;
+        const uint32_t frames = diag.frames.load(std::memory_order_relaxed);
+        if (frames < 120)
+            return;
+        const uint64_t nowMs = GetTickCount64();
+        if (!nextMs)
+        {
+            nextMs = nowMs + 10000;
+            return;
+        }
+        if (nowMs < nextMs)
+            return;
+        nextMs = nowMs + 10000;
+        const uint32_t moved = diag.posChanged.load(std::memory_order_relaxed);
+        const uint32_t tilted =
+            diag.tiltChanged.load(std::memory_order_relaxed);
+        const double scale = 100.0 / static_cast<double>(frames);
+        LOG("H3 seat motion: %u sampled frames, hull moved on %u (%.0f%%), "
+            "tilted on %u (%.0f%%); largest step %.4f wu, largest tilt "
+            "%.2f deg; view follow %.2f, hull turned %.0f deg since entry, "
+            "steering by %s",
+            frames, moved, moved * scale, tilted, tilted * scale,
+            diag.maxPosStep.load(std::memory_order_relaxed),
+            diag.maxTiltDeg.load(std::memory_order_relaxed),
+            g_config.vehicle_view_follow,
+            g_halo3SeatYawTotal.load(std::memory_order_relaxed) * 57.2957795f,
+            g_halo3SeatAuthorsSteering.load(std::memory_order_relaxed)
+                ? (g_halo3WheelGripped.load(std::memory_order_relaxed)
+                       ? "wheel"
+                       : "stick")
+                : "hand aim");
+        diag.frames.store(0, std::memory_order_relaxed);
+        diag.posChanged.store(0, std::memory_order_relaxed);
+        diag.tiltChanged.store(0, std::memory_order_relaxed);
+        diag.maxPosStep.store(0.0f, std::memory_order_relaxed);
+        diag.maxTiltDeg.store(0.0f, std::memory_order_relaxed);
+    }
+
     // Called from the 50 ms worker. While seated, measure the parent object
     // data window against the C1-proven observer focus: the vehicle's world
     // position should be the triplet nearest the focus, and its orientation
@@ -6268,6 +6495,10 @@ namespace
         }
         if (g_enabled.load())
         {
+            // C9: turn the shared yaw reference with the hull BEFORE anything
+            // consumes it this frame, and republish who owns steering — the
+            // turn stick below and the aim author both branch on it.
+            Halo3ApplySeatYawFollow();
             ApplyVrTurn();
             if (src)
             {
@@ -19668,12 +19899,14 @@ namespace
             LogHalo3VehicleProbeIfNew();   // H3 vehicle probe transitions
             LogHalo3ObserverIfDriving();   // H3 observer focus-field analysis
             LogHalo3ParentXformIfDriving(); // H3 vehicle-transform measurement
+            LogHalo3SeatMotionIfDriving(); // H3 seat-motion vibration diagnostic
             VR_FramePacingWorkerPoll();
             Sleep(50);
 #else
             LogHalo3VehicleProbeIfNew();   // H3 vehicle probe transitions
             LogHalo3ObserverIfDriving();   // H3 observer focus-field analysis
             LogHalo3ParentXformIfDriving(); // H3 vehicle-transform measurement
+            LogHalo3SeatMotionIfDriving(); // H3 seat-motion vibration diagnostic
             VR_FramePacingWorkerPoll();
             Sleep(50);
 #endif
@@ -20927,6 +21160,43 @@ static bool ReachControllerAimActive()
 static bool ReachControllerAimActive() { return false; }
 #endif
 
+// C9: the virtual steering wheel. Two gripped hands make a wheel out of the
+// line between them — no fixed pivot, so it is wherever the player's hands are
+// and grabbing it never snaps the steering. Called once per XInput poll before
+// the grip buttons are built, so the same poll that grabs the wheel also keeps
+// those grips from reaching the game as bumpers.
+void Game_Halo3UpdateVehicleWheel()
+{
+    VrPadState pad;
+    VR_GetPadState(pad);
+    const bool eligible = pad.valid && g_config.vehicle_motion &&
+        g_enabled.load() && g_vrAim.load() && Halo3SeatUsesWheel();
+    float lq[4]{}, lp[3]{}, rq[4]{}, rp[3]{}, hq[4]{}, hp[3]{};
+    const bool posesOk = eligible && VR_GetLeftControllerPose(lq, lp) &&
+        VR_GetRightControllerPose(rq, rp) && VR_GetHeadPose(hq, hp);
+    float headYaw = 0.0f;
+    if (posesOk)
+    {
+        const float x = hq[0], y = hq[1], z = hq[2], w = hq[3];
+        const float fx = -2.0f * (w * y + x * z);
+        const float fz = -(1.0f - 2.0f * (x * x + y * y));
+        headYaw = atan2f(fx, -fz);
+    }
+    const bool driving = Halo3UpdateWheel(
+        g_halo3Wheel, posesOk, pad.gripL, pad.gripR, lp, rp, headYaw,
+        g_config.vehicle_wheel_max_deg, g_config.vehicle_wheel_deadzone_deg);
+    g_halo3WheelGripped.store(driving ? 1u : 0u, std::memory_order_release);
+    if (driving)
+        g_halo3SteerAxis.store(g_halo3Wheel.steer, std::memory_order_relaxed);
+}
+
+// True while the wheel owns both grips, so the input hook can withhold them
+// from the game (holding a wheel must not spam the bumpers).
+bool Game_Halo3VehicleWheelActive()
+{
+    return g_halo3WheelGripped.load(std::memory_order_acquire) != 0;
+}
+
 bool Game_ComputeAimStick(float& outRx, float& outRy)
 {
     if (!Game_HasTitleCapability(TitleCapability_ControllerAim) &&
@@ -20999,8 +21269,34 @@ bool Game_ComputeAimStick(float& outRx, float& outRy)
     // slow). The ceiling is the game's own turn rate — raising in-game look
     // sensitivity raises it further.
     const float k = 12.0f;
-    outRx = Clamp(-errYaw * k, -1.0f, 1.0f);
     outRy = Clamp(errPitch * k, -1.0f, 1.0f);
+
+    // C9: with the view reference following the hull, a look-steered driver's
+    // yaw error stops depending on the vehicle's heading — the closed loop has
+    // no feedback left there, and a fixed hand offset would become a constant
+    // turn RATE instead of a heading. That seat's steering is authored openly
+    // instead: the wheel while both hands hold it, and Halo's own turn stick
+    // when they do not. Pitch keeps the closed loop, because it never passed
+    // through the yaw reference, so a Banshee still climbs from the hand.
+    if (Halo3SeatAuthorsSteeringNow())
+    {
+        if (Game_Halo3VehicleWheelActive())
+        {
+            outRx = Clamp(g_halo3SteerAxis.load(std::memory_order_relaxed),
+                          -1.0f, 1.0f);
+            outRy = 0.0f; // both hands are on the wheel, not aiming
+        }
+        else
+        {
+            VrPadState pad;
+            VR_GetPadState(pad);
+            outRx = (pad.valid && fabsf(pad.turnX) > 0.15f)
+                ? Clamp(pad.turnX, -1.0f, 1.0f)
+                : 0.0f;
+        }
+        return true;
+    }
+    outRx = Clamp(-errYaw * k, -1.0f, 1.0f);
     return true;
 }
 
@@ -21038,6 +21334,13 @@ void Game_MapMoveStick(float& mx, float& my)
         return;
     }
     if (!Game_HasTitleCapability(TitleCapability_ControllerAim))
+        return;
+    // C9: in a first-person vehicle seat the left stick is not locomotion —
+    // it is throttle, and on a Scorpion or Wraith it is the hull's own
+    // steering. Rotating it by (view - aim) made "forward" diagonal the moment
+    // the player looked away from the nose, and on those two the aim is the
+    // turret rather than the hull. Hand it to the game unrotated.
+    if (Halo3VehicleFpActive())
         return;
     // The game moves relative to its aim heading, which VR aim points at the
     // hand. Rotate the move vector by (head - aim) yaw so pushing forward

@@ -109,6 +109,15 @@ struct Config
     bool vehicle_first_person = true;
     float vehicle_cam_forward_m = 0.10f; // + = toward the windshield
     float vehicle_cam_up_m = 0.05f;      // + = raise out of the seat
+    // How much of the vehicle's turning the view takes with it. 1 = you turn
+    // with the vehicle like a real driver; 0 = the world-locked view Alpha
+    // 0.3.1 shipped, which also leaves every control exactly as it was.
+    float vehicle_view_follow = 1.0f;
+    // Motion steering in look-steered ground driver seats: grab an invisible
+    // wheel with both grips and turn it. 0 = the right stick steers.
+    bool vehicle_motion = true;
+    float vehicle_wheel_max_deg = 75.0f;      // wheel angle at full lock
+    float vehicle_wheel_deadzone_deg = 6.0f;  // slack around centre
 
     // rendering. The game's own HUD reticle sits at head-center and is wrong
     // whenever hand aim is on; this one is the truth.

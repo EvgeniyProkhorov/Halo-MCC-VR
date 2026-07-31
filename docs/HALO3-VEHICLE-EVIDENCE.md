@@ -664,3 +664,144 @@ space never touches that node matrix. Nothing is lost: a mounted turret's
 object frame is mount-fixed and does not follow gun aim. The bounding-sphere
 sanity gate follows the frame's owner, so a carrier-frame anchor is checked
 against the carrier's sphere.
+
+## C8 confirmed in the headset (2026-07-31, Steam, source 6b08269)
+
+The user drove every root driver seat and reported the placements correct. The
+session log (`6b082698a949cdb730c384865d70868c336f6fc0`, Steam edition) shows
+`seatCam=authored frame=direct` on the warthog, mongoose, ghost, wraith,
+prowler, chopper, banshee and hornet — eight distinct identities, including
+both same-physics-type cousin groups that C6/C7 could not separate. No
+`INSANE`, no `too-deep`, no faults.
+
+Two things that sitting did **not** cover, so they remain unproven: every
+sampled seat was `seat=0` (no passenger seat was ridden) and no line carries
+`frame=carrier` (no mounted turret was manned). The C8 carrier fix is still
+awaiting its first headset evidence.
+
+## The bounding-centre fingerprint is a dead end — do not wire it
+
+`Halo3ComputeFingerprint` / `Halo3FingerprintIsUnique` exist in
+`halo3_vehicle_logic.h` with tests, and **nothing calls them**. Keep it that
+way. An offline pass over the H3EK render_model and model tags for all 19
+vehicle/turret tags, cross-checked against the raw object windows in three
+existing session logs, established:
+
+- The recovered value is `R^T · (+0x1C − +0x50)`, and for warthog, mongoose,
+  banshee, wraith and scorpion it is the render_model node-0 default
+  translation to <= 0.0006 wu. For **chopper, mauler and hornet it is not** —
+  those match the `hlmt`'s authored bounding sphere centre instead (to 0.0009
+  wu). The **ghost matches neither** (0.089 wu from the closest), consistently
+  across two sessions and two object handles, so its value is obtainable only
+  by measurement.
+- It cannot separate the cousins it would exist to separate. warthog vs
+  mongoose is 0.1226 wu apart; the shipped accept/separate pair (0.15 / 0.30)
+  needs a minimum pair distance of >= 0.45 wu to be safe.
+- `warthog_gauss` and `warthog_troop` share the warthog's model, and
+  `wraith_anti_air` shares the wraith's, so those pairs are at distance 0.0 —
+  a zero-information case no tolerance can fix.
+- On a mounted turret the expression is not merely uninformative but
+  undefined: an attached child stores `+0x50/+0x5C/+0x68` parent-relative
+  while `+0x1C` is world, so all 15 measured turret samples produced 26-33 wu
+  of garbage. (Safe by construction — it can only fail to match.)
+
+The definition-content identity C8 ships is the correct mechanism and is
+confirmed in process. One genuinely useful by-product: three of four measured
+turret mount offsets (the child's own `+0x50`) match the carrier's authored
+turret marker to 0.0005 wu, which is a far better turret discriminator than
+the fingerprint if the Shade ever needs one.
+
+## C9 — the view turns with the vehicle, and the driver stops steering by gaze
+
+**Report (user, 2026-07-31, after the C8 sitting):** "the camera doesn't follow
+the rotation of the vehicle", and "the mesh vibrates fighting against the
+camera override".
+
+### Why the view did not turn, from the shipped code
+
+`ApplyHeadLook` builds view yaw as
+`gy = g_gameYawRef + yawSign * WrapPi(headYaw - g_headYawRef)`, and
+`g_gameYawRef` is rebased only by a manual recenter or a cinematic shot
+boundary. C8's seat camera substitutes **position** and leaves facing entirely
+HMD-owned in world space, so the hull turns underneath a map-pinned view.
+
+### The fix is a rebase of the one shared reference, not a separate offset
+
+`Halo3SeatYawDelta` returns the hull's rotation *step*, and
+`Halo3ApplySeatYawFollow` folds it into `g_gameYawRef` on the camera thread
+before anything consumes it that frame. View, hand-aim ray
+(`Game_ComputeAimStick`), rendered hands and gun (`BuildTrackedGameBasis`,
+`DesiredWristWorld`), crosshair and move stick are all already expressed
+against that one reference, so they turn together and none can be forgotten;
+publishing an offset would have to be added at each site and any miss would
+slide by exactly the hull angle. It also leaves the player facing the hull's
+final heading on foot when they climb out, with no snap.
+
+Guards, all tested: a hull whose forward has no horizontal component (a Banshee
+through the vertical) re-references instead of accumulating a degenerate
+`atan2`; a step past 0.60 rad in one frame is a teleport/respawn/seat swap, not
+steering — Halo 3's fastest authored `turn_rate` is 9.4 rad/s, which is 0.16 rad
+across a whole 60 Hz tick — and is refused; weight 0 restores Alpha 0.3.1
+exactly.
+
+### Why steering had to change in the same candidate
+
+`Game_ComputeAimStick` maps the controller through the **same** reference:
+`desiredYaw = g_gameYawRef + yawSign * WrapPi(controllerYaw - g_headYawRef)`.
+For a seat where the engine's aim IS the hull heading, following the hull makes
+`errYaw = desiredYaw - aimYaw` independent of the hull entirely: the loop loses
+its feedback and a fixed hand offset becomes a constant turn RATE. So the
+follow cannot ship without replacing that author, and the two switch on one
+condition (`Halo3SeatAuthorsSteering`, gated on the follow weight itself).
+
+### Halo 3 has two steering families, and only one may be authored
+
+- **Look-steered** — the right stick turns the vehicle and the seat's aim is
+  the hull's own heading: warthog, mongoose, ghost, prowler, chopper, banshee,
+  hornet.
+- **Turret-aimed** — the hull turns from the left stick and the right stick
+  aims a weapon that swings independently: **scorpion and wraith**. Their loop
+  keeps real feedback under the follow, so it is left alone; taking their right
+  stick would be taking their gun.
+
+Every other seat (passengers, mounted gunners, walk-up turrets) aims something
+independent of the frame being followed, so the closed loop stays there too and
+on-foot shooting mechanics are unchanged — the user's standing requirement.
+
+`Halo3SeatFollowsHull` additionally withholds the follow from a **walk-up
+turret**: that seat is published in the turret's *own* object frame, which may
+be the very thing its aim turns, and nothing authors its steering. A mounted
+gunner is published in the CARRIER's frame, so it is unaffected.
+
+### What authors a look-steered driver's yaw now
+
+Wheel while both grips are held (ground only), Halo's own turn stick otherwise.
+`ApplyVrTurn` stops consuming the turn stick in those seats so one flick cannot
+both spin the view and swerve, and the input hook withholds the grips from the
+game while the wheel is held. **Pitch keeps the closed loop everywhere** — it
+never passed through the yaw reference — so a Banshee still climbs and dives
+from the hand, and aircraft take the plain stick for yaw until a two-hand yoke
+lands.
+
+`Game_MapMoveStick` no longer rotates the left stick head-relative in a
+first-person vehicle seat. That rotation is the walk-where-you-look feature; in
+a vehicle the stick is throttle, and on a scorpion or wraith it is the hull's
+own steering, while `aimYaw` there is the turret.
+
+### The mesh vibration is not yet root-caused — C9 ships a diagnostic, not a fix
+
+Two candidates, and they are distinguishable from one line of log:
+
+1. **Simulation staircase.** If the engine advances the object's `+0x50` only
+   on its own tick while MCC renders faster and interpolates the *mesh*, a
+   camera pinned to the raw value steps while the mesh slides.
+2. **Suspension rock.** The anchor tracks the hull's pitch and roll (correct —
+   your head really does rock) while the view is deliberately horizon-stable,
+   so the mesh appears to rotate about the seat point.
+
+`H3 seat motion:` counts, per 10 s of driving, how many sampled camera frames
+saw the hull's position change at all and how many saw its up vector tilt, plus
+the largest step of each. Near 100 % moved means the hull advances every frame
+and (1) is refuted; well under that with a camera rate far above the move rate
+confirms it. A high move percentage with a large tilt is (2). Nothing in this
+diagnostic feeds behavior.

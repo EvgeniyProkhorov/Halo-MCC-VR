@@ -64,6 +64,12 @@ static void Clamp()
         std::clamp(g_config.vehicle_cam_forward_m, -0.5f, 1.0f);
     g_config.vehicle_cam_up_m =
         std::clamp(g_config.vehicle_cam_up_m, -0.5f, 1.0f);
+    g_config.vehicle_view_follow =
+        std::clamp(g_config.vehicle_view_follow, 0.0f, 1.0f);
+    g_config.vehicle_wheel_max_deg =
+        std::clamp(g_config.vehicle_wheel_max_deg, 30.0f, 180.0f);
+    g_config.vehicle_wheel_deadzone_deg =
+        std::clamp(g_config.vehicle_wheel_deadzone_deg, 0.0f, 30.0f);
     g_config.crosshair_distance_m = std::clamp(g_config.crosshair_distance_m, 2.0f, 50.0f);
     g_config.crosshair_size_deg = std::clamp(g_config.crosshair_size_deg, 0.3f, 20.0f);
     g_config.reticle_r = std::clamp(g_config.reticle_r, 0.0f, 1.0f);
@@ -200,6 +206,14 @@ void ConfigLoad(const wchar_t* path)
             g_config.vehicle_cam_forward_m = (float)atof(val);
         else if (!strcmp(key, "vehicle_cam_up_m"))
             g_config.vehicle_cam_up_m = (float)atof(val);
+        else if (!strcmp(key, "vehicle_view_follow"))
+            g_config.vehicle_view_follow = (float)atof(val);
+        else if (!strcmp(key, "vehicle_motion"))
+            g_config.vehicle_motion = atoi(val) != 0;
+        else if (!strcmp(key, "vehicle_wheel_max_deg"))
+            g_config.vehicle_wheel_max_deg = (float)atof(val);
+        else if (!strcmp(key, "vehicle_wheel_deadzone_deg"))
+            g_config.vehicle_wheel_deadzone_deg = (float)atof(val);
         else if (!strcmp(key, "crosshair"))
             g_config.crosshair = atoi(val) != 0;
         else if (!strcmp(key, "crosshair_distance_m"))
@@ -570,6 +584,24 @@ void ConfigSave()
             d.vehicle_cam_forward_m, d.vehicle_cam_up_m);
     fprintf(f, "vehicle_cam_forward_m = %.2f\n", g_config.vehicle_cam_forward_m);
     fprintf(f, "vehicle_cam_up_m = %.2f\n\n", g_config.vehicle_cam_up_m);
+    fprintf(f, "# How much of the vehicle's turning your view takes with it.\n");
+    fprintf(f, "# 1 = you turn with the vehicle like a real driver; 0.5 = half,\n");
+    fprintf(f, "# for a gentler ride; 0 = the view stays locked to the world and\n");
+    fprintf(f, "# every control behaves exactly as it did before this feature.\n");
+    fprintf(f, "# (default %.2f, range 0 to 1)\n", d.vehicle_view_follow);
+    fprintf(f, "vehicle_view_follow = %.2f\n\n", g_config.vehicle_view_follow);
+    fprintf(f, "# Motion steering. In a Warthog, Mongoose, Ghost, Prowler or\n");
+    fprintf(f, "# Chopper, squeeze both grips to take hold of an invisible\n");
+    fprintf(f, "# steering wheel and turn it; let go and the right stick steers\n");
+    fprintf(f, "# again. Aircraft and the Scorpion/Wraith are unaffected.\n");
+    fprintf(f, "# (default %d)\n", d.vehicle_motion ? 1 : 0);
+    fprintf(f, "vehicle_motion = %d\n", g_config.vehicle_motion ? 1 : 0);
+    fprintf(f, "# Wheel angle for full lock, and the slack around centre.\n");
+    fprintf(f, "# (defaults %.0f / %.0f, ranges 30-180 and 0-30)\n",
+            d.vehicle_wheel_max_deg, d.vehicle_wheel_deadzone_deg);
+    fprintf(f, "vehicle_wheel_max_deg = %.0f\n", g_config.vehicle_wheel_max_deg);
+    fprintf(f, "vehicle_wheel_deadzone_deg = %.0f\n\n",
+            g_config.vehicle_wheel_deadzone_deg);
     fprintf(f, "# -------------------------------------------------------------------\n");
     fprintf(f, "#  EXPERIMENTAL SCOPE\n");
     fprintf(f, "#  Universal physical placement and performance preferences.\n");

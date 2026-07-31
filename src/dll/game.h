@@ -128,6 +128,12 @@ struct Halo3VehicleStateSnapshot
     int seatIndex = -1;     // seat block index on the DIRECT parent tag
 };
 Halo3VehicleStateSnapshot Game_Halo3VehicleState();
+// C9 virtual steering wheel (Halo 3 look-steered driver seats only; a no-op in
+// every other seat, title and camera mode). Call once per XInput poll, before
+// the pad buttons are built: while the wheel is held the input hook must
+// withhold both grips, or holding a wheel would spam the bumpers.
+void Game_Halo3UpdateVehicleWheel();
+bool Game_Halo3VehicleWheelActive();
 // True while an armed tracked camera consumes the OpenXR turn action. The
 // XInput hook must then suppress stock RX/RY so the game cannot create a second
 // camera motion underneath the HMD-owned view.

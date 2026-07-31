@@ -720,6 +720,29 @@ namespace
             "Trims applied to every seat. The base position is the game's own\n"
             "per-seat camera pivot, so each vehicle already seats you where\n"
             "its authors placed the camera focus.");
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Text("Turning with the vehicle");
+        changed |= ImGui::SliderFloat("View follows the vehicle",
+            &g_config.vehicle_view_follow, 0.00f, 1.00f, "%.2f");
+        ImGui::TextDisabled(
+            "1 = you turn with the vehicle like a real driver. 0 = the view\n"
+            "stays locked to the world and every control goes back to exactly\n"
+            "what it was before this feature.");
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Text("Motion steering");
+        changed |= ImGui::Checkbox("Virtual steering wheel",
+                                   &g_config.vehicle_motion);
+        ImGui::TextDisabled(
+            "Warthog, Mongoose, Ghost, Prowler and Chopper: squeeze both grips\n"
+            "to take hold of an invisible wheel and turn it. Let go and the\n"
+            "right stick steers again. Aircraft and the Scorpion/Wraith keep\n"
+            "their own controls.");
+        changed |= ImGui::SliderFloat("Full lock at (deg)",
+            &g_config.vehicle_wheel_max_deg, 30.0f, 180.0f, "%.0f");
+        changed |= ImGui::SliderFloat("Wheel deadzone (deg)",
+            &g_config.vehicle_wheel_deadzone_deg, 0.0f, 30.0f, "%.0f");
         }
 
         if (g_activeCategory == Cat_WeaponAim)

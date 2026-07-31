@@ -315,19 +315,13 @@ enum class Halo3FrameStatus : uint32_t
 // "straight ahead" ends up out of the side of the vehicle. The fix is to add
 // the hull's rotation since you sat down to that yaw reference.
 //
-// CRITICAL: the SAME offset must reach the hand-aim ray (Game_ComputeAimStick
-// maps the controller through g_gameYawRef too). View and aim sharing one
-// reference is what keeps the reticle on what you are looking at; rotating
-// only the view would slide them apart by exactly this angle. That shared
-// reference is also the vehicle's steering channel — which is why this cannot
-// ship before the motion-control steering author (see §C9 in the evidence
-// doc): with the reference following the hull, a driver's fixed hand offset
-// becomes a constant turn RATE instead of a heading.
-//
-// Continuous accumulation, not a wrapped difference: a partial follow weight
-// applied to a wrapped angle would snap 2*pi*weight every time the hull passed
-// the wrap point. The total is wrapped only on the way out, where it is
-// consumed as cos/sin and a 2*pi difference is invisible.
+// The rotation is applied by REBASING g_gameYawRef itself, one frame step at a
+// time, rather than by publishing an offset consumers add. Everything the
+// player sees is already expressed against that one reference — the view, the
+// hand-aim ray (Game_ComputeAimStick), the rendered hands and gun
+// (BuildTrackedGameBasis), the crosshair and the move stick — so rebasing it
+// turns them all together and none can be forgotten. It also leaves the player
+// facing the hull's final heading when they climb out, with no snap.
 inline float Halo3WrapPi(float a)
 {
     constexpr float kPi = 3.14159265f;
@@ -343,35 +337,151 @@ struct Halo3SeatYaw
 {
     bool armed = false;
     float lastYaw = 0.0f;   // previous hull heading
-    float total = 0.0f;     // hull rotation accumulated since seat entry
+    float total = 0.0f;     // rotation folded into the reference (diagnostic)
 };
 
-// hullYaw = atan2(fwd[1], fwd[0]) of the seated parent's measured frame.
-// active = the FP seat camera owns the view this frame (a stale, torn or
-// unproven transform must pass false, which re-references on the next entry).
-// weight = vehicle_view_follow, 0 = today's world-locked view, 1 = locked to
-// the hull. Returns the yaw to ADD to the shared reference.
-inline float Halo3UpdateSeatYaw(Halo3SeatYaw& state, float hullYaw,
-                                bool active, float weight)
+// A hull heading needs a horizontal forward to exist at all. A Banshee pulled
+// through the vertical has none, and atan2 of a near-zero pair swings wildly,
+// so the follow re-references there instead of accumulating that swing.
+inline constexpr float kHalo3SeatYawMinHorizontal = 0.25f;
+// Ceiling on one frame's hull rotation. Halo 3's fastest authored turn rate is
+// 9.4 rad/s (540 deg/s), which is 0.16 rad even across a whole 60 Hz sim tick,
+// so anything past this is a teleport, respawn or seat swap — never steering.
+inline constexpr float kHalo3SeatYawMaxStep = 0.60f;
+
+// fwd = the seated parent's measured world forward (the CARRIER's for a mounted
+// gunner). active = the FP seat camera owns the view this frame; a stale, torn
+// or unproven transform must pass false, which re-references on the next entry.
+// weight = vehicle_view_follow, 0 = the world-locked view Alpha 0.3.1 shipped,
+// 1 = welded to the hull.
+//
+// Returns this frame's yaw step to fold into the shared view/aim reference —
+// a delta, not a total. Rebasing the one reference every consumer already
+// shares (view, hand aim, rendered hands, crosshair, move stick) is what keeps
+// them together; publishing a separate offset would have to be added at each
+// of those sites and any one that was missed would slide by exactly the hull
+// angle. That same reference is the vehicle's steering channel, which is why
+// this cannot ship without the driver-seat steering author below: once the
+// reference follows the hull, the closed loop's error stops depending on the
+// hull's heading and a fixed hand offset becomes a constant turn RATE.
+inline float Halo3SeatYawDelta(Halo3SeatYaw& state, const float fwd[3],
+                               bool active, float weight)
 {
-    if (!active || !std::isfinite(hullYaw) || !std::isfinite(weight))
+    if (!active || !std::isfinite(weight) || !std::isfinite(fwd[0]) ||
+        !std::isfinite(fwd[1]))
     {
         state.armed = false;
         state.total = 0.0f;
         return 0.0f;
     }
+    const float horizontal =
+        std::sqrt(fwd[0] * fwd[0] + fwd[1] * fwd[1]);
+    if (horizontal < kHalo3SeatYawMinHorizontal)
+    {
+        state.armed = false;
+        return 0.0f;
+    }
+    const float yaw = std::atan2(fwd[1], fwd[0]);
     if (!state.armed)
     {
         // First seated frame: this heading is "straight ahead" from now on.
         state.armed = true;
-        state.lastYaw = hullYaw;
-        state.total = 0.0f;
+        state.lastYaw = yaw;
         return 0.0f;
     }
-    state.total += Halo3WrapPi(hullYaw - state.lastYaw);
-    state.lastYaw = hullYaw;
+    const float step = Halo3WrapPi(yaw - state.lastYaw);
+    state.lastYaw = yaw;
+    if (std::fabs(step) > kHalo3SeatYawMaxStep)
+        return 0.0f;
     const float w = weight < 0.0f ? 0.0f : (weight > 1.0f ? 1.0f : weight);
-    return Halo3WrapPi(state.total * w);
+    const float delta = step * w;
+    state.total = Halo3WrapPi(state.total + delta);
+    return delta;
+}
+
+
+// ---- Virtual steering wheel --------------------------------------------
+// Two gripped hands define a wheel by the line between them: its tilt out of
+// horizontal, measured in the head's own heading plane, is the wheel angle. No
+// fixed pivot, so the wheel is wherever the player's hands are and a grab
+// never snaps the steering.
+struct Halo3Wheel
+{
+    bool gripped = false;
+    float steer = 0.0f;     // last authored steer, [-1, 1], + = right
+};
+
+inline constexpr float kHalo3WheelEngageGrip = 0.6f;
+inline constexpr float kHalo3WheelReleaseGrip = 0.4f;
+inline constexpr float kHalo3WheelMinSpan = 0.15f;  // metres between hands
+
+// left/right = tracked hand positions in OpenXR room space (Y up, -Z forward).
+// headYaw = the room-space head heading (atan2(fwd.x, -fwd.z)), which is the
+// plane the wheel is read in, so it works whichever way the player is facing.
+// Returns true while the wheel owns steering; state.steer holds the value.
+inline bool Halo3UpdateWheel(Halo3Wheel& state, bool enabled,
+                             float gripLeft, float gripRight,
+                             const float left[3], const float right[3],
+                             float headYaw, float maxDeg, float deadzoneDeg)
+{
+    const bool finite = std::isfinite(gripLeft) && std::isfinite(gripRight) &&
+        std::isfinite(headYaw) && std::isfinite(left[0]) &&
+        std::isfinite(left[1]) && std::isfinite(left[2]) &&
+        std::isfinite(right[0]) && std::isfinite(right[1]) &&
+        std::isfinite(right[2]);
+    if (!enabled || !finite)
+    {
+        state.gripped = false;
+        state.steer = 0.0f;
+        return false;
+    }
+    // Hysteresis: grabbing takes both grips past 0.6, letting go takes either
+    // below 0.4, so a hand hovering at the threshold cannot chatter the
+    // steering owner on and off.
+    if (state.gripped)
+    {
+        if (gripLeft < kHalo3WheelReleaseGrip ||
+            gripRight < kHalo3WheelReleaseGrip)
+            state.gripped = false;
+    }
+    else if (gripLeft > kHalo3WheelEngageGrip &&
+             gripRight > kHalo3WheelEngageGrip)
+    {
+        state.gripped = true;
+    }
+    if (!state.gripped)
+    {
+        state.steer = 0.0f;
+        return false;
+    }
+
+    const float dx = right[0] - left[0];
+    const float dy = right[1] - left[1];
+    const float dz = right[2] - left[2];
+    const float span = std::sqrt(dx * dx + dy * dy + dz * dz);
+    if (span < kHalo3WheelMinSpan)
+    {
+        // Hands together is not a wheel. Hold the last steer rather than
+        // snapping to centre while the player shuffles their grip.
+        return true;
+    }
+    // Room right at the head's heading: forward is (sin, 0, -cos), so right is
+    // (cos, 0, sin).
+    const float lateral = dx * std::cos(headYaw) + dz * std::sin(headYaw);
+    constexpr float kHalfPi = 1.57079633f;
+    const float angle = lateral > 0.05f * span
+        ? std::atan2(dy, lateral)
+        : (dy >= 0.0f ? kHalfPi : -kHalfPi); // past 87 deg / hands crossed
+    const float degrees = angle * 57.2957795f;
+    const float dead = deadzoneDeg < 0.0f ? 0.0f : deadzoneDeg;
+    const float full = maxDeg > dead + 1.0f ? maxDeg : dead + 1.0f;
+    float magnitude = std::fabs(degrees) - dead;
+    if (magnitude < 0.0f) magnitude = 0.0f;
+    magnitude /= (full - dead);
+    if (magnitude > 1.0f) magnitude = 1.0f;
+    // Right hand UP tilts the wheel counter-clockwise, which is a left turn.
+    state.steer = degrees > 0.0f ? -magnitude : magnitude;
+    return true;
 }
 
 // C7 identity-probe field map (log-only; §E5, offline-verified, nothing keys
@@ -534,6 +644,95 @@ inline constexpr const Halo3SeatPoint* Halo3FindSeatPoint(
             return &p;
     }
     return nullptr;
+}
+
+// The seat that steers. Every vehicle in the authored table puts its driver at
+// seat 0 of the vehicle itself; a mounted turret gunner is seat 0 of the GUN,
+// and a walk-up turret has no vehicle under it at all. Unknown never steers —
+// an unidentified vehicle keeps the stock closed-loop aim it has today.
+inline constexpr bool Halo3SeatIsDriver(Halo3VehicleId id, int seatIndex,
+                                        bool mountedTurret)
+{
+    return !mountedTurret && seatIndex == 0 &&
+        id != Halo3VehicleId::Unknown &&
+        id != Halo3VehicleId::StationaryTurret;
+}
+
+// Halo 3 drives its vehicles two different ways. Most are LOOK-STEERED: the
+// right stick turns the vehicle, and the engine's "aim" for that seat is the
+// hull's own heading. The Scorpion and the Wraith are not — their hull turns
+// from the left stick and the right stick aims a weapon that swings
+// independently of the hull.
+//
+// Only the first family may have its steering authored, and it is exactly the
+// family the hull-follow view breaks: when the aim IS the hull, rebasing the
+// reference by the hull's rotation cancels the closed loop's feedback. In the
+// second family the aim is a separate heading, so the loop keeps real feedback
+// and must be left alone — the driver is aiming a turret, not steering.
+// Getting this wrong for a vehicle costs that vehicle its motion steering,
+// never its controls.
+inline constexpr bool Halo3VehicleIsLookSteered(Halo3VehicleId id)
+{
+    switch (id)
+    {
+    case Halo3VehicleId::Warthog:
+    case Halo3VehicleId::Mongoose:
+    case Halo3VehicleId::Ghost:
+    case Halo3VehicleId::Mauler:
+    case Halo3VehicleId::Chopper:
+    case Halo3VehicleId::Banshee:
+    case Halo3VehicleId::Hornet:
+        return true;
+    default: // Scorpion, Wraith, turrets, Unknown
+        return false;
+    }
+}
+
+// A wheel is a ground control. Aircraft are look-steered too, so they also need
+// their steering authored, but a wheel is the wrong shape for one: their stick
+// is a flight control and its vertical axis is climb. They take the plain stick
+// here and a two-hand yoke later.
+inline constexpr bool Halo3VehicleUsesWheel(Halo3VehicleId id)
+{
+    return Halo3VehicleIsLookSteered(id) &&
+        id != Halo3VehicleId::Banshee && id != Halo3VehicleId::Hornet;
+}
+
+// Which seats may take the hull-follow view at all. The hazard the follow
+// creates is specific: if the frame it follows is the same heading the engine's
+// aim channel drives, the closed-loop hand aim loses its feedback and a fixed
+// hand offset becomes a runaway turn. Seat by seat:
+//   * driver of a look-steered vehicle — the aim IS the hull, so it is only
+//     allowed because the steering author below replaces that loop;
+//   * every other seat in the table — the frame is the hull (or, for a mounted
+//     gunner, the CARRIER) while the aim is a turret or the occupant's own
+//     weapon, so the loop keeps real feedback;
+//   * a walk-up turret has no vehicle under it, so the frame published for that
+//     seat is the turret's own object, which may well be what its aim turns.
+//     Nothing authors its steering, so it is left exactly as it is;
+//   * Unknown has no authored point, so its camera is the stock chase view and
+//     there is no "the camera does not turn" to fix.
+inline constexpr bool Halo3SeatFollowsHull(Halo3VehicleId id, int seatIndex,
+                                           bool mountedTurret)
+{
+    if (id == Halo3VehicleId::Unknown ||
+        id == Halo3VehicleId::StationaryTurret)
+        return false;
+    return Halo3FindSeatPoint(id, seatIndex, mountedTurret) != nullptr;
+}
+
+// The one gate that hands a seat's steering to the wheel/stick author instead
+// of the closed-loop hand aim. It must switch on exactly the same condition
+// that makes the view follow the hull, which is why the follow weight is an
+// argument: at weight 0 nothing rotates, the closed loop still has its
+// feedback, and every control stays exactly as Alpha 0.3.1 shipped it.
+inline constexpr bool Halo3SeatAuthorsSteering(Halo3VehicleId id, int seatIndex,
+                                               bool mountedTurret,
+                                               float followWeight)
+{
+    return followWeight > 0.01f && Halo3SeatIsDriver(id, seatIndex,
+                                                     mountedTurret) &&
+        Halo3VehicleIsLookSteered(id);
 }
 
 // C4 transform probe: bounded float window of the seated DIRECT parent's

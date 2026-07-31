@@ -3981,6 +3981,8 @@ int main()
         "cutscene_theater_distance_m",
         "turn_smooth", "turn_snap_deg", "turn_smooth_deg_s", "dpad_hand",
         "vehicle_first_person", "vehicle_cam_forward_m", "vehicle_cam_up_m",
+        "vehicle_view_follow", "vehicle_motion", "vehicle_wheel_max_deg",
+        "vehicle_wheel_deadzone_deg",
         "crosshair", "crosshair_distance_m", "crosshair_size_deg",
         "reticle_r", "reticle_g", "reticle_b", "kill_reticle",
         "gun_scale", "left_hand_scale", "gun_pitch_deg", "gun_yaw_deg",
@@ -4899,80 +4901,273 @@ int main()
                 "identify a vehicle when two candidates are both plausible");
         }
 
-        // C9 seat yaw: the view must turn with the hull. Entry references the
-        // current heading (offset 0), rotation since entry is reported, an
-        // exit disarms so re-entry re-references, and a partial follow weight
-        // must stay continuous across the +/-pi wrap (a wrapped difference
-        // scaled by weight would snap 2*pi*weight there).
+        // C9 seat yaw: the view must turn with the hull. The function returns
+        // the yaw STEP to fold into the shared reference, so what matters is
+        // that the accumulated steps equal the hull's rotation, that entry and
+        // exit re-reference instead of snapping, and that no single frame can
+        // whip the view.
         {
+            auto hullFwd = [](float yaw, float out[3]) {
+                out[0] = std::cos(yaw); out[1] = std::sin(yaw); out[2] = 0.0f;
+            };
+            float fwd[3];
             Halo3SeatYaw seat;
+            hullFwd(1.0f, fwd);
             const bool idleZero =
-                Halo3UpdateSeatYaw(seat, 1.0f, false, 1.0f) == 0.0f &&
+                Halo3SeatYawDelta(seat, fwd, false, 1.0f) == 0.0f &&
                 !seat.armed;
-            // Sitting down at heading 1.0 rad: straight ahead is 1.0 rad.
+            // Sitting down at heading 1.0 rad: this heading is straight ahead.
             const bool entryZero =
-                std::fabs(Halo3UpdateSeatYaw(seat, 1.0f, true, 1.0f)) < 1e-6f &&
-                seat.armed;
-            // Hull swings 90 deg left -> the view follows exactly.
+                Halo3SeatYawDelta(seat, fwd, true, 1.0f) == 0.0f && seat.armed;
+            // Hull swings 20 deg left -> the view follows by exactly that.
+            hullFwd(1.0f + 0.34906585f, fwd);
             const bool followsHull = std::fabs(
-                Halo3UpdateSeatYaw(seat, 1.0f + 1.5707963f, true, 1.0f) -
-                1.5707963f) < 1e-4f;
-            // Getting out re-references: sitting in a car facing the other
-            // way must read straight ahead again, not 180 degrees out.
-            Halo3UpdateSeatYaw(seat, 0.0f, false, 1.0f);
+                Halo3SeatYawDelta(seat, fwd, true, 1.0f) - 0.34906585f) < 1e-4f;
+            // Getting out re-references: sitting in a car facing the other way
+            // must read straight ahead again, not 180 degrees out.
+            Halo3SeatYawDelta(seat, fwd, false, 1.0f);
+            hullFwd(-2.5f, fwd);
             const bool reentryZero = !seat.armed &&
-                std::fabs(Halo3UpdateSeatYaw(seat, -2.5f, true, 1.0f)) < 1e-6f;
+                Halo3SeatYawDelta(seat, fwd, true, 1.0f) == 0.0f;
 
-            // Two full left turns at full weight: the offset stays exactly the
-            // hull's rotation (mod 2pi) and never jumps between frames.
+            // Two full left turns at full weight, three degrees at a time: the
+            // steps sum to the hull's whole rotation and none of them is a
+            // jump. This is the wrap test — a wrapped TOTAL scaled by weight
+            // would snap by 2*pi*weight every time the hull passed +/-pi.
             Halo3SeatYaw spin;
-            Halo3UpdateSeatYaw(spin, 0.0f, true, 1.0f);
+            hullFwd(0.0f, fwd);
+            Halo3SeatYawDelta(spin, fwd, true, 1.0f);
             bool fullOk = true;
-            float previous = 0.0f;
+            double sum = 0.0;
             for (int i = 1; i <= 240; ++i)
             {
-                const float hull = Halo3WrapPi(static_cast<float>(i) * 0.05236f);
-                const float out = Halo3UpdateSeatYaw(spin, hull, true, 1.0f);
-                if (std::fabs(Halo3WrapPi(out - hull)) > 1e-3f ||
-                    std::fabs(Halo3WrapPi(out - previous)) > 0.1f)
+                hullFwd(Halo3WrapPi(static_cast<float>(i) * 0.05236f), fwd);
+                const float step = Halo3SeatYawDelta(spin, fwd, true, 1.0f);
+                if (std::fabs(step) > 0.1f)
                     fullOk = false;
-                previous = out;
+                sum += step;
             }
-            // Half weight through the same two turns: still no discontinuity,
-            // and a half turn of hull reads as a quarter turn of view.
+            fullOk = fullOk && std::fabs(sum - 240.0 * 0.05236) < 1e-2;
+            // Half weight over the same two turns is exactly half the view
+            // rotation, still with no discontinuity.
             Halo3SeatYaw half;
-            Halo3UpdateSeatYaw(half, 0.0f, true, 0.5f);
+            hullFwd(0.0f, fwd);
+            Halo3SeatYawDelta(half, fwd, true, 0.5f);
             bool halfOk = true;
-            previous = 0.0f;
-            float atHalfTurn = 0.0f;
+            double halfSum = 0.0;
             for (int i = 1; i <= 240; ++i)
             {
-                const float hull = Halo3WrapPi(static_cast<float>(i) * 0.05236f);
-                const float out = Halo3UpdateSeatYaw(half, hull, true, 0.5f);
-                if (std::fabs(Halo3WrapPi(out - previous)) > 0.1f)
+                hullFwd(Halo3WrapPi(static_cast<float>(i) * 0.05236f), fwd);
+                const float step = Halo3SeatYawDelta(half, fwd, true, 0.5f);
+                if (std::fabs(step) > 0.1f)
                     halfOk = false;
-                if (i == 60)
-                    atHalfTurn = out;   // hull turned pi -> view pi/2
-                previous = out;
+                halfSum += step;
             }
-            halfOk = halfOk &&
-                std::fabs(atHalfTurn - 1.5707963f) < 2e-3f;
-            // Zero weight is exactly today's world-locked view; junk inputs
-            // fail open to no rotation at all.
+            halfOk = halfOk && std::fabs(halfSum - 120.0 * 0.05236) < 1e-2;
+
+            // Zero weight is exactly the world-locked view Alpha 0.3.1
+            // shipped, and it is also what turns the steering author off.
             Halo3SeatYaw off;
-            Halo3UpdateSeatYaw(off, 0.0f, true, 0.0f);
+            hullFwd(0.0f, fwd);
+            Halo3SeatYawDelta(off, fwd, true, 0.0f);
+            hullFwd(0.3f, fwd);
             const bool weightZero =
-                Halo3UpdateSeatYaw(off, 2.0f, true, 0.0f) == 0.0f;
+                Halo3SeatYawDelta(off, fwd, true, 0.0f) == 0.0f;
+
+            // A respawn, teleport or seat swap arrives as an impossible
+            // one-frame rotation. It must move the view by nothing and
+            // re-reference, so the next real step is still correct.
+            Halo3SeatYaw jump;
+            hullFwd(0.0f, fwd);
+            Halo3SeatYawDelta(jump, fwd, true, 1.0f);
+            hullFwd(2.6f, fwd);
+            const bool jumpRejected =
+                Halo3SeatYawDelta(jump, fwd, true, 1.0f) == 0.0f;
+            hullFwd(2.7f, fwd);
+            const bool recoversAfterJump = std::fabs(
+                Halo3SeatYawDelta(jump, fwd, true, 1.0f) - 0.1f) < 1e-4f;
+
+            // A Banshee pulled through the vertical has no heading at all;
+            // a near-degenerate atan2 there would whip the view around.
+            Halo3SeatYaw vertical;
+            hullFwd(0.0f, fwd);
+            Halo3SeatYawDelta(vertical, fwd, true, 1.0f);
+            float nose[3] = {0.02f, 0.0f, 0.9998f};
+            const bool verticalHeld =
+                Halo3SeatYawDelta(vertical, nose, true, 1.0f) == 0.0f &&
+                !vertical.armed;
+
             Halo3SeatYaw junk;
-            Halo3UpdateSeatYaw(junk, 0.0f, true, 1.0f);
+            hullFwd(0.0f, fwd);
+            Halo3SeatYawDelta(junk, fwd, true, 1.0f);
+            float bad[3] = {std::nanf(""), 0.0f, 0.0f};
             const bool junkSafe =
-                Halo3UpdateSeatYaw(junk, std::nanf(""), true, 1.0f) == 0.0f &&
+                Halo3SeatYawDelta(junk, bad, true, 1.0f) == 0.0f &&
                 !junk.armed;
 
             Check(idleZero && entryZero && followsHull && reentryZero &&
-                  fullOk && halfOk && weightZero && junkSafe,
-                "Seat yaw turns the view with the hull, re-references on "
-                "entry, and stays continuous at partial follow weight");
+                  fullOk && halfOk && weightZero && jumpRejected &&
+                  recoversAfterJump && verticalHeld && junkSafe,
+                "Seat yaw turns the view with the hull by whole-rotation "
+                "steps, re-references on entry, and refuses jumps and "
+                "degenerate headings");
+        }
+
+        // C9 steering ownership. The seat that authors steering must be
+        // exactly the seat where the hull-follow reference destroys the closed
+        // loop's feedback: a look-steered vehicle's driver, and only while the
+        // view actually follows.
+        {
+            const bool drivers =
+                Halo3SeatIsDriver(Halo3VehicleId::Warthog, 0, false) &&
+                !Halo3SeatIsDriver(Halo3VehicleId::Warthog, 1, false) &&
+                !Halo3SeatIsDriver(Halo3VehicleId::Warthog, 0, true) &&
+                !Halo3SeatIsDriver(Halo3VehicleId::StationaryTurret, 0,
+                                   false) &&
+                !Halo3SeatIsDriver(Halo3VehicleId::Unknown, 0, false);
+            // The Scorpion and Wraith steer from the left stick and aim a
+            // turret with the right: their closed loop keeps real feedback and
+            // must never be taken over.
+            const bool families =
+                Halo3VehicleIsLookSteered(Halo3VehicleId::Warthog) &&
+                Halo3VehicleIsLookSteered(Halo3VehicleId::Chopper) &&
+                Halo3VehicleIsLookSteered(Halo3VehicleId::Banshee) &&
+                !Halo3VehicleIsLookSteered(Halo3VehicleId::Scorpion) &&
+                !Halo3VehicleIsLookSteered(Halo3VehicleId::Wraith) &&
+                !Halo3VehicleIsLookSteered(Halo3VehicleId::StationaryTurret) &&
+                !Halo3VehicleIsLookSteered(Halo3VehicleId::Unknown);
+            // Aircraft are look-steered but take the plain flight stick.
+            const bool wheelSeats =
+                Halo3VehicleUsesWheel(Halo3VehicleId::Warthog) &&
+                Halo3VehicleUsesWheel(Halo3VehicleId::Mongoose) &&
+                Halo3VehicleUsesWheel(Halo3VehicleId::Ghost) &&
+                Halo3VehicleUsesWheel(Halo3VehicleId::Mauler) &&
+                !Halo3VehicleUsesWheel(Halo3VehicleId::Banshee) &&
+                !Halo3VehicleUsesWheel(Halo3VehicleId::Hornet) &&
+                !Halo3VehicleUsesWheel(Halo3VehicleId::Scorpion);
+            const bool gate =
+                Halo3SeatAuthorsSteering(Halo3VehicleId::Warthog, 0, false,
+                                         1.0f) &&
+                Halo3SeatAuthorsSteering(Halo3VehicleId::Banshee, 0, false,
+                                         0.5f) &&
+                // Follow off -> the closed loop still has its feedback, so
+                // every control stays exactly as it shipped.
+                !Halo3SeatAuthorsSteering(Halo3VehicleId::Warthog, 0, false,
+                                          0.0f) &&
+                !Halo3SeatAuthorsSteering(Halo3VehicleId::Scorpion, 0, false,
+                                          1.0f) &&
+                !Halo3SeatAuthorsSteering(Halo3VehicleId::Warthog, 1, false,
+                                          1.0f) &&
+                !Halo3SeatAuthorsSteering(Halo3VehicleId::Warthog, 0, true,
+                                          1.0f);
+            // The follow itself must never reach a seat whose aim channel
+            // turns the very frame being followed while nothing replaces that
+            // loop. A walk-up turret is published in its OWN object frame, so
+            // it is excluded; a mounted gunner is published in the carrier's,
+            // so it is fine.
+            const bool follows =
+                Halo3SeatFollowsHull(Halo3VehicleId::Warthog, 0, false) &&
+                Halo3SeatFollowsHull(Halo3VehicleId::Warthog, 1, false) &&
+                Halo3SeatFollowsHull(Halo3VehicleId::Warthog, 0, true) &&
+                Halo3SeatFollowsHull(Halo3VehicleId::Scorpion, 0, false) &&
+                !Halo3SeatFollowsHull(Halo3VehicleId::StationaryTurret, 0,
+                                      false) &&
+                !Halo3SeatFollowsHull(Halo3VehicleId::Unknown, 0, false) &&
+                // A seat with no authored point keeps the stock chase camera,
+                // so there is nothing there for the follow to fix.
+                !Halo3SeatFollowsHull(Halo3VehicleId::Mongoose, 4, false);
+            // Anything that authors steering must also be following, or the
+            // two would disagree about which seat changed behavior.
+            const bool consistent =
+                Halo3SeatFollowsHull(Halo3VehicleId::Warthog, 0, false) &&
+                Halo3SeatFollowsHull(Halo3VehicleId::Banshee, 0, false) &&
+                Halo3SeatFollowsHull(Halo3VehicleId::Chopper, 0, false);
+            Check(drivers && families && wheelSeats && gate && follows &&
+                  consistent,
+                "Only a look-steered vehicle's driver authors steering, only "
+                "while the view follows the hull, and the follow never "
+                "reaches a seat that aims the frame it would follow");
+        }
+
+        // C9 virtual wheel: two gripped hands, the tilt of the line between
+        // them, read in the head's own heading plane.
+        {
+            Halo3Wheel wheel;
+            const float level[2][3] = {{-0.20f, 1.00f, -0.40f},
+                                       {0.20f, 1.00f, -0.40f}};
+            // Not gripped: the wheel never steers.
+            const bool idle = !Halo3UpdateWheel(wheel, true, 0.0f, 0.0f,
+                                                level[0], level[1], 0.0f,
+                                                75.0f, 6.0f) &&
+                wheel.steer == 0.0f;
+            // One grip is not a wheel, and neither is a half squeeze.
+            const bool oneHand = !Halo3UpdateWheel(wheel, true, 0.9f, 0.1f,
+                                                   level[0], level[1], 0.0f,
+                                                   75.0f, 6.0f) &&
+                !Halo3UpdateWheel(wheel, true, 0.5f, 0.5f, level[0], level[1],
+                                  0.0f, 75.0f, 6.0f);
+            // Both grips: held, and level hands are dead centre.
+            const bool centred = Halo3UpdateWheel(wheel, true, 0.9f, 0.9f,
+                                                  level[0], level[1], 0.0f,
+                                                  75.0f, 6.0f) &&
+                wheel.steer == 0.0f;
+            // Hysteresis: easing to 0.5 keeps the wheel, dropping to 0.3
+            // lets go, so a hand resting near the threshold cannot chatter.
+            const bool holds = Halo3UpdateWheel(wheel, true, 0.5f, 0.5f,
+                                                level[0], level[1], 0.0f,
+                                                75.0f, 6.0f);
+            const bool releases = !Halo3UpdateWheel(wheel, true, 0.5f, 0.3f,
+                                                    level[0], level[1], 0.0f,
+                                                    75.0f, 6.0f);
+            // Right hand 45 deg up = counter-clockwise = steer LEFT.
+            const float up45[3] = {-0.20f + 0.28284f, 1.0f + 0.28284f, -0.40f};
+            Halo3UpdateWheel(wheel, true, 0.9f, 0.9f, level[0], up45, 0.0f,
+                             75.0f, 6.0f);
+            const float expected = -(45.0f - 6.0f) / (75.0f - 6.0f);
+            const bool steersLeft = std::fabs(wheel.steer - expected) < 2e-3f;
+            // Mirror image steers right by the same amount.
+            const float down45[3] = {-0.20f + 0.28284f, 1.0f - 0.28284f,
+                                     -0.40f};
+            Halo3UpdateWheel(wheel, true, 0.9f, 0.9f, level[0], down45, 0.0f,
+                             75.0f, 6.0f);
+            const bool steersRight =
+                std::fabs(wheel.steer + expected) < 2e-3f;
+            // Past full lock saturates instead of wrapping.
+            const float over[3] = {-0.20f + 0.02f, 1.0f + 0.40f, -0.40f};
+            Halo3UpdateWheel(wheel, true, 0.9f, 0.9f, level[0], over, 0.0f,
+                             75.0f, 6.0f);
+            const bool saturates = std::fabs(wheel.steer + 1.0f) < 1e-4f;
+            // The same physical wheel, with the player turned 90 degrees in
+            // the room, reads exactly the same.
+            Halo3Wheel turned;
+            const float leftTurned[3] = {0.0f, 1.0f, -0.20f};
+            const float rightTurned[3] = {0.0f, 1.0f + 0.28284f,
+                                          -0.20f + 0.28284f};
+            Halo3UpdateWheel(turned, true, 0.9f, 0.9f, leftTurned, rightTurned,
+                             1.5707963f, 75.0f, 6.0f);
+            const bool headRelative =
+                std::fabs(turned.steer - expected) < 2e-3f;
+            // Hands brought together hold the last steer rather than snapping
+            // to centre while the player shuffles their grip.
+            const float together[3] = {0.0f, 1.05f, -0.15f};
+            const bool holdsOnCollapse =
+                Halo3UpdateWheel(turned, true, 0.9f, 0.9f, leftTurned,
+                                 together, 1.5707963f, 75.0f, 6.0f) &&
+                std::fabs(turned.steer - expected) < 2e-3f;
+            // Disabled or non-finite input always lets go.
+            Halo3Wheel junkWheel;
+            const float nanHand[3] = {std::nanf(""), 1.0f, 0.0f};
+            const bool failsOpen =
+                !Halo3UpdateWheel(junkWheel, false, 0.9f, 0.9f, level[0],
+                                  level[1], 0.0f, 75.0f, 6.0f) &&
+                !Halo3UpdateWheel(junkWheel, true, 0.9f, 0.9f, level[0],
+                                  nanHand, 0.0f, 75.0f, 6.0f);
+
+            Check(idle && oneHand && centred && holds && releases &&
+                  steersLeft && steersRight && saturates && headRelative &&
+                  holdsOnCollapse && failsOpen,
+                "Virtual wheel engages on both grips with hysteresis, steers "
+                "from the hand line in the head's plane, and fails open");
         }
 
         // C2 mode refinement: only a proven seated state upgrades Gameplay;
