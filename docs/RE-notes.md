@@ -284,3 +284,34 @@ The user confirmed that this frees the shotgun left arm. The removed synthetic p
   2026-07-30 ODST candidate use 4x internal authored-art occupancy; Reach
   retains 2x. Do not call the cross-title visual calibration accepted until the
   same slider value has been compared in all three headset sessions.
+
+## Halo 3 vehicle detection and observer identities (2026-07-31)
+
+Full evidence, method, AOBs, and derivations live in
+`docs/HALO3-VEHICLE-EVIDENCE.md` (kit-first per the editing-kit policy; every
+binary claim adversarially re-derived). Verified facts, pinned module build
+1.3528 (SHA-256 `B209D845...E67EFB63`):
+
+- `unit_in_vehicle` chain: literal `0x7F16D0` -> descriptor `0x7EB1F8` ->
+  evaluator `0x1E5AF8` -> native `0x3A36F4`. The native requires the unit's
+  seat word != NONE and a vehicle-kind parent, then returns true iff the
+  parent's physics type != 5 (turret); the ultimate parent is preferred over
+  the direct one. H3EK carries the identical semantics with named asserts.
+- `player_mapping_get_unit_by_output_user` homolog: `0xEE48C`; player-mapping
+  struct pointer at engine TLS slot `+0x110`; unit array at `+0xC8 + user*4`.
+  The retail body has NO 0..3 bounds check - callers must bound the index.
+- Object table: engine TLS slot `+0x38` -> table; entries at `+0x48`, stride
+  `0x18`; data ptr entry `+0x10`; kind byte entry `+3` (1 = vehicle). Unit
+  seat word at data `+0x24E`; parent handle at data `+0x10`.
+- `vehicle_definition_get_type` `0x396D84`: 10 physics blocks at loaded
+  definition `+0x2C0` (stride 0xC), returns first non-empty 0..9 or 0xB when
+  none is authored (stationary turrets, shade). Flying mask = {2,4,7} from
+  the kit's own assert. Turret=5 proven by name tables in both guerilla.exe
+  and retail (`0x791EB0`).
+- Observer array: NO static RVA - pointer at engine TLS block `+0x578`,
+  record stride `0x3D0`, slot 0 = base; position/forward/up written at record
+  `+0x11C/+0x144/+0x150` by `observer_apply_camera_effect` (`0x17DF44`, the
+  already-hooked `kObserverCameraEffectSig` match; TLS-index decode recipe at
+  match+44/+48 with verification bytes at match+86/+106).
+- All three vehicle-probe AOBs (native, getter, type accessor) measured
+  exactly one raw match, three independent times.

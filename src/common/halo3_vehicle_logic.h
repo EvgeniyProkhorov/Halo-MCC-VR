@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cmath>
+#include <cstddef>
 #include <cstdint>
 
 // Halo 3-only vehicle-state snapshot logic. This file contains no Windows,
@@ -12,6 +14,52 @@
 // on the proven render thread publishes one generation-keyed 64-bit atomic,
 // consumers unpack it lock-free, and a stale or zero generation always reads
 // as Unknown so no consumer can act on a previous title session's state.
+
+// Halo 3 retail identities, all byte-proven in docs/HALO3-VEHICLE-EVIDENCE.md
+// and independently re-derived by an adversarial second pass. The expected
+// RVAs are logging/cross-check values only; the runtime binding is always the
+// unique AOB match in the loaded module, never these numbers.
+inline constexpr uintptr_t kHalo3UnitInVehicleNativeRva = 0x3A36F4;
+inline constexpr uintptr_t kHalo3PlayerUnitGetterRva = 0xEE48C;
+inline constexpr uintptr_t kHalo3VehicleTypeAccessorRva = 0x396D84;
+inline constexpr uintptr_t kHalo3EngineTlsIndexRva = 0xA39F9C;
+
+// Object-table facts, each read from a named instruction in the native
+// unit_in_vehicle body (§E3): engine TLS slot +0x38 -> object table; entry
+// array at table+0x48; 0x18-byte entries; data pointer at entry+0x10; cached
+// object-kind byte at entry+3 (1 = vehicle). The unit's seat word and parent
+// handle live in the unit's object data.
+inline constexpr uintptr_t kHalo3TlsObjectTableOffset = 0x38;
+inline constexpr uintptr_t kHalo3ObjectTableEntriesOffset = 0x48;
+inline constexpr size_t kHalo3ObjectEntryStride = 0x18;
+inline constexpr uintptr_t kHalo3ObjectEntryDataOffset = 0x10;
+inline constexpr uintptr_t kHalo3ObjectEntryKindOffset = 3;
+inline constexpr uint8_t kHalo3ObjectKindVehicle = 1;
+inline constexpr uintptr_t kHalo3ObjectParentOffset = 0x10;
+inline constexpr uintptr_t kHalo3UnitSeatWordOffset = 0x24E;
+
+// Observer facts (§E4): the observer array pointer is engine TLS member
+// +0x578 (no static RVA exists); records are 0x3D0 bytes; the effect stage
+// writes position/forward/up at these record offsets. The C1 probe captures a
+// float window around them so the seat-camera focus fields can be measured,
+// not assumed.
+inline constexpr uintptr_t kHalo3TlsObserverOffset = 0x578;
+inline constexpr size_t kHalo3ObserverStride = 0x3D0;
+inline constexpr uintptr_t kHalo3ObserverCaptureBase = 0x100;
+inline constexpr size_t kHalo3ObserverCaptureFloats = 40; // +0x100..+0x1A0
+inline constexpr uintptr_t kHalo3ObserverPosOffset = 0x11C;
+inline constexpr uintptr_t kHalo3ObserverFwdOffset = 0x144;
+inline constexpr uintptr_t kHalo3ObserverUpOffset = 0x150;
+
+// Vehicle physics-type facts (§E1/§E2/§E4): 10 authored blocks in enum order
+// human_tank..guardian; the retail accessor returns the first non-empty block
+// index 0..9, or 0xB when a tag authors none (stationary turrets, shade, and
+// mounted turret child tags). Flying = {human_plane, alien_fighter, vtol},
+// proven from the kit's own _vehicle_mask_flying assert (test al,0x94).
+inline constexpr int kHalo3VehicleTypeTurret = 5;
+inline constexpr int kHalo3VehicleTypeNoneAuthored = 0xB;
+inline constexpr uint32_t kHalo3VehicleFlyingTypeMask =
+    (1u << 2) | (1u << 4) | (1u << 7);
 
 enum class Halo3VehicleState : uint32_t
 {
@@ -78,6 +126,64 @@ inline constexpr int Halo3VehicleSnapshotSeat(
         return -1;
     const uint32_t seatPlus1 = (static_cast<uint32_t>(snapshot) >> 7) & 0x7Fu;
     return static_cast<int>(seatPlus1) - 1;
+}
+
+// Focus-candidate scan for the C1 observer capture. The chase camera is
+// modeled as position = focus - forward * focus_distance, where focus is the
+// engine-evaluated per-seat camera pivot. Given the captured float window and
+// the proven position/forward offsets, find the (triplet, scalar) pair that
+// best satisfies |position + forward * d - triplet|. Pure and worker-only;
+// the result names the focus_position and focus_distance offsets by
+// measurement instead of assumption.
+struct Halo3FocusCandidate
+{
+    int tripletIndex = -1;   // float index of the candidate focus triplet
+    int distanceIndex = -1;  // float index of the candidate distance scalar
+    float residual = 0.0f;
+    float distance = 0.0f;
+};
+
+inline Halo3FocusCandidate Halo3FindFocusCandidate(
+    const float* window, size_t count, size_t posIndex, size_t fwdIndex)
+{
+    Halo3FocusCandidate best{};
+    if (!window || count < 3 || posIndex + 2 >= count || fwdIndex + 2 >= count)
+        return best;
+    const float* pos = window + posIndex;
+    const float* fwd = window + fwdIndex;
+    for (int i = 0; i + 2 < static_cast<int>(count); ++i)
+    {
+        // A focus triplet must be distinct from the position and forward
+        // fields themselves (overlap would trivially "solve" with d == 0).
+        if (i + 2 >= static_cast<int>(posIndex) &&
+            i <= static_cast<int>(posIndex) + 2)
+            continue;
+        if (i + 2 >= static_cast<int>(fwdIndex) &&
+            i <= static_cast<int>(fwdIndex) + 2)
+            continue;
+        const float* cand = window + i;
+        if (!std::isfinite(cand[0]) || !std::isfinite(cand[1]) ||
+            !std::isfinite(cand[2]))
+            continue;
+        for (int j = 0; j < static_cast<int>(count); ++j)
+        {
+            const float d = window[j];
+            if (!std::isfinite(d) || d < 0.0f || d > 100.0f)
+                continue;
+            const float ex = pos[0] + fwd[0] * d - cand[0];
+            const float ey = pos[1] + fwd[1] * d - cand[1];
+            const float ez = pos[2] + fwd[2] * d - cand[2];
+            const float residual = std::sqrt(ex * ex + ey * ey + ez * ez);
+            if (best.tripletIndex < 0 || residual < best.residual)
+            {
+                best.tripletIndex = i;
+                best.distanceIndex = j;
+                best.residual = residual;
+                best.distance = d;
+            }
+        }
+    }
+    return best;
 }
 
 // Entry/exit debounce. Halo 3 swings its chase camera for a moment when a seat

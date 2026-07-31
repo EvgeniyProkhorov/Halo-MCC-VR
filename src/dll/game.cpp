@@ -27,6 +27,7 @@
 #include "../common/config.h"
 #include "../common/cutscene_theater_logic.h"
 #include "../common/halo3_theater_logic.h"
+#include "../common/halo3_vehicle_logic.h"
 #include "../common/hud_layout_logic.h"
 #include "../common/input_logic.h"
 #include "../common/odst_bringup_logic.h"
@@ -5102,6 +5103,379 @@ namespace
         ApplyVrTurn(pad);
     }
 
+    // ---- Halo 3 vehicle probe (log-only) -----------------------------------
+    // Detection identities are byte-proven in docs/HALO3-VEHICLE-EVIDENCE.md
+    // and bound at install time by unique signatures. This candidate observes
+    // only: it publishes a generation-keyed snapshot plus seqlock captures so
+    // the first-person seat camera and motion controls that follow are built
+    // on measured runtime behavior. Nothing consumes these values yet; a
+    // resolve failure or runtime fault disables only this probe, loudly, and
+    // never touches the camera core.
+    enum class Halo3VehicleBindingState : uint8_t
+    {
+        NotInstalled = 0,
+        Installed,
+        StockFallback,
+    };
+    using Halo3PlayerUnitGetterFn = int(__fastcall*)(int outputUser);
+    using Halo3UnitInVehicleFn = unsigned char(__fastcall*)(int unitHandle);
+    using Halo3VehicleTypeFn = int(__fastcall*)(unsigned short defIndex);
+    std::atomic<uint8_t> g_halo3VehicleBinding{
+        static_cast<uint8_t>(Halo3VehicleBindingState::NotInstalled)};
+    Halo3PlayerUnitGetterFn g_halo3PlayerUnitGetter = nullptr;
+    Halo3UnitInVehicleFn g_halo3UnitInVehicle = nullptr;
+    Halo3VehicleTypeFn g_halo3VehicleTypeAccessor = nullptr;
+    std::atomic<uint64_t> g_halo3VehicleSnapshot{0};
+    std::atomic<uint32_t> g_halo3VehicleFaults{0};
+    std::atomic<uint64_t> g_halo3VehicleSampleMs{0};
+
+    struct Halo3VehicleProbe
+    {
+        std::atomic<uint32_t> seq{0};      // even = stable, odd = mid-write
+        std::atomic<uint32_t> state{0};    // Halo3VehicleState
+        std::atomic<int32_t> unitHandle{-1};
+        std::atomic<int32_t> seatIndex{-1};
+        std::atomic<int32_t> parentHandle{-1};
+        std::atomic<uint32_t> parentKind{0};
+        std::atomic<int32_t> directType{-1};
+        std::atomic<uint32_t> nativeInVehicle{0};
+    };
+    Halo3VehicleProbe g_halo3VehicleProbe;
+    std::atomic<uint64_t> g_halo3VehicleProbeKey{~0ull};
+    std::atomic<uint32_t> g_halo3VehicleProbeLoggedSeq{0};
+
+    struct Halo3ObserverCapture
+    {
+        std::atomic<uint32_t> seq{0};      // even = stable, odd = mid-write
+        std::atomic<uint32_t> valid{0};
+        float floats[kHalo3ObserverCaptureFloats];
+    };
+    Halo3ObserverCapture g_halo3ObserverCapture;
+
+    void Halo3DisableVehicleProbe(const char* /*reason logged by worker*/)
+    {
+        g_halo3VehicleSnapshot.store(0, std::memory_order_release);
+        g_halo3VehicleFaults.fetch_add(1, std::memory_order_relaxed);
+        g_halo3VehicleBinding.store(
+            static_cast<uint8_t>(Halo3VehicleBindingState::StockFallback),
+            std::memory_order_release);
+    }
+
+    // Sampled from CamCopyHook: the engine's own camera thread, whose engine
+    // TLS is proven live by ReadCinematicControl running in ApplyHeadLook.
+    // Allocation-, log-, and lock-free; ~66 Hz via the tick latch. All engine
+    // reads sit under SEH; a fault degrades only this probe (StockFallback).
+    void Halo3SampleVehicleState(uint64_t nowMs)
+    {
+        if (g_halo3VehicleBinding.load(std::memory_order_acquire) !=
+                static_cast<uint8_t>(Halo3VehicleBindingState::Installed) ||
+            !g_engineTlsIndex)
+            return;
+        const uint32_t generation =
+            g_halo3RuntimeGeneration.load(std::memory_order_acquire);
+        if (!generation)
+            return;
+        const uint64_t last =
+            g_halo3VehicleSampleMs.load(std::memory_order_relaxed);
+        if (nowMs - last < 15)
+            return;
+        g_halo3VehicleSampleMs.store(nowMs, std::memory_order_relaxed);
+
+        int unit = -1;
+        int seat = -1;
+        int parent = -1;
+        int directType = -1;
+        unsigned parentKind = 0;
+        unsigned native = 0;
+        bool faulted = false;
+        __try
+        {
+            // Output user is the constant 0: the retail getter has no bounds
+            // check of its own (docs/HALO3-VEHICLE-EVIDENCE.md §E3 negatives).
+            unit = g_halo3PlayerUnitGetter(0);
+            if (unit != -1)
+            {
+                auto** slots =
+                    reinterpret_cast<void**>(__readgsqword(0x58));
+                auto* tls = slots ? reinterpret_cast<unsigned char*>(
+                    slots[*g_engineTlsIndex]) : nullptr;
+                unsigned char* table = tls
+                    ? *reinterpret_cast<unsigned char**>(
+                          tls + kHalo3TlsObjectTableOffset)
+                    : nullptr;
+                unsigned char* entries = table
+                    ? *reinterpret_cast<unsigned char**>(
+                          table + kHalo3ObjectTableEntriesOffset)
+                    : nullptr;
+                unsigned char* data = entries
+                    ? *reinterpret_cast<unsigned char**>(
+                          entries +
+                          static_cast<size_t>(unit & 0xFFFF) *
+                              kHalo3ObjectEntryStride +
+                          kHalo3ObjectEntryDataOffset)
+                    : nullptr;
+                if (data)
+                {
+                    seat = *reinterpret_cast<const int16_t*>(
+                        data + kHalo3UnitSeatWordOffset);
+                    if (seat != -1)
+                    {
+                        parent = *reinterpret_cast<const int32_t*>(
+                            data + kHalo3ObjectParentOffset);
+                        if (parent != -1)
+                        {
+                            unsigned char* parentEntry = entries +
+                                static_cast<size_t>(parent & 0xFFFF) *
+                                    kHalo3ObjectEntryStride;
+                            parentKind = *(parentEntry +
+                                kHalo3ObjectEntryKindOffset);
+                            unsigned char* parentData =
+                                *reinterpret_cast<unsigned char**>(
+                                    parentEntry + kHalo3ObjectEntryDataOffset);
+                            if (parentData &&
+                                parentKind == kHalo3ObjectKindVehicle)
+                            {
+                                const uint16_t definitionIndex =
+                                    *reinterpret_cast<const uint16_t*>(
+                                        parentData);
+                                directType = g_halo3VehicleTypeAccessor(
+                                    definitionIndex);
+                            }
+                            native = g_halo3UnitInVehicle(unit);
+                        }
+                    }
+                }
+            }
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            faulted = true;
+        }
+        if (faulted)
+        {
+            Halo3DisableVehicleProbe("sampler fault");
+            return;
+        }
+
+        const bool seated = seat >= 0 && parent != -1 &&
+            parentKind == kHalo3ObjectKindVehicle;
+        const Halo3VehicleState state = unit == -1
+            ? Halo3VehicleState::Unknown
+            : (seated ? Halo3VehicleState::Vehicle : Halo3VehicleState::OnFoot);
+        // The type refinement is published only for an authored 0..9 value;
+        // 0xB (no authored physics: stationary turrets, shade, mounted turret
+        // child tags) stays a probe-log observation until C2 classifies it.
+        const int snapshotType =
+            seated && directType >= 0 && directType <= 9 ? directType : -1;
+        g_halo3VehicleSnapshot.store(
+            Halo3VehicleSnapshot(generation, state, snapshotType,
+                                 seated ? seat : -1),
+            std::memory_order_release);
+
+        // Publish probe fields for the worker only when something changed.
+        const uint64_t key =
+            (static_cast<uint64_t>(static_cast<uint32_t>(unit)) << 32) ^
+            (static_cast<uint64_t>(static_cast<uint16_t>(seat)) << 16) ^
+            static_cast<uint64_t>(static_cast<uint16_t>(parent & 0xFFFF)) ^
+            (static_cast<uint64_t>(static_cast<uint32_t>(state)) << 60) ^
+            (static_cast<uint64_t>(parentKind & 0xFFu) << 52) ^
+            (static_cast<uint64_t>(static_cast<uint8_t>(directType)) << 44) ^
+            (static_cast<uint64_t>(native & 1u) << 43);
+        if (g_halo3VehicleProbeKey.load(std::memory_order_relaxed) == key)
+            return;
+        g_halo3VehicleProbeKey.store(key, std::memory_order_relaxed);
+        Halo3VehicleProbe& probe = g_halo3VehicleProbe;
+        probe.seq.fetch_add(1, std::memory_order_acq_rel);   // -> odd
+        probe.state.store(static_cast<uint32_t>(state),
+                          std::memory_order_relaxed);
+        probe.unitHandle.store(unit, std::memory_order_relaxed);
+        probe.seatIndex.store(seat, std::memory_order_relaxed);
+        probe.parentHandle.store(parent, std::memory_order_relaxed);
+        probe.parentKind.store(parentKind, std::memory_order_relaxed);
+        probe.directType.store(directType, std::memory_order_relaxed);
+        probe.nativeInVehicle.store(native, std::memory_order_relaxed);
+        probe.seq.fetch_add(1, std::memory_order_release);   // -> even
+    }
+
+    // Captured from ObserverCameraEffectHook (slot 0 only): a bounded float
+    // window of the live observer record so the worker can measure where the
+    // per-seat focus fields sit. memcpy of 160 bytes, no allocation, SEH.
+    void Halo3CaptureObserver()
+    {
+        if (g_halo3VehicleBinding.load(std::memory_order_acquire) !=
+                static_cast<uint8_t>(Halo3VehicleBindingState::Installed) ||
+            !g_engineTlsIndex)
+            return;
+        bool faulted = false;
+        __try
+        {
+            auto** slots = reinterpret_cast<void**>(__readgsqword(0x58));
+            auto* tls = slots ? reinterpret_cast<unsigned char*>(
+                slots[*g_engineTlsIndex]) : nullptr;
+            unsigned char* observer = tls
+                ? *reinterpret_cast<unsigned char**>(
+                      tls + kHalo3TlsObserverOffset)
+                : nullptr;
+            if (observer)
+            {
+                Halo3ObserverCapture& cap = g_halo3ObserverCapture;
+                cap.seq.fetch_add(1, std::memory_order_acq_rel);  // -> odd
+                memcpy(cap.floats, observer + kHalo3ObserverCaptureBase,
+                       sizeof(cap.floats));
+                cap.valid.store(1, std::memory_order_relaxed);
+                cap.seq.fetch_add(1, std::memory_order_release);  // -> even
+            }
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            faulted = true;
+        }
+        if (faulted)
+            Halo3DisableVehicleProbe("observer capture fault");
+    }
+
+    const char* Halo3VehicleStateName(uint32_t state)
+    {
+        switch (static_cast<Halo3VehicleState>(state))
+        {
+        case Halo3VehicleState::OnFoot: return "on-foot";
+        case Halo3VehicleState::Vehicle: return "vehicle";
+        default: return "unknown";
+        }
+    }
+
+    // Called from the 50 ms worker (NOT a hot hook), so logging is safe here.
+    // Transition-gated exactly like LogOdstNonFpCameraIfNew: one line per
+    // distinct probe capture, plus a one-shot StockFallback notice.
+    void LogHalo3VehicleProbeIfNew()
+    {
+        static bool fallbackLogged = false;
+        const uint8_t binding =
+            g_halo3VehicleBinding.load(std::memory_order_acquire);
+        if (binding == static_cast<uint8_t>(
+                Halo3VehicleBindingState::StockFallback))
+        {
+            if (!fallbackLogged)
+            {
+                fallbackLogged = true;
+                LOG("H3 vehicle probe: runtime fault (%u total) -> "
+                    "StockFallback; vehicle probe disabled, camera core "
+                    "unaffected",
+                    g_halo3VehicleFaults.load(std::memory_order_relaxed));
+            }
+            return;
+        }
+        fallbackLogged = false;
+        Halo3VehicleProbe& probe = g_halo3VehicleProbe;
+        const uint32_t seq = probe.seq.load(std::memory_order_acquire);
+        if ((seq & 1u) || seq == 0)
+            return; // mid-write or nothing captured yet
+        if (seq == g_halo3VehicleProbeLoggedSeq.load(std::memory_order_relaxed))
+            return; // already logged this capture
+        const uint32_t state = probe.state.load(std::memory_order_relaxed);
+        const int32_t unit = probe.unitHandle.load(std::memory_order_relaxed);
+        const int32_t seat = probe.seatIndex.load(std::memory_order_relaxed);
+        const int32_t parent =
+            probe.parentHandle.load(std::memory_order_relaxed);
+        const uint32_t parentKind =
+            probe.parentKind.load(std::memory_order_relaxed);
+        const int32_t directType =
+            probe.directType.load(std::memory_order_relaxed);
+        const uint32_t native =
+            probe.nativeInVehicle.load(std::memory_order_relaxed);
+        if (probe.seq.load(std::memory_order_acquire) != seq)
+            return; // a newer capture started; re-read next tick
+        LOG("H3 vehicle probe: state=%s unit=%08X seat=%d parent=%08X "
+            "parentKind=%u directType=%d nativeInVehicle=%u",
+            Halo3VehicleStateName(state), (unsigned)unit, seat,
+            (unsigned)parent, parentKind, directType, native);
+        g_halo3VehicleProbeLoggedSeq.store(seq, std::memory_order_relaxed);
+    }
+
+    // Called from the 50 ms worker. While the probe reports a seated state,
+    // analyse the captured observer window once per second: the chase model
+    // position = focus - forward * distance should name the focus fields.
+    // A raw float dump every 5 s preserves the full window for offline work.
+    void LogHalo3ObserverIfDriving()
+    {
+        static uint64_t nextAnalysisMs = 0;
+        static uint64_t nextDumpMs = 0;
+        static uint32_t lastLoggedState = 0;
+        if (g_halo3VehicleBinding.load(std::memory_order_acquire) !=
+            static_cast<uint8_t>(Halo3VehicleBindingState::Installed))
+            return;
+        const uint32_t state =
+            g_halo3VehicleProbe.state.load(std::memory_order_relaxed);
+        const uint64_t nowMs = GetTickCount64();
+        const bool transition = state != lastLoggedState;
+        if (state != static_cast<uint32_t>(Halo3VehicleState::Vehicle) &&
+            !transition)
+            return;
+        if (!transition && nowMs < nextAnalysisMs)
+            return;
+        Halo3ObserverCapture& cap = g_halo3ObserverCapture;
+        if (!cap.valid.load(std::memory_order_acquire))
+            return;
+        float window[kHalo3ObserverCaptureFloats];
+        const uint32_t seq1 = cap.seq.load(std::memory_order_acquire);
+        if (seq1 & 1u)
+            return; // mid-write; re-read next tick
+        memcpy(window, cap.floats, sizeof(window));
+        if (cap.seq.load(std::memory_order_acquire) != seq1)
+            return; // torn read; re-read next tick
+        lastLoggedState = state;
+        nextAnalysisMs = nowMs + 1000;
+        constexpr size_t posIndex =
+            (kHalo3ObserverPosOffset - kHalo3ObserverCaptureBase) / 4;
+        constexpr size_t fwdIndex =
+            (kHalo3ObserverFwdOffset - kHalo3ObserverCaptureBase) / 4;
+        constexpr size_t upIndex =
+            (kHalo3ObserverUpOffset - kHalo3ObserverCaptureBase) / 4;
+        const Halo3FocusCandidate candidate = Halo3FindFocusCandidate(
+            window, kHalo3ObserverCaptureFloats, posIndex, fwdIndex);
+        LOG("H3 observer probe: state=%s pos=(%.3f,%.3f,%.3f) "
+            "fwd=(%.3f,%.3f,%.3f) up=(%.3f,%.3f,%.3f) "
+            "focusCand=+0x%X dist=+0x%X d=%.3f residual=%.4f",
+            Halo3VehicleStateName(state),
+            window[posIndex], window[posIndex + 1], window[posIndex + 2],
+            window[fwdIndex], window[fwdIndex + 1], window[fwdIndex + 2],
+            window[upIndex], window[upIndex + 1], window[upIndex + 2],
+            candidate.tripletIndex >= 0
+                ? (unsigned)(kHalo3ObserverCaptureBase +
+                             candidate.tripletIndex * 4)
+                : 0u,
+            candidate.distanceIndex >= 0
+                ? (unsigned)(kHalo3ObserverCaptureBase +
+                             candidate.distanceIndex * 4)
+                : 0u,
+            candidate.distance, candidate.residual);
+        if (nowMs >= nextDumpMs)
+        {
+            nextDumpMs = nowMs + 5000;
+            char line[512];
+            for (int half = 0; half < 2; ++half)
+            {
+                size_t used = 0;
+                line[0] = '\0';
+                for (size_t i = 0; i < kHalo3ObserverCaptureFloats / 2; ++i)
+                {
+                    const size_t index =
+                        half * (kHalo3ObserverCaptureFloats / 2) + i;
+                    const int written = _snprintf_s(
+                        line + used, sizeof(line) - used, _TRUNCATE,
+                        "%s%.3f", i ? " " : "", window[index]);
+                    if (written < 0)
+                        break;
+                    used += static_cast<size_t>(written);
+                }
+                LOG("H3 observer raw[+0x%X..]: %s",
+                    (unsigned)(kHalo3ObserverCaptureBase +
+                               half * (kHalo3ObserverCaptureFloats / 2) * 4),
+                    line);
+            }
+        }
+    }
+
     void* __fastcall CamCopyHook(void* dst, void* src)
     {
         VR_NotifyCameraTransform();
@@ -5114,6 +5488,7 @@ namespace
                 cameraNowMs, std::memory_order_relaxed);
             TitleAdapter_PublishHeartbeat(
                 GameTitle::Halo3, runtimeGeneration, cameraNowMs);
+            Halo3SampleVehicleState(cameraNowMs);
         }
         // Low-frequency timing proof paired with vr.cpp's HMD sample-rate log.
         // The hook normally runs multiple times per presented frame, and every
@@ -5282,6 +5657,10 @@ namespace
 
     void __fastcall ObserverCameraEffectHook(int userIndex)
     {
+        // Log-only vehicle probe: capture the slot-0 observer record's float
+        // window (pre-effect, i.e. the stable camera) for the worker.
+        if (userIndex == 0)
+            Halo3CaptureObserver();
         // Halo applies weapon recoil, explosions, and other authored camera
         // impulses after it computes the observer's stable camera result. A
         // monitor can move the view independently of the player; an HMD must
@@ -7527,6 +7906,27 @@ namespace
     const char* kFpCameraUploadSig =
         "48 8B C4 48 89 58 08 48 89 70 10 48 89 78 18 55 48 8D 68 A1 48 81 EC C0 00 00 00 0F 29 70 E8 48 8B FA F3 0F 10 35 ?? ?? ?? ?? 48 8D 55 B7";
 
+    // Halo 3 vehicle-detection identities (docs/HALO3-VEHICLE-EVIDENCE.md).
+    // Each measured exactly one raw match in the pinned module, twice
+    // (analyst + independent adversarial re-scan). Native unit_in_vehicle
+    // seated-parent predicate (halo3.dll+0x3A36F4 in build 1.3528):
+    const char* kHalo3UnitInVehicleSig =
+        "48 89 5C 24 08 57 48 83 EC 20 45 32 DB 41 83 C9 FF 41 3B C9 "
+        "0F 84 82 00 00 00 8B 15 ?? ?? ?? ?? 65 48 8B 04 25 58 00 00 00 "
+        "41 B8 38 00 00 00 0F B7 C9 48 8B 04 D0 4A 8B 14 00 48 8D 04 49";
+    // player_mapping_get_unit_by_output_user (+0xEE48C). The engine body has
+    // no 0..3 bounds check of its own; the sampler passes only the constant 0.
+    const char* kHalo3PlayerUnitGetterSig =
+        "83 C8 FF 3B C8 74 27 8B 15 ?? ?? ?? ?? 65 48 8B 04 25 58 00 00 00 "
+        "41 B8 10 01 00 00 48 63 C9 48 8B 04 D0 4A 8B 04 00 "
+        "8B 84 88 C8 00 00 00 C3";
+    // vehicle_definition_get_type (+0x396D84): cx = vehi tag index, returns
+    // the first non-empty physics block 0..9 or 0xB when none is authored.
+    const char* kHalo3VehicleTypeAccessorSig =
+        "48 8B 05 ?? ?? ?? ?? 0F B7 C9 8B 54 C8 04 85 D2 75 04 33 D2 EB 0B "
+        "48 8B 05 ?? ?? ?? ?? 48 8D 14 90 33 C0 45 33 C0 "
+        "48 81 C2 C0 02 00 00 B9 0B 00 00 00 83 3A 00";
+
 #if HALOMCCVR_EXPERIMENTAL_ODST_BRINGUP
     const char* kOdstFpInterpolateSig =
         "48 89 5C 24 08 48 89 6C 24 10 48 89 74 24 18 57 41 54 41 55 41 56 "
@@ -7879,6 +8279,67 @@ namespace
             else
                 LOG("VR comfort: camera-effect signature missing/ambiguous or "
                     "hook failed; native camera recoil/shake remains active");
+        }
+
+        // Halo 3 vehicle probe identities (log-only candidate). Optional:
+        // resolve failure leaves the probe absent and every future vehicle
+        // feature stock; the camera core is never affected. All three targets
+        // are leaf/read-only engine functions the probe calls SEH-guarded from
+        // proven engine threads (docs/HALO3-VEHICLE-EVIDENCE.md).
+        {
+            g_halo3VehicleBinding.store(
+                static_cast<uint8_t>(Halo3VehicleBindingState::NotInstalled),
+                std::memory_order_release);
+            g_halo3VehicleSnapshot.store(0, std::memory_order_release);
+            g_halo3PlayerUnitGetter = nullptr;
+            g_halo3UnitInVehicle = nullptr;
+            g_halo3VehicleTypeAccessor = nullptr;
+            const uintptr_t nativeHit =
+                sig::Find(base, size, kHalo3UnitInVehicleSig);
+            const uintptr_t getterHit =
+                sig::Find(base, size, kHalo3PlayerUnitGetterSig);
+            const uintptr_t typeHit =
+                sig::Find(base, size, kHalo3VehicleTypeAccessorSig);
+            const bool nativeUnique = nativeHit && !sig::Find(
+                nativeHit + 1, base + size - nativeHit - 1,
+                kHalo3UnitInVehicleSig);
+            const bool getterUnique = getterHit && !sig::Find(
+                getterHit + 1, base + size - getterHit - 1,
+                kHalo3PlayerUnitGetterSig);
+            const bool typeUnique = typeHit && !sig::Find(
+                typeHit + 1, base + size - typeHit - 1,
+                kHalo3VehicleTypeAccessorSig);
+            if (nativeUnique && getterUnique && typeUnique)
+            {
+                g_halo3UnitInVehicle =
+                    reinterpret_cast<Halo3UnitInVehicleFn>(nativeHit);
+                g_halo3PlayerUnitGetter =
+                    reinterpret_cast<Halo3PlayerUnitGetterFn>(getterHit);
+                g_halo3VehicleTypeAccessor =
+                    reinterpret_cast<Halo3VehicleTypeFn>(typeHit);
+                g_halo3VehicleProbeKey.store(~0ull, std::memory_order_relaxed);
+                g_halo3VehicleBinding.store(
+                    static_cast<uint8_t>(Halo3VehicleBindingState::Installed),
+                    std::memory_order_release);
+                LOG("H3 vehicle evidence: resolved unit_in_vehicle=+0x%llX "
+                    "player_unit=+0x%llX type_accessor=+0x%llX [unique; "
+                    "expected +0x%llX/+0x%llX/+0x%llX]",
+                    (unsigned long long)(nativeHit - base),
+                    (unsigned long long)(getterHit - base),
+                    (unsigned long long)(typeHit - base),
+                    (unsigned long long)kHalo3UnitInVehicleNativeRva,
+                    (unsigned long long)kHalo3PlayerUnitGetterRva,
+                    (unsigned long long)kHalo3VehicleTypeAccessorRva);
+            }
+            else
+            {
+                LOG("H3 vehicle evidence: signature resolve failed "
+                    "(native=%d/%d getter=%d/%d type=%d/%d found/unique); "
+                    "vehicle probe absent, all vehicle behavior stock",
+                    nativeHit ? 1 : 0, nativeUnique ? 1 : 0,
+                    getterHit ? 1 : 0, getterUnique ? 1 : 0,
+                    typeHit ? 1 : 0, typeUnique ? 1 : 0);
+            }
         }
 
         uintptr_t composeHit=sig::Find(base,size,kComposeBonesSig);
@@ -18492,9 +18953,13 @@ namespace
             LogOdstRenderSkipIfNew();      // emit why a frame stayed flat 2D
             LogOdstFpLayoutSelfCheckIfNew(); // emit FP weapon-layout self-check
             LogOdstNativeHudRouteOnce();    // bounded in-place CHUD route result
+            LogHalo3VehicleProbeIfNew();   // H3 vehicle probe transitions
+            LogHalo3ObserverIfDriving();   // H3 observer focus-field analysis
             VR_FramePacingWorkerPoll();
             Sleep(50);
 #else
+            LogHalo3VehicleProbeIfNew();   // H3 vehicle probe transitions
+            LogHalo3ObserverIfDriving();   // H3 observer focus-field analysis
             VR_FramePacingWorkerPoll();
             Sleep(50);
 #endif

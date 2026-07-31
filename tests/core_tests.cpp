@@ -4629,6 +4629,61 @@ int main()
                   Halo3VehicleState::OnFoot, kHalo3VehicleDebounceFrames) &&
               debounce.stable == Halo3VehicleState::OnFoot,
             "Vehicle exit settles only after a full fresh debounce run");
+
+        // Pin the byte-proven Halo 3 identities exactly like the Reach
+        // vehicle test pins its HREK-matched RVAs. These expected values are
+        // cross-checks; the runtime binding is always the unique AOB match.
+        Check(kHalo3UnitInVehicleNativeRva == 0x3A36F4 &&
+              kHalo3PlayerUnitGetterRva == 0xEE48C &&
+              kHalo3VehicleTypeAccessorRva == 0x396D84 &&
+              kHalo3EngineTlsIndexRva == 0xA39F9C &&
+              kHalo3TlsObjectTableOffset == 0x38 &&
+              kHalo3ObjectTableEntriesOffset == 0x48 &&
+              kHalo3ObjectEntryStride == 0x18 &&
+              kHalo3ObjectEntryDataOffset == 0x10 &&
+              kHalo3ObjectKindVehicle == 1 &&
+              kHalo3ObjectParentOffset == 0x10 &&
+              kHalo3UnitSeatWordOffset == 0x24E &&
+              kHalo3TlsObserverOffset == 0x578 &&
+              kHalo3ObserverStride == 0x3D0 &&
+              kHalo3ObserverPosOffset == 0x11C &&
+              kHalo3ObserverFwdOffset == 0x144 &&
+              kHalo3ObserverUpOffset == 0x150 &&
+              kHalo3VehicleTypeTurret == 5 &&
+              kHalo3VehicleTypeNoneAuthored == 0xB &&
+              kHalo3VehicleFlyingTypeMask == 0x94u,
+            "Halo 3 vehicle identities pin the evidence-doc values");
+
+        // Focus-candidate scan: a planted focus = pos + fwd*d must be found
+        // exactly, and a degenerate window must return no candidate.
+        float observerWindow[kHalo3ObserverCaptureFloats];
+        for (size_t i = 0; i < kHalo3ObserverCaptureFloats; ++i)
+            observerWindow[i] = 1000.0f + static_cast<float>(i) * 7.0f;
+        constexpr size_t posIndex =
+            (kHalo3ObserverPosOffset - kHalo3ObserverCaptureBase) / 4;
+        constexpr size_t fwdIndex =
+            (kHalo3ObserverFwdOffset - kHalo3ObserverCaptureBase) / 4;
+        observerWindow[posIndex] = 10.0f;
+        observerWindow[posIndex + 1] = 20.0f;
+        observerWindow[posIndex + 2] = 30.0f;
+        observerWindow[fwdIndex] = 0.0f;
+        observerWindow[fwdIndex + 1] = 1.0f;
+        observerWindow[fwdIndex + 2] = 0.0f;
+        observerWindow[0] = 10.0f;    // planted focus = pos + fwd * 2.5
+        observerWindow[1] = 22.5f;
+        observerWindow[2] = 30.0f;
+        observerWindow[30] = 2.5f;    // planted focus distance
+        const Halo3FocusCandidate found = Halo3FindFocusCandidate(
+            observerWindow, kHalo3ObserverCaptureFloats, posIndex, fwdIndex);
+        Check(found.tripletIndex == 0 && found.distanceIndex == 30 &&
+              found.residual < 1.0e-4f && found.distance == 2.5f,
+            "Observer focus scan recovers a planted focus/distance pair");
+        Check(Halo3FindFocusCandidate(
+                  nullptr, kHalo3ObserverCaptureFloats, posIndex,
+                  fwdIndex).tripletIndex == -1 &&
+              Halo3FindFocusCandidate(
+                  observerWindow, 2, 0, 1).tripletIndex == -1,
+            "Observer focus scan rejects degenerate windows");
     }
 
     if (g_failures == 0)
