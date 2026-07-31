@@ -310,18 +310,41 @@ tables; none vehicle-related) — recorded here on that stronger evidence.
   cannot be excluded by proximity alone, but none of the 24 enumerated jump
   tables shows vehicle context.
 
-## Runtime probe expectations (to confirm in the C1 log before C2 classifies)
+## Runtime probe results (C1 headset session, 2026-07-31)
 
-These are measurements the probe must make — not yet facts:
-1. `vehicle_definition_get_type` on the **direct** parent should return 0xB
-   for warthog/gauss chaingun gunners, shade, and stationary turrets
-   (all-zero physics per E1), and 0..9 for real vehicle driver/passenger
-   seats. If confirmed, 0xB-on-direct-parent is the TurretGunner
-   discriminator and native `unit_in_vehicle` (ultimate parent, != 5) stays
-   true for mounted gunners.
-2. The observer float window should contain a triplet ≈ position +
-   forward × d with a nearby scalar d (focus_position / focus_distance per
-   the chase model), consistent across vehicles and ≈ camera position with
-   d ≈ 0 on foot.
-3. Seat indices per E1: driver always 0 on its tag; warthog passenger = 1;
-   hornet passengers = 1–2; gunners = 0 on the child turret tag.
+Candidate `85575e5` / DLL `847DDAFF…64EF1969`, Steam edition, Forge (Gauss
+Warthog driver→gunner→passenger, Ghost, chaingun Warthog driver→gunner→
+passenger) then Tsavo Highway (Warthog all three seats, stationary machine-gun
+turret). Both launches resolved all three identities unique at exactly the
+expected RVAs. Zero faults, zero StockFallback. Perf baseline while driving:
+renderWindow p95 4.4–6.2 ms, stalls=0 (the C2+ +0.5 ms gate reference).
+
+1. **Turret discriminator — measured, and it corrects E1's offline
+   expectation.** The live `vehicle_definition_get_type` on the DIRECT parent
+   returned **5 (turret)** for the Gauss turret, the chaingun turret, AND the
+   stationary machine-gun turret — not the 0xB the source-tag XML parse
+   predicted (loaded cache tags evidently author the turret physics block
+   even where the source XML export showed none; runtime measurement wins).
+   `nativeInVehicle` separates the variants exactly as the E3 disassembly
+   predicts: **1 for mounted turret seats** (ultimate parent = the carrier
+   vehicle) and **0 for the stationary turret** (ultimate parent is the
+   turret itself, type 5). So: `directType==5` ⇒ TurretGunner;
+   `native==0 && directType==5` ⇒ stationary turret. Shade remains unmeasured.
+2. **Seat indices match E1 exactly:** driver = seat 0 on the vehicle
+   (directType 1 warthog / 3 ghost), gunner = seat 0 on the turret child tag
+   (directType 5), warthog passenger = seat 1 (directType 1).
+3. **Observer focus field found: `focus_position` = record `+0x18C`.**
+   On foot it equals the camera position exactly (best candidate `+0x18C`,
+   d=0.000, residual=0.0000 — the predicted on-foot signature). In every
+   vehicle sample it stays the best triplet. The distance scalar
+   candidates cluster at `+0x15C` (a recurring constant 2.094 while driving
+   the Warthog — plausibly the authored chase distance, sitting immediately
+   after up at +0x150), but the residual while driving is 0.7–1.3 wu because
+   the chase camera's direction LAGS the focus during turns — confirming the
+   risk-table prediction that anchor formula (ii) `pos + fwd·d` is skewed by
+   camera swing. **C3 must use formula (i): the absolute focus triplet at
+   `+0x18C`.** `+0x15C` = focus_distance is probable but C3 does not need it.
+4. Forge monitor mode (user directive: leave it alone) never reported a
+   vehicle state — only on-foot with a churning unit handle (the engine
+   alternates the player unit while in monitor). No contamination of vehicle
+   data; C2's mode publication stays inert there by construction.
