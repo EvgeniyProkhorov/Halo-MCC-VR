@@ -16,6 +16,7 @@
 #include "cutscene_theater_logic.h"
 #include "frame_pacing_logic.h"
 #include "halo3_theater_logic.h"
+#include "halo3_vehicle_logic.h"
 #include "hud_layout_logic.h"
 #include "input_logic.h"
 #include "odst_bringup_logic.h"
@@ -4544,6 +4545,90 @@ int main()
         const unsigned short thinL[] = {0, 2, 0};
         Check(ReachDecideMuzzleRetarget(thinM, thinL, 3).count == 0,
             "A single sibling is not a majority; nothing is moved");
+    }
+
+    {
+        // Halo 3 vehicle snapshot: generation keying must reject stale and
+        // zero generations exactly like the Reach precedent, and the optional
+        // type/seat refinements must read as unproven (-1) whenever absent,
+        // out of range, or stale.
+        constexpr uint32_t gen = 41;
+        constexpr uint64_t onFoot = Halo3VehicleSnapshot(
+            gen, Halo3VehicleState::OnFoot);
+        constexpr uint64_t warthogDriver = Halo3VehicleSnapshot(
+            gen, Halo3VehicleState::Vehicle, 1, 0);
+        constexpr uint64_t turretSeat = Halo3VehicleSnapshot(
+            gen, Halo3VehicleState::Vehicle, 5, 2);
+        constexpr uint64_t typeUnproven = Halo3VehicleSnapshot(
+            gen, Halo3VehicleState::Vehicle);
+        Check(Halo3VehicleSnapshotState(onFoot, gen) ==
+                  Halo3VehicleState::OnFoot &&
+              Halo3VehicleSnapshotState(warthogDriver, gen) ==
+                  Halo3VehicleState::Vehicle &&
+              Halo3VehicleSnapshotState(warthogDriver, gen + 1) ==
+                  Halo3VehicleState::Unknown &&
+              Halo3VehicleSnapshotState(warthogDriver, 0) ==
+                  Halo3VehicleState::Unknown,
+            "Halo 3 vehicle snapshot state honours the generation key");
+        Check(Halo3VehicleSnapshotType(warthogDriver, gen) == 1 &&
+              Halo3VehicleSnapshotSeat(warthogDriver, gen) == 0 &&
+              Halo3VehicleSnapshotType(turretSeat, gen) == 5 &&
+              Halo3VehicleSnapshotSeat(turretSeat, gen) == 2 &&
+              Halo3VehicleSnapshotType(typeUnproven, gen) == -1 &&
+              Halo3VehicleSnapshotSeat(typeUnproven, gen) == -1 &&
+              Halo3VehicleSnapshotType(warthogDriver, gen + 1) == -1 &&
+              Halo3VehicleSnapshotSeat(warthogDriver, 0) == -1,
+            "Halo 3 vehicle snapshot type/seat unpack and degrade to unproven");
+        Check(Halo3VehicleSnapshotType(Halo3VehicleSnapshot(
+                  gen, Halo3VehicleState::Vehicle,
+                  kHalo3VehicleTypeMax + 1, kHalo3VehicleSeatMax + 1),
+                  gen) == -1 &&
+              Halo3VehicleSnapshotSeat(Halo3VehicleSnapshot(
+                  gen, Halo3VehicleState::Vehicle,
+                  kHalo3VehicleTypeMax + 1, kHalo3VehicleSeatMax + 1),
+                  gen) == -1 &&
+              Halo3VehicleSnapshotType(Halo3VehicleSnapshot(
+                  gen, Halo3VehicleState::Vehicle,
+                  kHalo3VehicleTypeMax, kHalo3VehicleSeatMax),
+                  gen) == kHalo3VehicleTypeMax &&
+              Halo3VehicleSnapshotSeat(Halo3VehicleSnapshot(
+                  gen, Halo3VehicleState::Vehicle,
+                  kHalo3VehicleTypeMax, kHalo3VehicleSeatMax),
+                  gen) == kHalo3VehicleSeatMax,
+            "Halo 3 vehicle snapshot rejects out-of-range refinements only");
+
+        // Debounce: the stable state flips only after `threshold` consecutive
+        // differing samples, the edge fires exactly once, and a flapping
+        // sample restarts the count without ever surfacing.
+        Halo3VehicleDebounce debounce;
+        bool edged = false;
+        for (uint32_t i = 0; i < kHalo3VehicleDebounceFrames - 1; ++i)
+            edged = debounce.Update(
+                Halo3VehicleState::Vehicle, kHalo3VehicleDebounceFrames);
+        Check(!edged && debounce.stable == Halo3VehicleState::Unknown,
+            "Vehicle entry does not settle before the debounce threshold");
+        Check(debounce.Update(
+                  Halo3VehicleState::Vehicle, kHalo3VehicleDebounceFrames) &&
+              debounce.stable == Halo3VehicleState::Vehicle,
+            "Vehicle entry settles exactly at the debounce threshold");
+        Check(!debounce.Update(
+                  Halo3VehicleState::Vehicle, kHalo3VehicleDebounceFrames),
+            "A settled state does not re-fire the edge");
+        for (uint32_t i = 0; i < kHalo3VehicleDebounceFrames - 2; ++i)
+            debounce.Update(
+                Halo3VehicleState::OnFoot, kHalo3VehicleDebounceFrames);
+        debounce.Update(
+            Halo3VehicleState::Vehicle, kHalo3VehicleDebounceFrames);
+        Check(debounce.stable == Halo3VehicleState::Vehicle,
+            "A flap back to Vehicle restarts the exit count unseen");
+        for (uint32_t i = 0; i < kHalo3VehicleDebounceFrames - 1; ++i)
+            edged = debounce.Update(
+                Halo3VehicleState::OnFoot, kHalo3VehicleDebounceFrames);
+        Check(!edged &&
+              debounce.Update(
+                  Halo3VehicleState::OnFoot, kHalo3VehicleDebounceFrames) &&
+              debounce.stable == Halo3VehicleState::OnFoot,
+            "Vehicle exit settles only after a full fresh debounce run");
     }
 
     if (g_failures == 0)
