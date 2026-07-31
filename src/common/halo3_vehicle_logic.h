@@ -128,6 +128,19 @@ inline constexpr int Halo3VehicleSnapshotSeat(
     return static_cast<int>(seatPlus1) - 1;
 }
 
+// C2 mode refinement: how the Present-tick publisher upgrades Gameplay when
+// the sampler proves a seated state. 0 = leave Gameplay (not seated, unknown,
+// or stale), 1 = Vehicle, 2 = Turret. Turret requires the measured physics
+// type 5 (C1-confirmed live for mounted AND stationary turrets); an unproven
+// type upgrades only to Vehicle so a missing refinement stays conservative.
+inline constexpr int Halo3ClassifyGameplayUpgrade(
+    Halo3VehicleState state, int vehicleType)
+{
+    if (state != Halo3VehicleState::Vehicle)
+        return 0;
+    return vehicleType == kHalo3VehicleTypeTurret ? 2 : 1;
+}
+
 // Focus-candidate scan for the C1 observer capture. The chase camera is
 // modeled as position = focus - forward * focus_distance, where focus is the
 // engine-evaluated per-seat camera pivot. Given the captured float window and

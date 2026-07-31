@@ -2,6 +2,7 @@
 
 #include <cstdint>
 
+#include "../common/halo3_vehicle_logic.h"
 #include "../common/runtime_types.h"
 
 // Monotonic counters written by render/palette hooks and sampled at OpenXR
@@ -114,6 +115,19 @@ bool Game_MoveStickIsLocomotion();
 // generation has proven that output user 0's unit is seated on a parent unit.
 // False preserves the established on-foot LT/X swap.
 bool Game_ReachPlayerIsInVehicle();
+// Halo 3-only vehicle refinement (docs/HALO3-VEHICLE-EVIDENCE.md). Lock-free
+// view of the render-thread sampler. state is Unknown whenever the probe
+// binding is absent, the title generation is stale, or the sampler has not
+// run within the last half second — consumers must treat Unknown exactly like
+// today's on-foot behavior, so every dependent feature stays stock by default.
+struct Halo3VehicleStateSnapshot
+{
+    Halo3VehicleState state = Halo3VehicleState::Unknown;
+    bool typeValid = false; // true only for an authored physics type 0..9
+    int vehicleType = -1;   // 5 = turret (mounted or stationary, C1-measured)
+    int seatIndex = -1;     // seat block index on the DIRECT parent tag
+};
+Halo3VehicleStateSnapshot Game_Halo3VehicleState();
 // True while an armed tracked camera consumes the OpenXR turn action. The
 // XInput hook must then suppress stock RX/RY so the game cannot create a second
 // camera motion underneath the HMD-owned view.

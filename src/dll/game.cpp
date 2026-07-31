@@ -20067,11 +20067,29 @@ void Game_AutoVrTick()
             g_halo3RuntimeGeneration.load(std::memory_order_acquire);
         if (generation)
         {
-            TitleAdapter_PublishMode(
-                GameTitle::Halo3, generation,
-                pausePresentation ? RuntimeMode::Paused
-                    : (inLevelStable ? RuntimeMode::Gameplay
-                                     : RuntimeMode::Loading));
+            RuntimeMode mode = pausePresentation ? RuntimeMode::Paused
+                : (inLevelStable ? RuntimeMode::Gameplay
+                                 : RuntimeMode::Loading);
+            if (mode == RuntimeMode::Gameplay)
+            {
+                // Halo 3-only refinement (C2): report the C1-measured seated
+                // state. Paused/Loading precedence is untouched, and both
+                // existing consumers (locomotion, haptics) already accept
+                // Vehicle/Turret alongside Gameplay, so an Unknown or stale
+                // snapshot keeps today's behavior exactly. ODST and Reach
+                // never publish this snapshot, so their modes are unchanged.
+                const Halo3VehicleStateSnapshot vehicle =
+                    Game_Halo3VehicleState();
+                switch (Halo3ClassifyGameplayUpgrade(
+                    vehicle.state,
+                    vehicle.typeValid ? vehicle.vehicleType : -1))
+                {
+                case 1: mode = RuntimeMode::Vehicle; break;
+                case 2: mode = RuntimeMode::Turret; break;
+                default: break;
+                }
+            }
+            TitleAdapter_PublishMode(GameTitle::Halo3, generation, mode);
         }
     }
 
@@ -20382,6 +20400,32 @@ bool Game_ReachPlayerIsInVehicle()
 #else
     return false;
 #endif
+}
+
+Halo3VehicleStateSnapshot Game_Halo3VehicleState()
+{
+    Halo3VehicleStateSnapshot out{};
+    if (g_halo3VehicleBinding.load(std::memory_order_acquire) !=
+        static_cast<uint8_t>(Halo3VehicleBindingState::Installed))
+        return out;
+    const uint32_t generation =
+        g_halo3RuntimeGeneration.load(std::memory_order_acquire);
+    if (!generation)
+        return out;
+    // The sampler heartbeat doubles as a staleness bound: if the camera
+    // thread stops feeding samples (menus, teardown), every consumer sees
+    // Unknown within half a second and behaves exactly as today.
+    const uint64_t lastSampleMs =
+        g_halo3VehicleSampleMs.load(std::memory_order_relaxed);
+    if (GetTickCount64() - lastSampleMs > 500)
+        return out;
+    const uint64_t snapshot =
+        g_halo3VehicleSnapshot.load(std::memory_order_acquire);
+    out.state = Halo3VehicleSnapshotState(snapshot, generation);
+    out.vehicleType = Halo3VehicleSnapshotType(snapshot, generation);
+    out.seatIndex = Halo3VehicleSnapshotSeat(snapshot, generation);
+    out.typeValid = out.vehicleType >= 0;
+    return out;
 }
 
 void Game_GunScale(int dir)

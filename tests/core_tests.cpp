@@ -4684,6 +4684,24 @@ int main()
               Halo3FindFocusCandidate(
                   observerWindow, 2, 0, 1).tripletIndex == -1,
             "Observer focus scan rejects degenerate windows");
+
+        // C2 mode refinement: only a proven seated state upgrades Gameplay;
+        // Turret requires the measured physics type 5 exactly; an unproven
+        // type stays a plain Vehicle; Unknown and OnFoot never upgrade.
+        Check(Halo3ClassifyGameplayUpgrade(
+                  Halo3VehicleState::Unknown, 5) == 0 &&
+              Halo3ClassifyGameplayUpgrade(
+                  Halo3VehicleState::OnFoot, 1) == 0 &&
+              Halo3ClassifyGameplayUpgrade(
+                  Halo3VehicleState::Vehicle, 1) == 1 &&
+              Halo3ClassifyGameplayUpgrade(
+                  Halo3VehicleState::Vehicle, 3) == 1 &&
+              Halo3ClassifyGameplayUpgrade(
+                  Halo3VehicleState::Vehicle,
+                  kHalo3VehicleTypeTurret) == 2 &&
+              Halo3ClassifyGameplayUpgrade(
+                  Halo3VehicleState::Vehicle, -1) == 1,
+            "Gameplay upgrades to Vehicle/Turret only on proven seated state");
     }
 
     if (g_failures == 0)
