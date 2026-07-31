@@ -438,3 +438,45 @@ chopper ×2, warthog driver ×2, warthog passenger, banshee, mongoose, ghost
   right): the .x export lateral axis was mapped with a negation. The authored
   numbers themselves were unaffected (marker-derived Y; X/Z judged on a
   laterally-symmetric view), but kit v2 re-bakes the meshes in tag space.
+
+## E5 — Vehicle identity discriminators (offline-verified, runtime probe pending)
+
+Workflow-verified (ManagedDonkey struct layouts + H3EK tag values + our own
+E2/E3/E4 retail disassembly; full report in the 2026-07-31 session records).
+Chain: definition `+0x2C0` is an array of TEN 0xC-byte tag_block records
+{count @+0, address @+4, unused @+8} (matches the proven type-getter body:
+stride 0xC, `cmp dword [rdx],0`, 10 iterations). Element data =
+`tagDataBase + address*4` (address 0 = null); tagDataBase = the qword at
+`halo3.dll+0x1FCF4C8`, the same global the proven E4 AOB decodes.
+
+- **Type 1 (human_jeep), warthog vs mongoose:** element (s_vehicle_human_
+  jeep_definition, 0x40) field `engine.engine_moment` @ element+0x14 —
+  warthog family 2000 (chain/gauss/troop byte-identical) vs mongoose 650.
+  Corroborators: turn_rate 540/360 @+0x10, wheel_circumferance 1.25/0.95
+  @+0x38, gears count 4/3 @+0x1C.
+- **Type 3 (alien_scout):** element (0x70) has a literal
+  `specific_type` int8 @ element+0x28: **1=ghost, 3=wraith, 4=hover craft
+  (mauler/Prowler)** (enum proven from guerilla.exe + Donkey). Float
+  corroborators: speed.acceleration @+0x10 = 6 / 2.25 / 10. wraith vs
+  wraith_anti_air are byte-identical (not separable — same seat geometry,
+  acceptable).
+- **Type 5 (turret) element is 4 pad bytes — useless.** Discriminate via
+  definition-TAIL fields (runtime offset = 0x2BC + Donkey _vehicle_definition
+  offset): shade uniquely authors minimum/maximum_flipping_angular_velocity
+  30/90 @ def+0x39C/+0x3A0 (all turret_g child tags author 0/0);
+  hog chaingun blur_speed 0.1 vs gauss 0.0 @ def+0x3B4; mounted turrets also
+  resolve via the ultimate-parent walk (parent object data +0x0 = definition
+  index word) + the parent's own type-0/1/3 discriminator. The three
+  STATIONARY turrets (machinegun/plasma_cannon/missile_pod) are NOT
+  offline-separable (all-zero tails in source XML) — C1 proved loaded cache
+  tags can author fields the XML lacks, so C7's log probe must dump the
+  tails in-game before any of the three is registered individually.
+- **Big-vehicle cross-check (already runtime-proven):** R^T·(bounding
+  center − position) equals the render-model node-0 default per vehicle
+  (C5 analysis) — warthog (−0.025,0,0.42) / mongoose (−0.05,0,0.30) /
+  ghost (0.393,0,0.171) / wraith (−0.527,0.004,0.600) / mauler
+  (−0.356,0,0.395) / chopper (0.098,0,0.471, suspension-noisy ±0.09) /
+  banshee (0.013,0,0.652) — all same-type cousins >0.12 wu apart.
+
+Nothing keys a camera off E5 until a C7 log probe confirms the read values
+in-process on known vehicles (fail-open to stock + loud log on mismatch).
