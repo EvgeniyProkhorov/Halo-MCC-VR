@@ -13,9 +13,37 @@
 # Re-run it any time; it rebuilds the landmarks from whatever cameras exist.
 # Ctrl+Shift+Right / Ctrl+Shift+Left step to the next/previous seat.
 import bpy
+from mathutils import Matrix
 
 PREFIX = "cam:"
 ADDON = "viewport_vr_preview"
+WU_TO_M = 3.048
+
+# Seats the game itself authors OFF the vehicle centre line, in world units.
+# Used only to spot a camera whose side offset has been flattened to zero and
+# to offer putting it back; nothing here ever moves a camera on its own.
+SIDE_OFFSET_WU = {
+    "warthog_d": 0.16575199,
+    "warthog_p": -0.15864400,
+    "hornet_p_l": 0.25000001,
+    "hornet_p_r": -0.24999999,
+    "scorpion_d": 0.18928405,
+    "scorpion_g": -0.18995494,
+}
+
+
+def seat_key(cam):
+    parts = cam.name.split(":")
+    return parts[-1] if parts else cam.name
+
+
+def needs_side_offset(cam):
+    """Camera sits dead centre although its seat is authored off-centre."""
+    want = SIDE_OFFSET_WU.get(seat_key(cam))
+    if want is None:
+        return None
+    have = cam.matrix_world.translation.y / WU_TO_M
+    return want if abs(have) < 1e-4 else None
 
 
 def ensure_addon():
@@ -149,6 +177,40 @@ class HALO_OT_rebuild_seats(bpy.types.Operator):
         return {'FINISHED'}
 
 
+def set_side_offset(cam, wu):
+    """Move a camera sideways only; forward/height are left exactly alone."""
+    target = cam.matrix_world.translation.copy()
+    target.y = wu * WU_TO_M
+    cam.matrix_world = (Matrix.Translation(target - cam.matrix_world.translation)
+                        @ cam.matrix_world)
+
+
+class HALO_OT_restore_side(bpy.types.Operator):
+    bl_idname = "halo.restore_side"
+    bl_label = "Put the side offset back"
+    bl_description = ("Set only this seat's left/right offset to the value the "
+                      "game authors; forward and height are not touched")
+    bl_options = {'REGISTER', 'UNDO'}
+
+    cam_name: bpy.props.StringProperty(default="")
+
+    def execute(self, context):
+        moved = 0
+        for cam in seat_cameras():
+            if self.cam_name and cam.name != self.cam_name:
+                continue
+            wu = needs_side_offset(cam)
+            if wu is None:
+                continue
+            set_side_offset(cam, wu)
+            moved += 1
+        if not moved:
+            self.report({'INFO'}, "Nothing to put back")
+            return {'CANCELLED'}
+        self.report({'INFO'}, "Side offset restored on %d seat(s)" % moved)
+        return {'FINISHED'}
+
+
 class HALO_PT_seats(bpy.types.Panel):
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
@@ -168,12 +230,42 @@ class HALO_PT_seats(bpy.types.Panel):
             layout.prop(settings, "use_positional_tracking",
                         text="Let me lean around (off = exact eye point)")
         layout.operator("halo.rebuild_seats", icon='FILE_REFRESH')
-        layout.separator()
 
         if not scene.vr_landmarks:
+            layout.separator()
             layout.label(text="No seats yet - press Rebuild", icon='ERROR')
             return
         active = scene.vr_landmarks_active
+
+        # Where the active seat actually is, in the units I bake into the game.
+        current = scene.vr_landmarks[active].base_pose_object
+        if current is not None:
+            p = current.matrix_world.translation
+            box = layout.box()
+            box.label(text="This seat (world units)", icon='CON_LOCLIKE')
+            box.label(text="fwd %+.3f   side %+.3f   up %+.3f"
+                      % (p.x / WU_TO_M, p.y / WU_TO_M, p.z / WU_TO_M))
+
+        flat = [c for c in seat_cameras() if needs_side_offset(c) is not None]
+        if flat:
+            box = layout.box()
+            box.alert = True
+            box.label(text="%d seat(s) sitting dead centre" % len(flat),
+                      icon='ERROR')
+            box.label(text="The game authors these off to one side.")
+            for cam in flat:
+                wu = needs_side_offset(cam)
+                side = "left" if wu > 0 else "right"
+                op = box.operator("halo.restore_side",
+                                  text="%s  ->  %.2f m %s"
+                                       % (seat_key(cam), abs(wu) * WU_TO_M,
+                                          side))
+                op.cam_name = cam.name
+            op = box.operator("halo.restore_side", text="Put all of them back",
+                              icon='CHECKMARK')
+            op.cam_name = ""
+
+        layout.separator()
         col = layout.column(align=True)
         for i, lm in enumerate(scene.vr_landmarks):
             row = col.row(align=True)
@@ -184,7 +276,7 @@ class HALO_PT_seats(bpy.types.Panel):
 
 
 CLASSES = (HALO_OT_goto_seat, HALO_OT_step_seat, HALO_OT_rebuild_seats,
-           HALO_PT_seats)
+           HALO_OT_restore_side, HALO_PT_seats)
 _keymaps = []
 
 
