@@ -4902,8 +4902,7 @@ namespace
 
     // First-person vehicle camera helpers, defined with the vehicle probe
     // module below (they run on this same engine camera thread).
-    bool Halo3ComputeAuthoredAnchor(float out[3],
-                                    uint32_t* outIdentity = nullptr);
+    bool Halo3ComputeAuthoredAnchor(float out[3], int* outTrimSlot = nullptr);
     bool Halo3VehicleFpActive();
     // C9: folds the hull's rotation into the shared yaw reference and decides
     // whether this seat's steering is authored instead of closed-loop aimed.
@@ -5042,20 +5041,16 @@ namespace
         if (!cinematic && Halo3VehicleFpActive())
         {
             float anchor[3];
-            uint32_t anchorIdentity = 0;
-            if (Halo3ComputeAuthoredAnchor(anchor, &anchorIdentity))
+            int anchorTrimSlot = -1;
+            if (Halo3ComputeAuthoredAnchor(anchor, &anchorTrimSlot))
             {
-                // C12: each vehicle may carry its own trim; anything without
-                // one follows the universal pair (config.h accessors).
+                // C13: each SEAT may carry its own trim; anything without one
+                // follows the universal pair (config.h accessors).
                 const float trimScale = g_worldScale.load();
                 const float trimFwd =
-                    ConfigVehicleCamForward(
-                        g_config, static_cast<int>(anchorIdentity)) *
-                    trimScale;
+                    ConfigSeatCamForward(g_config, anchorTrimSlot) * trimScale;
                 const float trimUp =
-                    ConfigVehicleCamUp(g_config,
-                                       static_cast<int>(anchorIdentity)) *
-                    trimScale;
+                    ConfigSeatCamUp(g_config, anchorTrimSlot) * trimScale;
                 pos[0] = anchor[0] + cgy * trimFwd;
                 pos[1] = anchor[1] + sgy * trimFwd;
                 pos[2] = anchor[2] + trimUp;
@@ -5278,6 +5273,8 @@ namespace
     Halo3PhaseLock g_halo3PhaseLock;
     std::atomic<uint32_t> g_halo3PhaseLockState{0};
     std::atomic<float> g_halo3PhaseLeadTicks{0.0f};
+    // C14: the photon-time prediction interval actually in use, milliseconds.
+    std::atomic<float> g_halo3LeadMs{0.0f};
     // Stamped on a settled seat ENTRY; consumed once by the follow, which
     // rebases "straight ahead" onto the vehicle's nose. Zero means nothing
     // pending, and a request that finds no live seat within two seconds
@@ -5718,11 +5715,28 @@ namespace
                 // above both stay on the raw value — the gate because that is
                 // what the engine actually said, the counters because they are
                 // measuring the tick rate itself.
+                // C14: how far ahead these photons land. Auto asks the
+                // OpenXR runtime for the cadence it is driving us at (the
+                // user's log: appHz=120.000, periodNs=8333333); a pinned
+                // vehicle_smooth_hz overrides a runtime that misreports.
+                // Zero when the rate is unknown, which is exactly C13.
+                double leadSeconds = 0.0;
+                {
+                    const int pinned = g_config.vehicle_smooth_hz;
+                    const float hz = pinned > 0
+                        ? static_cast<float>(pinned)
+                        : VR_HeadsetRefreshHz();
+                    if (hz >= 30.0f && hz <= 1000.0f)
+                        leadSeconds = 1.0 / static_cast<double>(hz);
+                }
+                g_halo3LeadMs.store(static_cast<float>(leadSeconds * 1000.0),
+                                    std::memory_order_relaxed);
                 const Halo3Frame smooth = Halo3InterpolateFrame(
                     g_halo3FrameInterp, world, Halo3NowSeconds(),
                     g_config.vehicle_cam_smoothing,
                     &g_halo3PhaseLock,
-                    rawBoundsOk ? rawBounds : nullptr);
+                    rawBoundsOk ? rawBounds : nullptr,
+                    leadSeconds);
                 g_halo3SmoothingActive.store(
                     g_halo3FrameInterp.tickKnown ? 1u : 0u,
                     std::memory_order_relaxed);
@@ -5991,13 +6005,16 @@ namespace
     // C5: place the user's Blender-authored seat point in the world using the
     // measured vehicle transform. A seat with no authored point returns false
     // and the stock chase view stands.
-    bool Halo3ComputeAuthoredAnchor(float out[3], uint32_t* outIdentity)
+    bool Halo3ComputeAuthoredAnchor(float out[3], int* outTrimSlot)
     {
         Halo3SeatSnapshot seat;
         if (!Halo3ReadSeatSnapshot(seat))
             return false;
-        if (outIdentity)
-            *outIdentity = seat.identity;
+        // C13: the trim slot is keyed by SEAT, not just vehicle — a mounted
+        // gunner shares seat index 0 with the driver, so it takes its own.
+        if (outTrimSlot)
+            *outTrimSlot = ConfigSeatTrimSlot(static_cast<int>(seat.identity),
+                                              seat.seatIndex, seat.mounted);
         // A mounted gunner's point is keyed and framed by its CARRIER, so its
         // seat index on the gun tag (always 0) is the right key there too.
         const Halo3SeatPoint* point = Halo3FindSeatPoint(
@@ -6468,15 +6485,17 @@ namespace
             phaseState = 0;
         LOG("H3 seat motion: %u sampled frames, hull moved on %u (%.0f%%), "
             "tilted on %u (%.0f%%); largest raw step %.4f wu, largest raw tilt "
-            "%.2f deg; smoothing %s across a %.2f ms tick; phase %s, render "
-            "lead %+.2f ticks; view follow %.2f, "
+            "%.2f deg; smoothing %s across a %.2f ms tick; predicting %.2f ms "
+            "ahead (%s); witness %s, measured %+.2f ticks; view follow %.2f, "
             "hull turned %.0f deg since entry, steering by %s",
             frames, moved, moved * scale, tilted, tilted * scale,
             diag.maxPosStep.load(std::memory_order_relaxed),
             diag.maxTiltDeg.load(std::memory_order_relaxed),
             g_halo3SmoothingActive.load(std::memory_order_relaxed) ? "ON"
                                                                    : "off",
-            tickMs, kPhaseNames[phaseState],
+            tickMs, g_halo3LeadMs.load(std::memory_order_relaxed),
+            g_config.vehicle_smooth_hz > 0 ? "pinned" : "auto",
+            kPhaseNames[phaseState],
             g_halo3PhaseLeadTicks.load(std::memory_order_relaxed),
             g_config.vehicle_view_follow,
             g_halo3SeatYawTotal.load(std::memory_order_relaxed) * 57.2957795f,
@@ -21407,37 +21426,42 @@ static_assert(static_cast<int>(Halo3VehicleId::Scorpion) == 1 &&
                       kVehicleTrimCount,
               "kVehicleTrimNames must mirror Halo3VehicleId order");
 
-// The vehicle the player is seated in right now — the anchor owner, so a
-// mounted gunner reports the CARRIER. 0 when on foot, unidentified, or the
-// seat frame is stale/torn. The F1 seat sliders bind to this.
-int Game_Halo3CurrentVehicleId()
+// C13: the storage slot for the SEAT the player occupies right now (config.h
+// ConfigSeatTrimSlot; a mounted gunner reports the CARRIER vehicle and its own
+// gunner slot). -1 on foot, unidentified, unauthored seat, or a stale/torn
+// seat frame. The F1 seat sliders bind to this.
+int Game_Halo3CurrentSeatTrimSlot()
 {
     if (!Halo3VehicleFpActive())
-        return 0;
+        return -1;
     Halo3SeatSnapshot seat;
     if (!Halo3ReadSeatSnapshot(seat))
-        return 0;
-    return static_cast<int>(seat.identity);
+        return -1;
+    return ConfigSeatTrimSlot(static_cast<int>(seat.identity), seat.seatIndex,
+                              seat.mounted);
 }
 
-// Display name for the F1 label. Takes the int form so menu.cpp needs no
-// enum include.
-const char* Game_Halo3VehicleName(int vehicleId)
+// "Warthog gunner", "Hornet passenger" — the F1 label for a trim slot. Takes
+// the slot so menu.cpp needs no enum include; never returns null. Menu thread
+// only: the formatted result lives in a static buffer.
+const char* Game_Halo3SeatTrimName(int slot)
 {
-    switch (static_cast<Halo3VehicleId>(vehicleId))
-    {
-    case Halo3VehicleId::Scorpion:         return "Scorpion";
-    case Halo3VehicleId::Warthog:          return "Warthog";
-    case Halo3VehicleId::Mongoose:         return "Mongoose";
-    case Halo3VehicleId::Ghost:            return "Ghost";
-    case Halo3VehicleId::Wraith:           return "Wraith";
-    case Halo3VehicleId::Mauler:           return "Prowler";
-    case Halo3VehicleId::Banshee:          return "Banshee";
-    case Halo3VehicleId::Hornet:           return "Hornet";
-    case Halo3VehicleId::Chopper:          return "Chopper";
-    case Halo3VehicleId::StationaryTurret: return "Turret";
-    default:                               return "vehicle";
-    }
+    static char text[48];
+    if (slot < 0 || slot >= kVehicleTrimSlots)
+        return "this seat";
+    const int v = slot / kVehicleSeatSlots;
+    const int s = slot % kVehicleSeatSlots;
+    static const char* const kNiceVehicle[kVehicleTrimCount] = {
+        "Scorpion", "Warthog", "Mongoose", "Ghost", "Wraith",
+        "Prowler",  "Banshee", "Hornet",   "Chopper", "Turret"};
+    static const char* const kNiceSeat[kVehicleSeatSlots] = {
+        "driver", "passenger", "passenger 2", "gunner"};
+    // The walk-up turret has exactly one seat; "Turret driver" reads wrong.
+    if (v == kVehicleTrimCount - 1 && s == 0)
+        return "Turret";
+    _snprintf_s(text, sizeof(text), _TRUNCATE, "%s %s", kNiceVehicle[v],
+                kNiceSeat[s]);
+    return text;
 }
 
 bool Game_ComputeAimStick(float& outRx, float& outRy)

@@ -289,13 +289,14 @@ struct Halo3PhaseLock
     // Bounding-centre offset in hull axes, latched at rest.
     bool refValid = false;
     float refLocal[3] = {0.0f, 0.0f, 0.0f};
-    int stillCalls = 0;
+    double stillSeconds = 0.0;
     // Previous call's raw centre, for change detection.
     bool lastBValid = false;
     float lastB[3] = {0.0f, 0.0f, 0.0f};
-    // Render-rate proof, per tick window.
-    int callsSinceTick = 0;
-    int bMovesSinceTick = 0;
+    // Render-rate proof. C13: counted over calls on which the HULL did NOT
+    // change, accumulated across ticks — see kHalo3PhaseProofCalls.
+    int quietCalls = 0;
+    int quietMoves = 0;
     bool smooth = false;
     // The learned constant: how far ahead of the free-running phase the
     // renderer actually draws, in ticks.
@@ -311,19 +312,34 @@ struct Halo3PhaseLock
     float lastMeasured = 0.0f;  // diagnostic only
 };
 
-// Consecutive unchanged calls (hull AND centre) that count as parked;
-// ~1/8 second at the measured 240 calls/sec.
-inline constexpr int kHalo3PhaseStillCalls = 30;
+// C13 — HEADSET REFRESH RATE. Halo 3's 60 Hz is the ENGINE's simulation
+// clock, identical on every machine; the camera hook runs at whatever rate
+// the headset presents (72, 80, 90, 120, 144...). Nothing here may assume a
+// call rate: the tick length is measured, the phase free-runs on the
+// performance counter, and the constants below are in SECONDS or in events,
+// never in frames. The user asked for a refresh-rate selector; there is
+// nothing for one to select, but their question did find the one place that
+// had baked a rate in — the render-smoothness proof below, which needed
+// three camera calls inside one 16.7 ms tick and so could never complete on
+// a 72-90 Hz headset (1.2 to 1.5 calls per tick).
+//
+// The rate-independent form: judge on calls where the HULL DID NOT CHANGE.
+// A 60 Hz witness cannot move on those; a render-interpolated one always
+// does. Rare on a slow headset, common on a fast one, correct on both, and
+// accumulated across ticks rather than inside one.
+inline constexpr int kHalo3PhaseProofCalls = 12;
+// Time (not frames) of stillness that counts as parked.
+inline constexpr double kHalo3PhaseStillSeconds = 0.15;
 // Bounding-centre movement below this is standing still (wu).
 inline constexpr float kHalo3PhaseStillEpsilon = 1e-4f;
 // Per-tick travel (wu) below which no phase is measured and no lead applied:
 // 0.01 wu/tick is walking pace, where a phase error is invisible anyway.
 inline constexpr float kHalo3PhaseMinStep = 0.01f;
 inline constexpr float kHalo3PhaseLeadTrack = 0.02f;  // EMA per fresh sample
-// How fast the APPLIED lead glides toward its target, per camera call:
-// ~10 calls (40 ms) to engage or let go, so a simulation hitch or a stop can
-// never step the camera by the whole lead in one frame.
-inline constexpr float kHalo3PhaseApplyTrack = 0.1f;
+// Time constant for gliding the APPLIED lead in and out. In seconds, so a
+// hitch or a stop takes the same ~40 ms to fade at 72 Hz as at 144 Hz; a
+// per-call factor would have been twice as abrupt on a fast headset.
+inline constexpr double kHalo3PhaseApplySeconds = 0.04;
 inline constexpr float kHalo3PhaseLeadMin = -0.5f;
 inline constexpr float kHalo3PhaseLeadMax = 1.5f;
 // Hard ceiling on the displayed blend fraction while ticks are arriving.
@@ -347,11 +363,28 @@ inline constexpr double kHalo3TickMax = 0.050;
 // Feed the RAW sampled frame every camera call with a monotonic clock in
 // seconds (the tick counter is far too coarse — a 60 Hz tick is under two of
 // its 15.6 ms steps). Returns the frame to publish.
+// C14 — PHOTON-TIME PREDICTION, and why the headset rate genuinely matters.
+//
+// The user insisted the refresh rate belongs in this feature and I argued it
+// did not. Their log settled it: `appHz=120.000 periodNs=8333333
+// predDeltaMs=8.334`. Every frame we sample is DISPLAYED one display period
+// in the future — 8.33 ms on their 120 Hz headset, 13.9 ms at 72, 6.9 at 144.
+// OpenXR already predicts the HEAD pose to that photon moment (that is what
+// xrLocateSpace's predictedDisplayTime does), but the vehicle was placed at
+// the sample instant, so the seat lagged the head by a whole display period,
+// systematically, and worse the faster the vehicle moved. Half a 60 Hz tick
+// at 120 Hz. That is the real content of "60hz is not enough".
+//
+// `leadSeconds` is that interval, taken from the runtime's own reported
+// period (or a user-pinned rate when a runtime misreports), and converted
+// here into a fraction of the MEASURED simulation tick. It is not a knob to
+// tune: it is the same photon time the head is already predicted to.
 inline Halo3Frame Halo3InterpolateFrame(Halo3FrameInterp& state,
                                         const Halo3Frame& raw, double nowSec,
                                         bool enabled,
                                         Halo3PhaseLock* lock = nullptr,
-                                        const float* rawBounds = nullptr)
+                                        const float* rawBounds = nullptr,
+                                        double leadSeconds = 0.0)
 {
     if (!enabled || !std::isfinite(nowSec))
     {
@@ -416,16 +449,39 @@ inline Halo3Frame Halo3InterpolateFrame(Halo3FrameInterp& state,
                         kHalo3PhaseStillEpsilon ||
                     std::fabs(rawBounds[2] - lock->lastB[2]) >
                         kHalo3PhaseStillEpsilon;
-            ++lock->callsSinceTick;
-            if (bMoved)
-                ++lock->bMovesSinceTick;
+            // C13 rate-independent proof: only calls on which the hull held
+            // still can tell a render-interpolated centre from a 60 Hz one,
+            // and they exist at every headset rate. Counted only while
+            // driving, so a parked vehicle's stillness cannot be read as
+            // "not interpolated".
+            if (!changed && lock->lastBValid &&
+                state.lastStepLen >= kHalo3PhaseMinStep)
+            {
+                ++lock->quietCalls;
+                if (bMoved)
+                    ++lock->quietMoves;
+                if (lock->quietCalls >= kHalo3PhaseProofCalls)
+                {
+                    // A 60 Hz witness moves on NO quiet call. An interpolated
+                    // one moves on the fraction of them that carry a present,
+                    // which is the present rate over the camera rate and can
+                    // legitimately be well under half (MCC presenting at 120
+                    // while the hook runs at 240). A quarter separates "some
+                    // of the time" from "never" without demanding a rate.
+                    lock->smooth =
+                        lock->quietMoves * 4 >= lock->quietCalls;
+                    lock->smoothEvaluated = true;
+                }
+            }
             if (!changed && !bMoved && lock->lastBValid)
             {
                 // Parked, the simulation and the renderer provably show the
                 // same pose, so the centre's hull-frame offset can be read
                 // exactly — the reference every moving measurement projects
                 // against.
-                if (++lock->stillCalls >= kHalo3PhaseStillCalls)
+                if (step > 0.0 && step < 0.25)
+                    lock->stillSeconds += step;
+                if (lock->stillSeconds >= kHalo3PhaseStillSeconds)
                 {
                     float rel[3], left[3];
                     for (int i = 0; i < 3; ++i)
@@ -441,7 +497,7 @@ inline Halo3Frame Halo3InterpolateFrame(Halo3FrameInterp& state,
                 }
             }
             else
-                lock->stillCalls = 0;
+                lock->stillSeconds = 0.0;
             for (int i = 0; i < 3; ++i)
                 lock->lastB[i] = rawBounds[i];
             lock->lastBValid = true;
@@ -449,7 +505,7 @@ inline Halo3Frame Halo3InterpolateFrame(Halo3FrameInterp& state,
         else
         {
             lock->lastBValid = false;
-            lock->stillCalls = 0;
+            lock->stillSeconds = 0.0;
         }
     }
     if (changed)
@@ -466,12 +522,13 @@ inline Halo3Frame Halo3InterpolateFrame(Halo3FrameInterp& state,
             state.lastStepLen = 0.0f;
             if (lock)
             {
-                // A teleport invalidates the between-tick statistics but not
-                // the vehicle-shape reference or the learned lead.
-                lock->callsSinceTick = 0;
-                lock->bMovesSinceTick = 0;
-                lock->stillCalls = 0;
+                // A teleport invalidates the accumulated proof statistics but
+                // not the vehicle-shape reference or the learned lead.
+                lock->quietCalls = 0;
+                lock->quietMoves = 0;
+                lock->stillSeconds = 0.0;
                 lock->smooth = false;
+                lock->smoothEvaluated = false;
             }
             return raw;
         }
@@ -488,17 +545,6 @@ inline Halo3Frame Halo3InterpolateFrame(Halo3FrameInterp& state,
         // C12: was the centre seen moving BETWEEN hull ticks? Only a
         // render-interpolated value can be; a 60 Hz value moves only on the
         // tick itself.
-        if (lock)
-        {
-            if (lock->callsSinceTick >= 3)
-            {
-                lock->smooth =
-                    lock->bMovesSinceTick * 2 >= lock->callsSinceTick;
-                lock->smoothEvaluated = true;
-            }
-            lock->callsSinceTick = 0;
-            lock->bMovesSinceTick = 0;
-        }
         state.prev = state.cur;
         state.cur = raw;
         state.curTime = nowSec;
@@ -585,16 +631,29 @@ inline Halo3Frame Halo3InterpolateFrame(Halo3FrameInterp& state,
         // headset frame (the ticksLive gate used to be a step function
         // worth up to 0.75 of a tick's travel).
         float target = 0.0f;
-        if (lock->leadValid && ticksLive)
+        if (ticksLive && state.tick > 0.0 && leadSeconds > 0.0)
         {
+            // C14: advance to the moment these photons actually reach the
+            // eye, in ticks. The bounding-centre witness (C12) stays a
+            // DIAGNOSTIC only — the user's own log reported it "not
+            // render-smooth" on real hardware, so it has never been observed
+            // to measure anything, and a mechanism that has never worked
+            // must not steer the camera.
             float ramp =
                 (state.lastStepLen - kHalo3PhaseMinStep) / kHalo3PhaseMinStep;
             if (ramp < 0.0f) ramp = 0.0f;
             if (ramp > 1.0f) ramp = 1.0f;
-            target = lock->lead * ramp;
+            double ticksAhead = leadSeconds / state.tick;
+            if (ticksAhead > kHalo3PhaseLeadMax)
+                ticksAhead = kHalo3PhaseLeadMax;
+            target = static_cast<float>(ticksAhead) * ramp;
         }
-        lock->leadApplied +=
-            (target - lock->leadApplied) * kHalo3PhaseApplyTrack;
+        double glide = step > 0.0 && step < 0.25
+            ? step / kHalo3PhaseApplySeconds
+            : 1.0;
+        if (glide > 1.0) glide = 1.0;
+        lock->leadApplied += static_cast<float>(
+            (target - lock->leadApplied) * glide);
         alpha += static_cast<double>(lock->leadApplied);
     }
     if (alpha < -0.25) alpha = -0.25;

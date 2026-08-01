@@ -1087,3 +1087,130 @@ within ~0.4 s of the pose relaxing, bounded by the [-0.5, 1.5] lead clamp,
 and visible in the logged lead value. Rejecting it would need a hull-rigid
 render-rate witness, which is exactly the render-transform RE this design
 avoided.
+
+## C13 — headset refresh rate is measured, not chosen; trim is per SEAT
+
+Two user requests, 2026-07-31. One turned out to need a fix that was not the
+one asked for, the other was a straight redesign.
+
+### "list different Hz compensation to toggle from ... my headset is 120"
+
+There is nothing for such a list to select, and shipping one would have been a
+row of fake buttons. **The 60 Hz is Halo 3's own simulation clock**, fixed in
+the engine and identical on every machine; the mod's camera hook runs at
+whatever rate the headset presents. The interpolator already measures BOTH:
+the tick length is EMA-learned from observed hull changes
+(`kHalo3TickMin/Max`), and the phase free-runs on the performance counter in
+seconds. Nothing consumed a nominal camera rate.
+
+Except in one place, which the question found. The render-smoothness proof
+counted camera calls **inside one tick** and required three of them. At the
+measured 240 calls/sec that is trivially satisfied; at 72-90 Hz there are only
+1.2-1.5 calls per 16.7 ms tick, so `smooth` could never be evaluated, the lock
+would never arm, and every 72-90 Hz headset would have silently sat on C11
+pacing forever — the exact silent-degradation the project forbids.
+
+The rate-independent replacement judges on **calls where the hull did not
+change** ("quiet calls"), accumulated across ticks:
+
+- a 60 Hz witness cannot move on a quiet call — it only moves on the tick;
+- a render-interpolated witness moves on the fraction of quiet calls that
+  carry a present, which is present-rate over camera-rate and may legitimately
+  be well under half (MCC presenting at 120 while the hook runs at 240);
+- so the discriminator is `quietMoves * 4 >= quietCalls` over at least 12
+  quiet calls — "sometimes" versus "never", with no rate in it.
+
+Quiet calls are rare on a slow headset and common on a fast one; the proof
+just takes a few seconds longer at 72 Hz. Two remaining per-frame constants
+became per-second ones so they mean the same thing at every rate: the parked
+latch (0.15 s of stillness) and the applied-lead glide (0.04 s time constant;
+as a per-call factor it was twice as abrupt at 144 Hz as at 72).
+
+Tested by replaying the same drive — a renderer presenting at the headset rate
+0.6 of a tick ahead of the sim — at **72, 80, 90, 120 and 144 Hz**: every rate
+must reach the locked state and track the drawn position. VERIFIED to fail
+with the proof counter disabled. The F1 and config prose were reworded: they
+said "the vehicle's 60 Hz motion", which is what made the user read it as a
+headset setting.
+
+### "the config overides every set per vehcile i need it per seat"
+
+Correct, and C12 was wrong: the Warthog driver, its passenger and its gunner
+sit in completely different places, so one trim per vehicle cannot serve them.
+The trim table is now (vehicle x seat slot): 10 vehicles x 4 slots — `driver`,
+`passenger`, `passenger2`, `gunner`. The gunner slot exists because a mounted
+turret gunner reports **seat index 0 on the gun tag**, the same index as the
+driver on the hull, so the two must be separated by the mounted flag rather
+than the index; `ConfigSeatTrimSlot` therefore keys mounted turrets to the
+reserved slot whatever index they report, and refuses to key a rider seat onto
+it.
+
+Keys are `vehicle_cam_forward_m_<vehicle>_<seat>` / `vehicle_cam_up_m_...`,
+sparse (written only where set). A C12-era whole-vehicle key means what it
+said and migrates onto all four slots of that vehicle, logged. Unknown vehicle
+names, unknown seat names and malformed values are each reported and dropped
+without inventing an override. The F1 menu is unchanged in shape — the same
+two sliders, now labelled with the seat they are bound to ("Warthog gunner"),
+sticky against a one-frame snapshot blip, with the button returning that seat
+to the universal base.
+
+## C14 — the headset rate DOES belong here, and C12's witness was dead
+
+The user pushed back hard on being told there was no rate to select. They were
+right, on evidence from their own log, and C12's central mechanism was proved
+dead in the same file.
+
+### The log, from the 21:53 Steam session on the C12 build
+
+```
+H3 seat motion: 2395 sampled frames ... smoothing ON across a 16.62 ms tick;
+phase bounds not render-smooth, C11 pacing, render lead +0.00 ticks
+PACING F ... periodNs=8333333 appHz=120.000 predDeltaMs=8.334
+```
+
+Two facts:
+
+1. **The C12 bounding-centre witness never armed on real hardware.** It
+   reported `bounds not render-smooth` and `render lead +0.00 ticks` for the
+   whole session, i.e. MCC's bounding-sphere centre is NOT observably
+   render-interpolated, so C12 delivered exactly C11 and nothing more. The
+   loud-failure reporting built into C12 is what made this visible in one
+   grep — but a mechanism that has never once been observed to work must not
+   steer the camera. It is now **diagnostic-only**: still measured, still
+   logged, no longer an input.
+2. **The runtime reports the headset at 120.000 Hz with an 8.333 ms period,
+   and OpenXR hands us the predicted display time for every frame.**
+
+### Why the rate genuinely matters
+
+Every frame is *displayed* one refresh period after it is built. OpenXR
+already predicts the HEAD pose to that photon moment — that is what
+`predictedDisplayTime` is for, and the head has always used it. The vehicle
+was placed at the *sample* instant instead. So the seat trailed the head by a
+full display period, systematically, and proportionally worse the faster the
+vehicle moved: 8.3 ms at 120 Hz is **half a 60 Hz simulation tick**.
+
+That is the real content of "my headset is 120 and 60hz is not enough". Not a
+smoothing strength, not a resample rate — a missing prediction interval that
+is literally the headset's refresh period.
+
+C14 advances the seat by `leadSeconds / measuredTick` ticks, where
+`leadSeconds` is one period of the rate the runtime reports
+(`VR_HeadsetRefreshHz`, already present). It rides on top of the accepted C11
+pacing, keeps the driving-pace ramp (so a parked or crawling vehicle is never
+extrapolated), and keeps the ~40 ms glide (so a hitch cannot snap it out).
+Unknown rate ⇒ zero lead ⇒ exactly the previous build.
+
+`vehicle_smooth_hz` (0 = Auto) exists for a runtime that misreports, with the
+F1 list the user asked for: Auto / 60 / 72 / 80 / 90 / 96 / 100 / 110 / 120 /
+144 / 165 / 240, any other integer hand-typable. Auto is correct wherever the
+runtime is honest, which is why it is the default rather than a required
+choice.
+
+Tested by differencing the same drive with and without prediction at 72, 80,
+90, 120 and 144 Hz — differencing because the camera and the 60 Hz simulation
+lock into a fixed ratio (exactly 2:1 at 120 Hz) whose constant sub-tick
+alignment says nothing about the lead. Measured at 120 Hz: 0.049997 wu against
+0.050000 expected. Also pinned: 72 Hz predicts ~2x as far as 144; a WRONG pin
+visibly mispredicts (which is why Auto is the default); a crawl never
+extrapolates; a hitch glides. VERIFIED to fail with the lead disabled.

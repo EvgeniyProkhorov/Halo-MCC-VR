@@ -48,14 +48,51 @@ inline constexpr float kMenuWidthMax = 4.00f;
 // Lateral/vertical travel of the grab handle, measured from straight ahead.
 inline constexpr float kMenuOffsetLimit = 3.00f;
 
-// Per-vehicle seat-trim overrides, indexed by Halo3VehicleId - 1. Config stays
-// decoupled from the enum header, so the order here mirrors it by contract and
-// game.cpp static_asserts the two never drift. "prowler" is the Mauler enum
-// entry (its user-facing name); "turret" is every walk-up turret.
+// Per-SEAT seat-trim overrides (C13; C12 keyed these per vehicle, which the
+// user rejected: "i need it per seat"). The vehicle axis is Halo3VehicleId - 1
+// and the seat axis is the seat slot below. Config stays decoupled from the
+// enum header, so the order here mirrors it by contract and game.cpp
+// static_asserts the two never drift. "prowler" is the Mauler enum entry (its
+// user-facing name); "turret" is every walk-up turret.
 inline constexpr int kVehicleTrimCount = 10;
 inline constexpr const char* kVehicleTrimNames[kVehicleTrimCount] = {
     "scorpion", "warthog", "mongoose", "ghost", "wraith",
     "prowler",  "banshee", "hornet",   "chopper", "turret"};
+
+// Seat slots within one vehicle: the three authored passenger indices plus
+// the mounted-turret gunner, which shares seat index 0 with the driver and so
+// needs a slot of its own. Halo 3 authors no vehicle with more than three
+// non-turret seats (kHalo3SeatPoints).
+// C14 headset rates offered for vehicle_smooth_hz. 0 = Auto (ask the OpenXR
+// runtime). The rest covers what current VR headsets actually run at; any
+// other integer may be hand-typed into the config and is used as given.
+inline constexpr int kVehicleSmoothHzCount = 12;
+inline constexpr int kVehicleSmoothHzList[kVehicleSmoothHzCount] = {
+    0, 60, 72, 80, 90, 96, 100, 110, 120, 144, 165, 240};
+
+inline constexpr int kVehicleSeatSlots = 4;
+inline constexpr int kVehicleGunnerSlot = 3;
+inline constexpr const char* kVehicleSeatNames[kVehicleSeatSlots] = {
+    "driver", "passenger", "passenger2", "gunner"};
+inline constexpr int kVehicleTrimSlots = kVehicleTrimCount * kVehicleSeatSlots;
+
+// The storage slot for one seat, or -1 when the seat cannot be keyed (on
+// foot, unidentified vehicle, or a seat index Halo 3 never authors).
+inline constexpr int ConfigSeatTrimSlot(int vehicleId, int seatIndex,
+                                        bool mountedTurret)
+{
+    const int v = vehicleId - 1;
+    if (v < 0 || v >= kVehicleTrimCount)
+        return -1;
+    if (mountedTurret)
+        return v * kVehicleSeatSlots + kVehicleGunnerSlot;
+    // A rider seat may only take a rider slot: the gunner slot is reserved,
+    // so a fourth authored seat keys nothing rather than silently sharing the
+    // mounted gunner's trim.
+    if (seatIndex < 0 || seatIndex >= kVehicleGunnerSlot)
+        return -1;
+    return v * kVehicleSeatSlots + seatIndex;
+}
 
 struct Config
 {
@@ -118,15 +155,15 @@ struct Config
     bool vehicle_first_person = true;
     float vehicle_cam_forward_m = 0.10f; // + = toward the windshield
     float vehicle_cam_up_m = 0.05f;      // + = raise out of the seat
-    // Per-vehicle overrides of the two trims above. An entry only exists once
-    // the user adjusts the F1 sliders while SITTING IN that vehicle (or writes
-    // the config line by hand); every other vehicle keeps following the
-    // universal trim, including live edits to it. The F1 sliders are the same
-    // two widgets always — they simply bind to whichever vehicle is under you.
-    float vehicle_cam_forward_v[kVehicleTrimCount] = {};
-    float vehicle_cam_up_v[kVehicleTrimCount] = {};
-    bool vehicle_cam_forward_set[kVehicleTrimCount] = {};
-    bool vehicle_cam_up_set[kVehicleTrimCount] = {};
+    // Per-SEAT overrides of the two trims above. An entry only exists once the
+    // user adjusts the F1 sliders while SITTING IN that seat (or writes the
+    // config line by hand); every other seat keeps following the universal
+    // trim, including live edits to it. The F1 sliders are the same two
+    // widgets always — they simply bind to whichever seat is under you.
+    float vehicle_cam_forward_v[kVehicleTrimSlots] = {};
+    float vehicle_cam_up_v[kVehicleTrimSlots] = {};
+    bool vehicle_cam_forward_set[kVehicleTrimSlots] = {};
+    bool vehicle_cam_up_set[kVehicleTrimSlots] = {};
     // How much of the vehicle's turning the view takes with it. 1 = you turn
     // with the vehicle like a real driver; 0 = the world-locked view Alpha
     // 0.3.1 shipped, which also leaves every control exactly as it was.
@@ -135,9 +172,13 @@ struct Config
     // between; without this the seat camera steps against it and the vehicle
     // appears to shake. 0 = the raw stepped position.
     bool vehicle_cam_smoothing = true;
-    // (vehicle_cam_lead removed in C12: the renderer's display phase is now
-    // MEASURED live and matched automatically; the hand-tuned knob both
-    // dragged at zero and sawtoothed at any other value.)
+    // C14: the headset rate the seat camera predicts ahead to. 0 = Auto, the
+    // rate the OpenXR runtime itself reports (the right answer on every
+    // headset it reports correctly). A pinned value is for a runtime that
+    // misreports: the seat is advanced by one period of THIS rate, matching
+    // the photon time the head pose is already predicted to. This is not the
+    // game's simulation rate, which is always 60 and is measured live.
+    int vehicle_smooth_hz = 0;
     // Motion steering in look-steered ground driver seats: grab an invisible
     // wheel with both grips and turn it. 0 = the right stick steers.
     bool vehicle_motion = true;
@@ -435,22 +476,21 @@ struct Config
 
 extern Config g_config;
 
-// The seat trim a given vehicle actually uses: its own override when one has
-// been set, the universal trim otherwise. vehicleId is Halo3VehicleId as an
-// int; 0/out-of-range (on foot, unknown) reads the universal trim.
-inline float ConfigVehicleCamForward(const Config& c, int vehicleId)
+// The trim a given SEAT actually uses: its own override when one has been
+// set, the universal trim otherwise. `slot` comes from ConfigSeatTrimSlot;
+// -1 (on foot, unknown vehicle, unauthored seat) reads the universal trim.
+inline float ConfigSeatCamForward(const Config& c, int slot)
 {
-    const int i = vehicleId - 1;
-    if (i >= 0 && i < kVehicleTrimCount && c.vehicle_cam_forward_set[i])
-        return c.vehicle_cam_forward_v[i];
+    if (slot >= 0 && slot < kVehicleTrimSlots &&
+        c.vehicle_cam_forward_set[slot])
+        return c.vehicle_cam_forward_v[slot];
     return c.vehicle_cam_forward_m;
 }
 
-inline float ConfigVehicleCamUp(const Config& c, int vehicleId)
+inline float ConfigSeatCamUp(const Config& c, int slot)
 {
-    const int i = vehicleId - 1;
-    if (i >= 0 && i < kVehicleTrimCount && c.vehicle_cam_up_set[i])
-        return c.vehicle_cam_up_v[i];
+    if (slot >= 0 && slot < kVehicleTrimSlots && c.vehicle_cam_up_set[slot])
+        return c.vehicle_cam_up_v[slot];
     return c.vehicle_cam_up_m;
 }
 

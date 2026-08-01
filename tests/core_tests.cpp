@@ -3981,7 +3981,7 @@ int main()
         "cutscene_theater_distance_m",
         "turn_smooth", "turn_snap_deg", "turn_smooth_deg_s", "dpad_hand",
         "vehicle_first_person", "vehicle_cam_forward_m", "vehicle_cam_up_m",
-        "vehicle_view_follow", "vehicle_cam_smoothing",
+        "vehicle_view_follow", "vehicle_cam_smoothing", "vehicle_smooth_hz",
         "vehicle_motion", "vehicle_wheel_max_deg",
         "vehicle_wheel_deadzone_deg",
         "crosshair", "crosshair_distance_m", "crosshair_size_deg",
@@ -4028,47 +4028,128 @@ int main()
               g_config.cutscene_theater_distance_m == 4.0f,
         "legacy configs inherit the enabled cutscene-theatre defaults");
 
-    // C12 per-vehicle seat trim. An override exists only for the axis and
-    // vehicle actually written; everything else — the other axis, every other
-    // vehicle, on foot, and nonsense ids — follows the universal pair live.
-    // The retired vehicle_cam_lead knob is accepted quietly and never
-    // rewritten.
+    // C13 per-SEAT trim. An override exists only for the axis and SEAT
+    // actually written; every other axis, seat, vehicle and on-foot read
+    // follows the universal pair live. A driver adjustment must never move
+    // the passenger or the gunner of the same vehicle. Malformed values and
+    // unknown names never invent an override, and the retired
+    // vehicle_cam_lead knob is accepted quietly and never rewritten.
     {
         std::ofstream file(primary);
         file << "config_version = 5\n";
         file << "vehicle_cam_forward_m = 0.20\n";
         file << "vehicle_cam_up_m = -0.10\n";
-        file << "vehicle_cam_forward_m_warthog = 0.44\n";
-        file << "vehicle_cam_up_m_ghost = 0.33\n";
-        file << "vehicle_cam_forward_m_gondola = 9.0\n";
+        file << "vehicle_cam_forward_m_warthog_driver = 0.44\n";
+        file << "vehicle_cam_up_m_warthog_gunner = 0.31\n";
+        file << "vehicle_cam_up_m_hornet_passenger2 = 0.33\n";
+        file << "vehicle_cam_forward_m_gondola_driver = 9.0\n";
+        file << "vehicle_cam_forward_m_ghost_navigator = 9.0\n";
+        file << "vehicle_cam_up_m_ghost_driver = broken\n";
         file << "vehicle_cam_lead = 0.50\n";
     }
     ConfigLoad(primary.c_str());
-    // Warthog is id 2 (trim index 1), Ghost id 4, mirroring Halo3VehicleId.
-    Check(ConfigVehicleCamForward(g_config, 2) == 0.44f &&
-              ConfigVehicleCamUp(g_config, 2) == -0.10f &&
-              ConfigVehicleCamForward(g_config, 4) == 0.20f &&
-              ConfigVehicleCamUp(g_config, 4) == 0.33f &&
-              ConfigVehicleCamForward(g_config, 0) == 0.20f &&
-              ConfigVehicleCamUp(g_config, 99) == -0.10f,
-        "A vehicle overrides exactly the axis written for it; every other "
-        "axis, vehicle and on-foot read follows the universal trim");
+    // Warthog is id 2, Ghost 4, Hornet 8, mirroring Halo3VehicleId.
+    const int hogDriver = ConfigSeatTrimSlot(2, 0, false);
+    const int hogPassenger = ConfigSeatTrimSlot(2, 1, false);
+    const int hogGunner = ConfigSeatTrimSlot(2, 0, true);
+    const int hornetSeat2 = ConfigSeatTrimSlot(8, 2, false);
+    const int ghostDriver = ConfigSeatTrimSlot(4, 0, false);
+    Check(hogDriver >= 0 && hogGunner >= 0 && hogDriver != hogGunner &&
+              hogPassenger != hogDriver &&
+              ConfigSeatTrimSlot(0, 0, false) == -1 &&
+              ConfigSeatTrimSlot(99, 0, false) == -1 &&
+              ConfigSeatTrimSlot(2, 7, false) == -1 &&
+              // The gunner slot is reserved: a rider seat may never land on
+              // it, or a fourth passenger would share the turret's trim.
+              ConfigSeatTrimSlot(2, kVehicleGunnerSlot, false) == -1 &&
+              ConfigSeatTrimSlot(2, 0, true) ==
+                  ConfigSeatTrimSlot(2, 99, true),
+        "Every seat of a vehicle keys a distinct trim slot, an unidentified "
+        "vehicle or unauthored seat keys none, and the gunner slot is "
+        "reserved for mounted turrets whatever seat index they report");
+    Check(ConfigSeatCamForward(g_config, hogDriver) == 0.44f &&
+              ConfigSeatCamForward(g_config, hogPassenger) == 0.20f &&
+              ConfigSeatCamForward(g_config, hogGunner) == 0.20f &&
+              ConfigSeatCamUp(g_config, hogGunner) == 0.31f &&
+              ConfigSeatCamUp(g_config, hogDriver) == -0.10f &&
+              ConfigSeatCamUp(g_config, hornetSeat2) == 0.33f &&
+              ConfigSeatCamUp(g_config, ghostDriver) == -0.10f &&
+              ConfigSeatCamForward(g_config, -1) == 0.20f,
+        "A seat overrides exactly the axis written for it; the same "
+        "vehicle's other seats, and every unset axis, follow the universal "
+        "trim");
     ConfigSave();
-    const std::string perVehicleConfig = ReadTextFile(primary);
-    Check(CountText(perVehicleConfig, "\nvehicle_cam_forward_m_warthog = ") == 1 &&
-              CountText(perVehicleConfig, "\nvehicle_cam_up_m_ghost = ") == 1 &&
-              CountText(perVehicleConfig, "vehicle_cam_up_m_warthog") == 0 &&
-              CountText(perVehicleConfig, "vehicle_cam_forward_m_ghost") == 0 &&
-              CountText(perVehicleConfig, "gondola") == 0 &&
-              CountText(perVehicleConfig, "vehicle_cam_lead") == 0,
-        "Saving writes a per-vehicle line only for overrides that exist, "
-        "drops unknown vehicle names, and retires vehicle_cam_lead");
+    const std::string perSeatConfig = ReadTextFile(primary);
+    Check(CountText(perSeatConfig, "\nvehicle_cam_forward_m_warthog_driver = ") == 1 &&
+              CountText(perSeatConfig, "\nvehicle_cam_up_m_warthog_gunner = ") == 1 &&
+              CountText(perSeatConfig, "\nvehicle_cam_up_m_hornet_passenger2 = ") == 1 &&
+              CountText(perSeatConfig, "vehicle_cam_up_m_warthog_driver") == 0 &&
+              CountText(perSeatConfig, "vehicle_cam_forward_m_warthog_gunner") == 0 &&
+              CountText(perSeatConfig, "\nvehicle_cam_up_m_ghost_driver") == 0 &&
+              CountText(perSeatConfig, "gondola") == 0 &&
+              CountText(perSeatConfig, "navigator") == 0 &&
+              CountText(perSeatConfig, "vehicle_cam_lead") == 0,
+        "Saving writes a per-seat line only for overrides that exist, drops "
+        "unknown vehicle and seat names and malformed values, and retires "
+        "vehicle_cam_lead");
     ConfigLoad(primary.c_str());
-    Check(ConfigVehicleCamForward(g_config, 2) == 0.44f &&
-              ConfigVehicleCamUp(g_config, 4) == 0.33f &&
-              !g_config.vehicle_cam_forward_set[3] &&
-              !g_config.vehicle_cam_up_set[1],
-        "Per-vehicle trim overrides survive a save/load round trip");
+    Check(ConfigSeatCamForward(g_config, hogDriver) == 0.44f &&
+              ConfigSeatCamUp(g_config, hogGunner) == 0.31f &&
+              ConfigSeatCamUp(g_config, hornetSeat2) == 0.33f &&
+              !g_config.vehicle_cam_up_set[hogDriver] &&
+              !g_config.vehicle_cam_forward_set[hogGunner],
+        "Per-seat trim overrides survive a save/load round trip");
+    // A C12-era whole-vehicle key means every seat of that vehicle. These are
+    // the user's OWN tuned lines, copied from their live halomccvr.cfg on
+    // 2026-07-31 — six vehicles they had already trimmed by hand before the
+    // per-seat rework. Losing any of them would be a real regression, so the
+    // exact file is pinned here.
+    {
+        std::ofstream file(primary);
+        file << "config_version = 5\n";
+        file << "vehicle_cam_forward_m = -0.03\n";
+        file << "vehicle_cam_up_m = 0.10\n";
+        file << "vehicle_cam_forward_m_scorpion = 0.21\n";
+        file << "vehicle_cam_up_m_scorpion = 1.00\n";
+        file << "vehicle_cam_forward_m_warthog = 0.02\n";
+        file << "vehicle_cam_up_m_warthog = 0.51\n";
+        file << "vehicle_cam_forward_m_mongoose = 0.38\n";
+        file << "vehicle_cam_up_m_mongoose = 0.04\n";
+        file << "vehicle_cam_forward_m_prowler = 0.18\n";
+        file << "vehicle_cam_up_m_prowler = -0.02\n";
+        file << "vehicle_cam_up_m_banshee = -0.06\n";
+        file << "vehicle_cam_forward_m_hornet = 0.06\n";
+        file << "vehicle_cam_up_m_hornet = -0.07\n";
+    }
+    ConfigLoad(primary.c_str());
+    bool migrated = true;
+    // scorpion=1, warthog=2, mongoose=3, prowler=6, banshee=7, hornet=8.
+    const struct { int id; float fwd; float up; bool fwdSet; } kTuned[] = {
+        {1, 0.21f, 1.00f, true},  {2, 0.02f, 0.51f, true},
+        {3, 0.38f, 0.04f, true},  {6, 0.18f, -0.02f, true},
+        {7, -0.03f, -0.06f, false}, {8, 0.06f, -0.07f, true},
+    };
+    for (const auto& t : kTuned)
+        for (int s = 0; s < kVehicleSeatSlots; ++s)
+        {
+            const int slot = ConfigSeatTrimSlot(
+                t.id, s == kVehicleGunnerSlot ? 0 : s,
+                s == kVehicleGunnerSlot);
+            if (ConfigSeatCamForward(g_config, slot) != t.fwd ||
+                ConfigSeatCamUp(g_config, slot) != t.up)
+                migrated = false;
+            // The banshee line set only the height; its forward must still
+            // follow the universal trim rather than being invented.
+            if (!t.fwdSet && g_config.vehicle_cam_forward_set[slot])
+                migrated = false;
+        }
+    // A vehicle the user never touched still follows the universal pair.
+    const int ghostSlot = ConfigSeatTrimSlot(4, 0, false);
+    Check(migrated && ConfigSeatCamForward(g_config, ghostSlot) == -0.03f &&
+              ConfigSeatCamUp(g_config, ghostSlot) == 0.10f,
+        "Every per-vehicle trim the user had already tuned migrates onto all "
+        "four seats of that vehicle, sets no axis they never set, and leaves "
+        "untouched vehicles on the universal trim");
 
     {
         std::ofstream file(primary);
@@ -5091,13 +5172,16 @@ int main()
                 "orthonormal basis");
         }
 
-        // C12 display-phase lock. C11 paced the camera evenly but had no way
-        // to know WHERE inside the tick the renderer draws the mesh; the
-        // constant offset was a hand-tuned knob that dragged at zero and
-        // sawtoothed at anything else. The lock measures the renderer through
-        // the bounding centre: latch its hull offset while parked, then
-        // project the live centre between the two sim states to read the
-        // exact blend fraction on screen, and learn the constant lead.
+        // C14 photon-time prediction — the real content of "my headset is 120
+        // and 60hz is not enough" (user, 2026-07-31, after their log showed
+        // the C12 bounding-centre witness reporting "bounds not render-smooth,
+        // C11 pacing, render lead +0.00 ticks" on real hardware: that
+        // mechanism never measured anything, so it is now diagnostic-only).
+        //
+        // Every frame is DISPLAYED one refresh period after it is built, and
+        // OpenXR already predicts the head that far ahead. The seat must be
+        // predicted by the same interval or it trails the head, worse the
+        // faster the vehicle moves.
         {
             auto hullAt = [](float x) {
                 Halo3Frame f{};
@@ -5107,176 +5191,316 @@ int main()
                 return f;
             };
             const double tickLen = 1.0 / 60.0;
-            const double camDt = (1.0 / 240.0) * 1.017; // independent clocks
-            const float stepWu = 0.1f;
-            const float offX = 1.2f, offZ = 0.4f; // authored centre offset
-            // The renderer's habit under test: present at 120 fps (every
-            // other camera call) drawing 0.6 of a tick AHEAD of the newest
-            // sim state — a drag C11 could neither see nor fix.
-            const float mccLead = 0.6f;
+            const float stepWu = 0.1f;       // wu per tick = wu per 16.7 ms
 
-            Halo3FrameInterp interp;
-            Halo3PhaseLock lock;
-            double t = 0.0, simTime = 0.0;
-            float simX = 0.0f;
-            Halo3Frame held = hullAt(simX);
-            float bounds[3] = {offX, 0.0f, offZ};
-            float screenX = 0.0f;
-            // Half a second parked: sim ticks pass but nothing moves, and the
-            // lock must latch the centre's exact hull-frame offset from rest.
-            for (int i = 0; i < 120; ++i)
-            {
-                while (simTime + tickLen <= t)
-                    simTime += tickLen;
-                Halo3InterpolateFrame(interp, held, t, true, &lock, bounds);
-                t += camDt;
-            }
-            const bool latched = lock.refValid && !lock.leadValid &&
-                std::fabs(lock.refLocal[0] - offX) < 1e-4f &&
-                std::fabs(lock.refLocal[2] - offZ) < 1e-4f;
-            // Drive at a constant 0.1 wu per tick.
-            double worstLocked = 0.0, sumLocked = 0.0;
-            int counted = 0;
-            for (int i = 0; i < 2400; ++i)
-            {
-                while (simTime + tickLen <= t)
+            // Drive one vehicle at a constant speed on a given headset, and
+            // report where the seat is placed relative to where the raw
+            // interpolation (no prediction) would have put it.
+            auto driveAhead = [&](double hz, double leadSeconds,
+                                  float perTickStep, double* outWorstJump) {
+                Halo3FrameInterp interp;
+                Halo3PhaseLock lock;
+                const double camDt = 1.0 / hz;
+                double t = 0.0, simTime = 0.0;
+                float simX = 0.0f;
+                Halo3Frame held = hullAt(simX);
+                const int parked = static_cast<int>(hz / 2);
+                const int frames = parked + static_cast<int>(hz * 20);
+                double sumAhead = 0.0;
+                int counted = 0;
+                double worstJump = 0.0;
+                float lastOut = 0.0f;
+                bool haveLast = false;
+                for (int i = 0; i < frames; ++i)
                 {
-                    simTime += tickLen;
-                    simX += stepWu;
-                    held = hullAt(simX);
-                }
-                if ((i & 1) == 0) // the 120 fps present
-                {
-                    const float alphaMcc =
-                        static_cast<float>((t - simTime) / tickLen) + mccLead;
-                    screenX = simX - stepWu + alphaMcc * stepWu;
-                    bounds[0] = screenX + offX;
-                }
-                const Halo3Frame out = Halo3InterpolateFrame(
-                    interp, held, t, true, &lock, bounds);
-                t += camDt;
-                if (i > 1500)
-                {
-                    const double err = std::fabs(out.pos[0] - screenX);
-                    if (err > worstLocked)
-                        worstLocked = err;
-                    sumLocked += err;
-                    ++counted;
-                }
-            }
-            const bool learned = lock.leadValid && lock.smooth &&
-                lock.lead > 0.2f && lock.lead < 1.1f;
-            const bool ridesTheMesh = counted > 800 &&
-                worstLocked < 0.45 * stepWu &&
-                sumLocked / counted < 0.15 * stepWu;
-            Check(latched && learned && ridesTheMesh,
-                "Phase lock latches the centre offset while parked, measures "
-                "the renderer's lead, and rides within a fraction of a tick "
-                "of where the mesh is actually drawn");
-
-            // A simulation hitch: the hull freezes at speed while camera
-            // calls keep coming. The applied lead must GLIDE out over ~40 ms,
-            // never step — a hard ticksLive cutoff would snap the camera
-            // backward by lead x step (~0.06 wu here) in a single frame.
-            {
-                double hitchWorst = 0.0;
-                float hitchLast = 0.0f;
-                bool hitchHave = false;
-                for (int i = 0; i < 240; ++i) // one second frozen
-                {
-                    const Halo3Frame out = Halo3InterpolateFrame(
-                        interp, held, t, true, &lock, bounds);
-                    t += camDt;
-                    if (hitchHave)
+                    while (simTime + tickLen <= t)
                     {
-                        const double d = std::fabs(out.pos[0] - hitchLast);
-                        if (d > hitchWorst)
-                            hitchWorst = d;
+                        simTime += tickLen;
+                        if (i >= parked)
+                        {
+                            simX += perTickStep;
+                            held = hullAt(simX);
+                        }
                     }
-                    hitchLast = out.pos[0];
-                    hitchHave = true;
-                }
-                // Normal per-call travel at this pace is ~0.025 wu; the old
-                // one-frame cutoff stepped ~0.06. Anything under 0.035 is a
-                // glide, not a snap.
-                Check(hitchWorst < 0.035,
-                    "A simulation hitch glides the applied lead out instead "
-                    "of snapping the camera by the whole lead in one frame");
-            }
-
-            // Rapid small speeds: the vehicle rocks by 4 mm-scale steps each
-            // tick. The learned lead must NOT extrapolate that rocking —
-            // amplified jitter is exactly the bouncing the knob produced.
-            bool rock = false;
-            double worstMove = 0.0;
-            float lastOut = 0.0f;
-            bool haveLast = false;
-            for (int i = 0; i < 1200; ++i)
-            {
-                while (simTime + tickLen <= t)
-                {
-                    simTime += tickLen;
-                    rock = !rock;
-                    simX += rock ? 0.004f : -0.004f;
-                    held = hullAt(simX);
-                }
-                if ((i & 1) == 0)
-                    bounds[0] = simX + offX; // renderer shows the rest pose
-                const Halo3Frame out = Halo3InterpolateFrame(
-                    interp, held, t, true, &lock, bounds);
-                t += camDt;
-                if (i > 200)
-                {
+                    const Halo3Frame out = Halo3InterpolateFrame(
+                        interp, held, t, true, &lock, nullptr, leadSeconds);
                     if (haveLast)
                     {
-                        const double d = std::fabs(out.pos[0] - lastOut);
-                        if (d > worstMove)
-                            worstMove = d;
+                        const double jump = std::fabs(out.pos[0] - lastOut);
+                        if (i > parked + static_cast<int>(hz) && jump > worstJump)
+                            worstJump = jump;
                     }
                     lastOut = out.pos[0];
                     haveLast = true;
-                }
-            }
-            Check(worstMove < 0.008,
-                "At rapid small speeds the lock stops applying its lead "
-                "instead of extrapolating the rocking into a bounce");
-
-            // A 60 Hz bounding centre — one that only moves on the sim tick
-            // itself — must never arm the lock; the output must be exactly
-            // the C11 pacing, and the failure is visible in the state the
-            // worker logs, not silent.
-            Halo3FrameInterp withB, without;
-            Halo3PhaseLock gateLock;
-            double gt = 0.0, gSim = 0.0;
-            float gX = 0.0f;
-            Halo3Frame gHeld = hullAt(gX);
-            float gBounds[3] = {offX, 0.0f, offZ};
-            bool identical = true;
-            for (int i = 0; i < 1560; ++i)
-            {
-                while (gSim + tickLen <= gt)
-                {
-                    gSim += tickLen;
-                    if (i >= 120) // parked first, then driving
+                    if (i > parked + static_cast<int>(hz * 10))
                     {
-                        gX += stepWu;
-                        gHeld = hullAt(gX);
-                        gBounds[0] = gX + offX; // moves ONLY on the tick
+                        // Where an unpredicted blend sits: between the two
+                        // most recent sim states, by the elapsed fraction.
+                        const double rawAlpha = (t - simTime) / tickLen;
+                        const double rawX = simX - perTickStep +
+                            rawAlpha * perTickStep;
+                        sumAhead += out.pos[0] - rawX;
+                        ++counted;
+                    }
+                    t += camDt;
+                }
+                if (outWorstJump)
+                    *outWorstJump = worstJump;
+                return counted ? sumAhead / counted : 0.0;
+            };
+
+            // At every rate a current headset runs, the seat must lead the
+            // unpredicted position by exactly the distance the vehicle covers
+            // in ONE refresh period — 8.3 ms of travel at 120 Hz, 13.9 at 72.
+            // Measured as the DIFFERENCE between predicting and not, at the
+            // same rate. The camera and the 60 Hz simulation lock into a
+            // fixed ratio (exactly 2:1 at 120 Hz), so the absolute sub-tick
+            // alignment carries a constant offset that says nothing about the
+            // prediction; differencing cancels it and leaves only the lead.
+            const double kRates[] = {72.0, 80.0, 90.0, 120.0, 144.0};
+            bool everyRateLeads = true;
+            double worstRateError = 0.0;
+            for (double hz : kRates)
+            {
+                const double lead = 1.0 / hz;
+                const double expected = stepWu * (lead / tickLen);
+                const double measured =
+                    driveAhead(hz, lead, stepWu, nullptr) -
+                    driveAhead(hz, 0.0, stepWu, nullptr);
+                const double err = std::fabs(measured - expected);
+                if (err > worstRateError)
+                    worstRateError = err;
+                if (err > 0.05 * expected)
+                    everyRateLeads = false;
+            }
+            Check(everyRateLeads,
+                "The seat is predicted ahead by exactly one display period of "
+                "vehicle travel at 72, 80, 90, 120 and 144 Hz - the headset's "
+                "own rate, not an assumed one");
+
+            // A faster headset predicts LESS far ahead (its frame is shown
+            // sooner), and the difference between two rates is real and in
+            // the right direction. This is what a wrong Hz would break.
+            const double at72 = driveAhead(72.0, 1.0 / 72.0, stepWu, nullptr) -
+                driveAhead(72.0, 0.0, stepWu, nullptr);
+            const double at144 =
+                driveAhead(144.0, 1.0 / 144.0, stepWu, nullptr) -
+                driveAhead(144.0, 0.0, stepWu, nullptr);
+            Check(at72 > at144 * 1.6 && at144 > 0.0,
+                "A 72 Hz headset is predicted roughly twice as far ahead as a "
+                "144 Hz one, because its frame is displayed twice as late");
+
+            // A pinned rate must behave exactly like the same rate arriving
+            // from the runtime — the F1 list is an override, not a second
+            // mechanism — and a WRONG pin must visibly mispredict, which is
+            // what makes Auto the right default.
+            const double pinnedRight =
+                driveAhead(120.0, 1.0 / 120.0, stepWu, nullptr);
+            const double pinnedWrong =
+                driveAhead(120.0, 1.0 / 72.0, stepWu, nullptr);
+            Check(std::fabs(pinnedWrong - pinnedRight) >
+                      0.4 * stepWu * ((1.0 / 120.0) / tickLen),
+                "Pinning the wrong headset rate really does mispredict, so "
+                "Auto - the runtime's own rate - is the correct default");
+
+            // Standstill and crawl: prediction must disengage, or millimetre
+            // physics jitter would be extrapolated into a bounce - the defect
+            // the user reported against the old manual knob.
+            double crawlJump = 0.0;
+            driveAhead(120.0, 1.0 / 120.0, 0.002f, &crawlJump);
+            Check(crawlJump < 0.004,
+                "At a crawl the prediction disengages instead of extrapolating "
+                "small physics steps into a bounce");
+
+            // The bounding-centre witness is now DIAGNOSTIC ONLY. Feeding it a
+            // perfectly render-interpolated centre must not move the camera by
+            // one bit compared with not feeding it at all.
+            {
+                Halo3FrameInterp a, b;
+                Halo3PhaseLock lockA, lockB;
+                const double camDt = 1.0 / 240.0;
+                const double lead = 1.0 / 120.0;
+                double t = 0.0, simTime = 0.0;
+                float simX = 0.0f;
+                Halo3Frame held = hullAt(simX);
+                float bounds[3] = {1.2f, 0.0f, 0.4f};
+                bool identical = true;
+                for (int i = 0; i < 3000; ++i)
+                {
+                    while (simTime + tickLen <= t)
+                    {
+                        simTime += tickLen;
+                        if (i >= 120)
+                        {
+                            simX += stepWu;
+                            held = hullAt(simX);
+                        }
+                    }
+                    const double alphaMcc = (t - simTime) / tickLen + 0.6;
+                    bounds[0] = static_cast<float>(
+                        simX - stepWu + alphaMcc * stepWu) + 1.2f;
+                    const Halo3Frame withWitness = Halo3InterpolateFrame(
+                        a, held, t, true, &lockA, bounds, lead);
+                    const Halo3Frame without = Halo3InterpolateFrame(
+                        b, held, t, true, &lockB, nullptr, lead);
+                    if (withWitness.pos[0] != without.pos[0])
+                        identical = false;
+                    t += camDt;
+                }
+                Check(identical && lockA.smoothEvaluated && lockA.smooth &&
+                          !lockB.smoothEvaluated,
+                    "The bounding-centre witness still measures and reports, "
+                    "but no longer steers the camera - a mechanism the log "
+                    "proved never armed on real hardware cannot drive the view");
+            }
+
+            // A simulation hitch at speed must glide the prediction out over
+            // ~40 ms rather than snapping the camera back by the whole lead.
+            {
+                Halo3FrameInterp interp;
+                Halo3PhaseLock lock;
+                const double camDt = 1.0 / 120.0;
+                const double lead = 1.0 / 120.0;
+                double t = 0.0, simTime = 0.0;
+                float simX = 0.0f;
+                Halo3Frame held = hullAt(simX);
+                for (int i = 0; i < 600; ++i)
+                {
+                    while (simTime + tickLen <= t)
+                    {
+                        simTime += tickLen;
+                        simX += stepWu;
+                        held = hullAt(simX);
+                    }
+                    Halo3InterpolateFrame(interp, held, t, true, &lock,
+                                          nullptr, lead);
+                    t += camDt;
+                }
+                double worst = 0.0;
+                float last = 0.0f;
+                bool have = false;
+                for (int i = 0; i < 120; ++i)   // one second frozen
+                {
+                    const Halo3Frame out = Halo3InterpolateFrame(
+                        interp, held, t, true, &lock, nullptr, lead);
+                    if (have)
+                    {
+                        const double d = std::fabs(out.pos[0] - last);
+                        if (d > worst) worst = d;
+                    }
+                    last = out.pos[0];
+                    have = true;
+                    t += camDt;
+                }
+                Check(worst < 0.035,
+                    "A simulation hitch glides the prediction out instead of "
+                    "snapping the camera back by the whole lead in one frame");
+            }
+
+            // The C10/C11 guarantees the prediction sits on top of: no
+            // backwards motion, a real orthonormal basis, settling on the
+            // newest state at rest, and snapping rather than sliding on a
+            // teleport.
+            {
+                auto frameAt = [](float x, float yawDeg) {
+                    Halo3Frame f{};
+                    f.pos[0] = x;
+                    const float r = yawDeg / 57.2957795f;
+                    f.fwd[0] = std::cos(r); f.fwd[1] = std::sin(r);
+                    f.up[2] = 1.0f;
+                    return f;
+                };
+                Halo3FrameInterp interp;
+                const double dt = 1.0 / 240.0;
+                double now = 0.0;
+                bool ordered = true, basis = true;
+                float lastX = 0.0f, biggestStep = 0.0f;
+                for (int tick = 0; tick < 30; ++tick)
+                {
+                    const Halo3Frame raw = frameAt(tick * 0.1f, tick * 2.0f);
+                    for (int sub = 0; sub < 4; ++sub)
+                    {
+                        const Halo3Frame out =
+                            Halo3InterpolateFrame(interp, raw, now, true);
+                        now += dt;
+                        if (tick < 3) { lastX = out.pos[0]; continue; }
+                        const float d = out.pos[0] - lastX;
+                        if (d < -1e-4f) ordered = false;
+                        if (d > biggestStep) biggestStep = d;
+                        lastX = out.pos[0];
+                        if (!Halo3FrameOrthonormal(out)) basis = false;
                     }
                 }
-                const Halo3Frame a = Halo3InterpolateFrame(
-                    withB, gHeld, gt, true, &gateLock, gBounds);
-                const Halo3Frame b = Halo3InterpolateFrame(
-                    without, gHeld, gt, true);
-                gt += camDt;
-                if (a.pos[0] != b.pos[0])
-                    identical = false;
+                Halo3Frame settled{};
+                for (int i = 0; i < 12; ++i)
+                {
+                    settled = Halo3InterpolateFrame(
+                        interp, frameAt(29 * 0.1f, 29 * 2.0f), now, true);
+                    now += dt;
+                }
+                const Halo3Frame jumped = Halo3InterpolateFrame(
+                    interp, frameAt(400.0f, 58.0f), now + dt, true);
+                Halo3FrameInterp off;
+                const Halo3Frame passthrough = Halo3InterpolateFrame(
+                    off, frameAt(7.0f, 10.0f), now, false);
+                const Halo3Frame mid = Halo3LerpFrame(
+                    frameAt(0.0f, 0.0f), frameAt(1.0f, 40.0f), 0.5f);
+                Check(ordered && basis && biggestStep < 0.045f &&
+                          std::fabs(settled.pos[0] - 2.9f) < 1e-4f &&
+                          std::fabs(jumped.pos[0] - 400.0f) < 1e-3f &&
+                          passthrough.pos[0] == 7.0f && !off.valid &&
+                          Halo3FrameOrthonormal(mid),
+                    "Seat frame is walked across the 60Hz simulation tick, "
+                    "settles on the newest state, snaps on a teleport, and "
+                    "stays a real orthonormal basis");
             }
-            Check(identical && gateLock.refValid && !gateLock.leadValid &&
-                      gateLock.smoothEvaluated && !gateLock.smooth,
-                "A 60Hz bounding centre never arms the lock, is reported as "
-                "judged-not-smooth, and the output stays exactly the C11 "
-                "pacing");
+
+            // The C11 guarantee: an evenly advancing hull must produce evenly
+            // advancing frames even though each tick is noticed a different
+            // amount late.
+            {
+                Halo3FrameInterp jit;
+                const double camDt = 1.0 / 240.0;
+                double t = 0.0, simTime = 0.0;
+                int simTicks = 0;
+                Halo3Frame held = hullAt(0.0f);
+                float previousX = 0.0f;
+                bool first = true;
+                double worst = 0.0, total = 0.0;
+                int counted = 0;
+                for (int i = 0; i < 2000; ++i)
+                {
+                    t += camDt * 1.017;
+                    while (simTime + tickLen <= t)
+                    {
+                        simTime += tickLen;
+                        ++simTicks;
+                        held = hullAt(simTicks * 0.1f);
+                    }
+                    const Halo3Frame out =
+                        Halo3InterpolateFrame(jit, held, t, true);
+                    if (i > 600)
+                    {
+                        if (!first)
+                        {
+                            const double d = out.pos[0] - previousX;
+                            total += d;
+                            ++counted;
+                            const double ideal =
+                                0.1 * (camDt * 1.017) / tickLen;
+                            const double err = std::fabs(d - ideal);
+                            if (err > worst) worst = err;
+                        }
+                        first = false;
+                    }
+                    previousX = out.pos[0];
+                }
+                const double ideal = 0.1 * (camDt * 1.017) / tickLen;
+                Check(counted > 1000 && worst < ideal * 0.25 &&
+                          std::fabs(total / counted - ideal) < ideal * 0.05,
+                    "Seat frame advances evenly even though each simulation "
+                    "tick is noticed a different amount late");
+            }
         }
 
         // C9 seat yaw: the view must turn with the hull. The function returns

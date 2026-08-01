@@ -29,6 +29,52 @@ static bool ParseFloatSetting(const char* key, const char* text, float& destinat
     return true;
 }
 
+// C13 per-seat trim keys. `suffix` is what follows vehicle_cam_forward_m_ /
+// vehicle_cam_up_m_ and is either "<vehicle>_<seat>" or the C12-era
+// "<vehicle>", which meant the whole vehicle and so migrates onto every seat
+// slot of it. An unknown vehicle or seat name is reported and dropped rather
+// than misfiled, and a malformed value never creates an override.
+static void ParseSeatTrim(const char* key, const char* suffix,
+                          const char* val, float* values, bool* setFlags)
+{
+    for (int v = 0; v < kVehicleTrimCount; ++v)
+    {
+        const size_t nameLen = strlen(kVehicleTrimNames[v]);
+        if (strncmp(suffix, kVehicleTrimNames[v], nameLen) != 0)
+            continue;
+        const char* rest = suffix + nameLen;
+        if (*rest == 0)
+        {
+            // Legacy whole-vehicle key: apply to every seat of it.
+            float parsed = values[v * kVehicleSeatSlots];
+            if (!ParseFloatSetting(key, val, parsed))
+                return;
+            for (int s = 0; s < kVehicleSeatSlots; ++s)
+            {
+                values[v * kVehicleSeatSlots + s] = parsed;
+                setFlags[v * kVehicleSeatSlots + s] = true;
+            }
+            LOG("config: '%s' applied to every seat of the %s (per-seat trim "
+                "replaced the per-vehicle key)", key, kVehicleTrimNames[v]);
+            return;
+        }
+        if (*rest != '_')
+            continue;               // a longer vehicle name may still match
+        ++rest;
+        for (int s = 0; s < kVehicleSeatSlots; ++s)
+            if (!strcmp(rest, kVehicleSeatNames[s]))
+            {
+                const int slot = v * kVehicleSeatSlots + s;
+                if (ParseFloatSetting(key, val, values[slot]))
+                    setFlags[slot] = true;
+                return;
+            }
+        LOG("config: unknown seat in '%s' ignored", key);
+        return;
+    }
+    LOG("config: unknown vehicle in '%s' ignored", key);
+}
+
 static bool FileExists(const wchar_t* path)
 {
     const DWORD attributes = GetFileAttributesW(path);
@@ -66,7 +112,12 @@ static void Clamp()
         std::clamp(g_config.vehicle_cam_up_m, -0.5f, 1.0f);
     g_config.vehicle_view_follow =
         std::clamp(g_config.vehicle_view_follow, 0.0f, 1.0f);
-    for (int i = 0; i < kVehicleTrimCount; ++i)
+    // 0 stays Auto; anything else is a real headset rate. The floor keeps a
+    // typo from asking for a multi-second prediction.
+    if (g_config.vehicle_smooth_hz != 0)
+        g_config.vehicle_smooth_hz =
+            std::clamp(g_config.vehicle_smooth_hz, 30, 1000);
+    for (int i = 0; i < kVehicleTrimSlots; ++i)
     {
         g_config.vehicle_cam_forward_v[i] =
             std::clamp(g_config.vehicle_cam_forward_v[i], -0.5f, 1.0f);
@@ -214,43 +265,23 @@ void ConfigLoad(const wchar_t* path)
             g_config.vehicle_cam_forward_m = (float)atof(val);
         else if (!strcmp(key, "vehicle_cam_up_m"))
             g_config.vehicle_cam_up_m = (float)atof(val);
-        // Per-vehicle trim overrides: vehicle_cam_forward_m_warthog etc. The
-        // exact matches above cannot fire for these (different length). A
-        // malformed value must NOT invent an override (the vehicle keeps
-        // following the universal trim), and an unknown vehicle name is
-        // reported, not silently swallowed.
+        // Per-seat trim overrides: vehicle_cam_forward_m_warthog_passenger.
+        // The exact matches above cannot fire for these (different length).
+        // A malformed value must NOT invent an override (the seat keeps
+        // following the universal trim), and an unknown suffix is reported,
+        // not silently swallowed.
         else if (!strncmp(key, "vehicle_cam_forward_m_", 22))
-        {
-            bool known = false;
-            for (int i = 0; i < kVehicleTrimCount; ++i)
-                if (!strcmp(key + 22, kVehicleTrimNames[i]))
-                {
-                    known = true;
-                    if (ParseFloatSetting(key, val,
-                                          g_config.vehicle_cam_forward_v[i]))
-                        g_config.vehicle_cam_forward_set[i] = true;
-                }
-            if (!known)
-                LOG("config: unknown vehicle in '%s' ignored", key);
-        }
+            ParseSeatTrim(key, key + 22, val, g_config.vehicle_cam_forward_v,
+                          g_config.vehicle_cam_forward_set);
         else if (!strncmp(key, "vehicle_cam_up_m_", 17))
-        {
-            bool known = false;
-            for (int i = 0; i < kVehicleTrimCount; ++i)
-                if (!strcmp(key + 17, kVehicleTrimNames[i]))
-                {
-                    known = true;
-                    if (ParseFloatSetting(key, val,
-                                          g_config.vehicle_cam_up_v[i]))
-                        g_config.vehicle_cam_up_set[i] = true;
-                }
-            if (!known)
-                LOG("config: unknown vehicle in '%s' ignored", key);
-        }
+            ParseSeatTrim(key, key + 17, val, g_config.vehicle_cam_up_v,
+                          g_config.vehicle_cam_up_set);
         else if (!strcmp(key, "vehicle_view_follow"))
             g_config.vehicle_view_follow = (float)atof(val);
         else if (!strcmp(key, "vehicle_cam_smoothing"))
             g_config.vehicle_cam_smoothing = atoi(val) != 0;
+        else if (!strcmp(key, "vehicle_smooth_hz"))
+            g_config.vehicle_smooth_hz = atoi(val);
         else if (!strcmp(key, "vehicle_motion"))
             g_config.vehicle_motion = atoi(val) != 0;
         else if (!strcmp(key, "vehicle_wheel_max_deg"))
@@ -627,21 +658,30 @@ void ConfigSave()
             d.vehicle_cam_forward_m, d.vehicle_cam_up_m);
     fprintf(f, "vehicle_cam_forward_m = %.2f\n", g_config.vehicle_cam_forward_m);
     fprintf(f, "vehicle_cam_up_m = %.2f\n\n", g_config.vehicle_cam_up_m);
-    fprintf(f, "# Per-vehicle seat trim. A line appears here when you adjust\n");
-    fprintf(f, "# the two seat sliders while SITTING IN that vehicle; every\n");
-    fprintf(f, "# vehicle without a line keeps using the universal trim above.\n");
-    fprintf(f, "# Delete a line (or use the F1 button) to hand that vehicle\n");
-    fprintf(f, "# back to the universal trim. Vehicle names: scorpion warthog\n");
-    fprintf(f, "# mongoose ghost wraith prowler banshee hornet chopper turret.\n");
-    for (int i = 0; i < kVehicleTrimCount; ++i)
-    {
-        if (g_config.vehicle_cam_forward_set[i])
-            fprintf(f, "vehicle_cam_forward_m_%s = %.2f\n",
-                    kVehicleTrimNames[i], g_config.vehicle_cam_forward_v[i]);
-        if (g_config.vehicle_cam_up_set[i])
-            fprintf(f, "vehicle_cam_up_m_%s = %.2f\n",
-                    kVehicleTrimNames[i], g_config.vehicle_cam_up_v[i]);
-    }
+    fprintf(f, "# Per-SEAT trim. A line appears here when you adjust the two\n");
+    fprintf(f, "# seat sliders while SITTING IN that seat; every seat without\n");
+    fprintf(f, "# a line keeps using the universal trim above. Delete a line\n");
+    fprintf(f, "# (or use the F1 button) to hand that seat back to it. Names:\n");
+    fprintf(f, "#   vehicle_cam_forward_m_<vehicle>_<seat>\n");
+    fprintf(f, "#   vehicles: scorpion warthog mongoose ghost wraith prowler\n");
+    fprintf(f, "#             banshee hornet chopper turret\n");
+    fprintf(f, "#   seats:    driver passenger passenger2 gunner\n");
+    fprintf(f, "# 'gunner' is a turret mounted ON that vehicle (the Warthog's\n");
+    fprintf(f, "# chaingun, the Scorpion's coax); each vehicle's own driver,\n");
+    fprintf(f, "# passengers and gunner are independent.\n");
+    for (int v = 0; v < kVehicleTrimCount; ++v)
+        for (int s = 0; s < kVehicleSeatSlots; ++s)
+        {
+            const int i = v * kVehicleSeatSlots + s;
+            if (g_config.vehicle_cam_forward_set[i])
+                fprintf(f, "vehicle_cam_forward_m_%s_%s = %.2f\n",
+                        kVehicleTrimNames[v], kVehicleSeatNames[s],
+                        g_config.vehicle_cam_forward_v[i]);
+            if (g_config.vehicle_cam_up_set[i])
+                fprintf(f, "vehicle_cam_up_m_%s_%s = %.2f\n",
+                        kVehicleTrimNames[v], kVehicleSeatNames[s],
+                        g_config.vehicle_cam_up_v[i]);
+        }
     fprintf(f, "\n");
     fprintf(f, "# How much of the vehicle's turning your view takes with it.\n");
     fprintf(f, "# 1 = you turn with the vehicle like a real driver; 0.5 = half,\n");
@@ -649,11 +689,25 @@ void ConfigSave()
     fprintf(f, "# every control behaves exactly as it did before this feature.\n");
     fprintf(f, "# (default %.2f, range 0 to 1)\n", d.vehicle_view_follow);
     fprintf(f, "vehicle_view_follow = %.2f\n\n", g_config.vehicle_view_follow);
-    fprintf(f, "# The game moves vehicles 60 times a second and smooths the\n");
-    fprintf(f, "# model in between. Leave this on so your seat moves with the\n");
-    fprintf(f, "# smoothed model; off, the vehicle appears to shake around you.\n");
+    fprintf(f, "# Halo 3 moves vehicles exactly 60 times a second on every\n");
+    fprintf(f, "# machine (that is the engine's own clock, not your headset's)\n");
+    fprintf(f, "# and smooths the model in between. This does the same for your\n");
+    fprintf(f, "# seat, recomputed on EVERY headset frame at whatever rate your\n");
+    fprintf(f, "# headset runs - 72, 80, 90, 120, 144 - because both clocks are\n");
+    fprintf(f, "# measured live. There is no refresh rate to pick here. Off, the\n");
+    fprintf(f, "# vehicle appears to shake around you.\n");
     fprintf(f, "# (default %d)\n", d.vehicle_cam_smoothing ? 1 : 0);
-    fprintf(f, "vehicle_cam_smoothing = %d\n\n", g_config.vehicle_cam_smoothing ? 1 : 0);
+    fprintf(f, "vehicle_cam_smoothing = %d\n", g_config.vehicle_cam_smoothing ? 1 : 0);
+    fprintf(f, "# Your headset displays each frame about one refresh AFTER the\n");
+    fprintf(f, "# mod builds it: 8.3 ms at 120 Hz, 13.9 ms at 72, 6.9 at 144.\n");
+    fprintf(f, "# OpenXR already predicts your HEAD that far ahead, so the seat\n");
+    fprintf(f, "# is predicted the same amount and stops trailing your head.\n");
+    fprintf(f, "# 0 = Auto, use the rate the OpenXR runtime reports (correct on\n");
+    fprintf(f, "# every headset that reports it properly). Set a number only if\n");
+    fprintf(f, "# your runtime misreports: 60 72 80 90 96 100 110 120 144 165\n");
+    fprintf(f, "# 240 are in the F1 list, any other value works too.\n");
+    fprintf(f, "# (default %d = Auto)\n", d.vehicle_smooth_hz);
+    fprintf(f, "vehicle_smooth_hz = %d\n\n", g_config.vehicle_smooth_hz);
     fprintf(f, "# Motion steering. In a Warthog, Mongoose, Ghost, Prowler or\n");
     fprintf(f, "# Chopper, DOUBLE-CLICK both grips to take hold of an invisible\n");
     fprintf(f, "# steering wheel: hold your hands as if on a wheel and tilt it,\n");

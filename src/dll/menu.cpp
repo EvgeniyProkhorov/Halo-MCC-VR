@@ -712,74 +712,75 @@ namespace
         ImGui::TextDisabled(
             "OFF restores the stock behind-the-vehicle view instantly.");
         ImGui::Spacing();
-        // C12: the same two sliders always, bound to whichever vehicle is
-        // under you. Seated, they edit THAT vehicle's own trim (created on
-        // first touch, saved to the config, reloaded whenever you sit in it
-        // again); on foot they edit the universal trim every unadjusted
-        // vehicle follows.
-        // The binding is STICKY: the id read is a fail-closed snapshot that
-        // can blip to 0 for a frame (stale/torn sampler read), and rebinding
+        // C13: the same two sliders always, bound to whichever SEAT is under
+        // you — driver, passenger and gunner of the same vehicle are all
+        // independent. Seated, they edit THAT seat's own trim (created on
+        // first touch, saved to the config, reloaded whenever you sit there
+        // again); on foot they edit the universal trim every unadjusted seat
+        // follows.
+        // The binding is STICKY: the slot read is a fail-closed snapshot that
+        // can blip to -1 for a frame (stale/torn sampler read), and rebinding
         // on that frame would silently rewrite the universal trim mid-drag.
-        // Only a sustained 0 (a real exit) rebinds to the universal pair.
-        static int s_seatBind = 0;
-        static int s_seatZeroFrames = 0;
-        const int liveVehicle = Game_Halo3CurrentVehicleId();
-        if (liveVehicle > 0)
+        // Only a sustained -1 (a real exit) rebinds to the universal pair.
+        static int s_seatBind = -1;
+        static int s_seatMissFrames = 0;
+        const int liveSlot = Game_Halo3CurrentSeatTrimSlot();
+        if (liveSlot >= 0)
         {
-            s_seatBind = liveVehicle;
-            s_seatZeroFrames = 0;
+            s_seatBind = liveSlot;
+            s_seatMissFrames = 0;
         }
-        else if (++s_seatZeroFrames > 30)
-            s_seatBind = 0;
-        const int seatVehicle = s_seatBind;
-        const int seatTrim = seatVehicle - 1;
-        const bool perVehicle = seatTrim >= 0 && seatTrim < kVehicleTrimCount;
-        if (perVehicle)
-            ImGui::Text("Adjusting: %s (this vehicle only)",
-                        Game_Halo3VehicleName(seatVehicle));
+        else if (++s_seatMissFrames > 30)
+            s_seatBind = -1;
+        const int seatSlot = s_seatBind;
+        const bool perSeat = seatSlot >= 0 && seatSlot < kVehicleTrimSlots;
+        if (perSeat)
+            ImGui::Text("Adjusting: %s (this seat only)",
+                        Game_Halo3SeatTrimName(seatSlot));
         else
-            ImGui::Text("Adjusting: all vehicles (universal trim)");
-        float seatFwd = ConfigVehicleCamForward(g_config, seatVehicle);
+            ImGui::Text("Adjusting: every seat (universal trim)");
+        float seatFwd = ConfigSeatCamForward(g_config, seatSlot);
         if (ImGui::SliderFloat("Seat forward (m)", &seatFwd,
                                -0.50f, 1.00f, "%.2f"))
         {
-            if (perVehicle)
+            if (perSeat)
             {
-                g_config.vehicle_cam_forward_v[seatTrim] = seatFwd;
-                g_config.vehicle_cam_forward_set[seatTrim] = true;
+                g_config.vehicle_cam_forward_v[seatSlot] = seatFwd;
+                g_config.vehicle_cam_forward_set[seatSlot] = true;
             }
             else
                 g_config.vehicle_cam_forward_m = seatFwd;
             changed = true;
         }
-        float seatUp = ConfigVehicleCamUp(g_config, seatVehicle);
+        float seatUp = ConfigSeatCamUp(g_config, seatSlot);
         if (ImGui::SliderFloat("Seat height (m)", &seatUp,
                                -0.50f, 1.00f, "%.2f"))
         {
-            if (perVehicle)
+            if (perSeat)
             {
-                g_config.vehicle_cam_up_v[seatTrim] = seatUp;
-                g_config.vehicle_cam_up_set[seatTrim] = true;
+                g_config.vehicle_cam_up_v[seatSlot] = seatUp;
+                g_config.vehicle_cam_up_set[seatSlot] = true;
             }
             else
                 g_config.vehicle_cam_up_m = seatUp;
             changed = true;
         }
-        if (perVehicle && (g_config.vehicle_cam_forward_set[seatTrim] ||
-                           g_config.vehicle_cam_up_set[seatTrim]))
+        if (perSeat && (g_config.vehicle_cam_forward_set[seatSlot] ||
+                        g_config.vehicle_cam_up_set[seatSlot]))
         {
             if (ImGui::SmallButton("Back to the universal trim##seattrim"))
             {
-                g_config.vehicle_cam_forward_set[seatTrim] = false;
-                g_config.vehicle_cam_up_set[seatTrim] = false;
+                g_config.vehicle_cam_forward_set[seatSlot] = false;
+                g_config.vehicle_cam_up_set[seatSlot] = false;
                 changed = true;
             }
         }
         ImGui::TextDisabled(
-            "Sit in a vehicle and these sliders adjust that vehicle alone,\n"
-            "remembered per vehicle. On foot they set the shared base trim.\n"
-            "The base position is the game's own per-seat camera pivot, so\n"
-            "each vehicle already seats you where its authors placed it.");
+            "Sit in a seat and these sliders adjust that seat alone —\n"
+            "a vehicle's driver, passengers and gunner each remember their\n"
+            "own. On foot they set the shared base every unadjusted seat\n"
+            "follows. The base position is the game's own per-seat camera\n"
+            "pivot, so each seat already starts where its authors placed it.");
         ImGui::Spacing();
         ImGui::Separator();
         ImGui::Text("Turning with the vehicle");
@@ -789,12 +790,59 @@ namespace
             "1 = you turn with the vehicle like a real driver. 0 = the view\n"
             "stays locked to the world and every control goes back to exactly\n"
             "what it was before this feature.");
-        changed |= ImGui::Checkbox("Smooth out the vehicle's 60Hz motion",
+        changed |= ImGui::Checkbox("Smooth the vehicle's stepped motion",
                                    &g_config.vehicle_cam_smoothing);
         ImGui::TextDisabled(
-            "The game moves vehicles 60 times a second and smooths the model\n"
-            "in between. Leave this ON so your seat moves with the smoothed\n"
-            "model; OFF, the vehicle appears to shake around you.");
+            "Halo 3 moves vehicles 60 times a second (the game's own clock,\n"
+            "the same on every PC). This rebuilds your seat position on every\n"
+            "headset frame in between. OFF, the vehicle shakes around you.");
+        {
+            // C14: the rate the seat is predicted AHEAD to. Auto reads it
+            // from the OpenXR runtime; the list is for a runtime that
+            // misreports. Any other value can be hand-typed in the config.
+            const float autoHz = VR_HeadsetRefreshHz();
+            char autoLabel[64];
+            if (autoHz >= 1.0f)
+                snprintf(autoLabel, sizeof(autoLabel),
+                         "Auto - your headset (%.0f Hz)", autoHz);
+            else
+                snprintf(autoLabel, sizeof(autoLabel),
+                         "Auto - ask the headset");
+            char current[64];
+            if (g_config.vehicle_smooth_hz > 0)
+                snprintf(current, sizeof(current), "%d Hz",
+                         g_config.vehicle_smooth_hz);
+            else
+                snprintf(current, sizeof(current), "%s", autoLabel);
+            if (ImGui::BeginCombo("Predict ahead for", current))
+            {
+                for (int i = 0; i < kVehicleSmoothHzCount; ++i)
+                {
+                    const int hz = kVehicleSmoothHzList[i];
+                    char label[64];
+                    if (hz == 0)
+                        snprintf(label, sizeof(label), "%s", autoLabel);
+                    else
+                        snprintf(label, sizeof(label), "%d Hz", hz);
+                    const bool selected = g_config.vehicle_smooth_hz == hz;
+                    if (ImGui::Selectable(label, selected))
+                    {
+                        g_config.vehicle_smooth_hz = hz;
+                        changed = true;
+                    }
+                    if (selected)
+                        ImGui::SetItemDefaultFocus();
+                }
+                ImGui::EndCombo();
+            }
+            ImGui::TextDisabled(
+                "Your headset shows each frame about one refresh AFTER the\n"
+                "mod builds it - 8.3 ms at 120 Hz, 13.9 at 72. Your head is\n"
+                "already predicted that far ahead by OpenXR; this predicts\n"
+                "the vehicle the same amount, so the seat stops trailing your\n"
+                "head. Auto uses the rate your runtime reports - only pick a\n"
+                "number here if that rate is wrong.");
+        }
         ImGui::Spacing();
         ImGui::Separator();
         ImGui::Text("Motion steering");
