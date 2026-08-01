@@ -238,6 +238,66 @@ camera. The room-fixed screen, stereo eye transforms, 0.85 FOV, wider visibility
 cover, immersive Halo 3 path, ODST, Reach, and shared compositor are unchanged.
 The vertical calibration remains headset-pending.
 
+### HEADSET-PENDING: black cine bars and restored subtitles - 2026-08-01
+
+Two separate behaviors, each with its own switch, built on the accepted
+`643a6c1` baseline. Both are reported against the exact theatre the user
+watched three times on that build.
+
+**The reported defect.** The theatre picture is visibly taller than a TV
+picture and nothing covers the extra height. The accepted run's own log gives
+the number behind that: `fit_desktop_window ON: forcing MCC backbuffer to
+3262x2352 (full headset render)`, i.e. a 1.387:1 frame. The same shot fills a
+16:9 frame on a monitor. Both frames are built from the engine's one horizontal
+tangent, so only the vertical tangent grows, and everything in the difference is
+scene the flat game never shows. This is the same complaint recorded earlier in
+this document as "exposed elements outside the intended shot", now given its
+mechanism rather than a wider/narrower FOV adjustment.
+
+**The cine bars are a crop, never a rescale.** The centred slice of the taller
+frame that has the requested aspect is exactly the monitor composition, so the
+bars are derived at runtime from the authored aspect the title already
+publishes - no fixed constant and no headset branch. The retained picture keeps
+its exact size and scale, and an authored frame already at or wider than the
+requested shape is left alone. The projection path returns opaque black outside
+the retained window before sampling or converting anything; the eye-selective
+quad fallback expresses the same window as its `subImage.imageRect`, so both
+presentations crop identically. `cutscene_theater_matte_aspect` selects the
+retained shape (1.78 = a TV, 2.39 = a wide cinema crop, 0 = no bars) and
+`cutscene_theater_matte_offset` slides that window without resizing it. On
+entry the log now reports the authored frame shape beside the bars it produced,
+so a report can name which of the two is wrong.
+
+This is universal theatre policy, as the rest of the theatre settings already
+are: any title whose cutscene is rasterized into the headset shape has the same
+extra height for the same reason.
+
+**Subtitles are interface text, drawn after the eye captures.** Reach's HREK
+evidence already recorded that subtitles are not a CHUD widget but the
+interface text layer, composited outside the CHUD path the mod owns. The
+ordering is what keeps them out of the headset: the title draws them into its
+finished backbuffer after both eye images have been captured, so no stereo
+image ever contains them. The user confirmed the flat monitor shows subtitles
+during a Halo 3 cutscene while the headset does not, which is that ordering
+observed rather than assumed.
+
+While theatre presents, the lower 30% of the finished backbuffer is copied once
+per frame and handed to the projection shader. The band is full width and comes
+from the same frame, so its U is the screen's U and the text keeps the position
+the title chose, including over the new bars. A band pixel is taken only when it
+is bright, near-neutral, **and** clearly brighter than what the stereo image
+already shows at that point; a bright scene appears in both and cancels out of
+that third test. A multisampled, typeless, or unviewable backbuffer disables
+only this feature, names itself in the log, and leaves the stereo theatre
+untouched.
+
+**What the next headset report should say.** The two behaviors fail
+independently and are switched independently in the F1 Theatre category, so one
+sitting can separate them: whether the framing now matches the intended shot,
+and whether subtitle text appears on the screen. The entry log line carries the
+measured authored aspect, so a framing miss is a config value rather than
+another build.
+
 ## Reach
 
 The accepted Winter Contingency probe identified the low byte of Reach's
