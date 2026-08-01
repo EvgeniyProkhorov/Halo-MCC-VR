@@ -374,6 +374,18 @@ namespace
     D3D11_TEXTURE2D_DESC g_theaterResolvedDesc{};
     ID3D11Texture2D* g_theaterDirectSourceKey[2] = {nullptr, nullptr};
     ID3D11ShaderResourceView* g_theaterDirectSourceSrv[2] = {nullptr, nullptr};
+    // Subtitles are interface text, not a CHUD widget, and the title draws them
+    // into its finished backbuffer after both eye captures - which is why they
+    // reach the monitor and never the headset. Keep a copy of the lower band of
+    // that backbuffer while theatre is active and let the projection shader put
+    // the text back on the room-fixed screen at the position the title chose.
+    // Every failure here leaves the existing stereo theatre exactly as it was.
+    inline constexpr float kTheaterSubtitleBandFraction = 0.30f;
+    ID3D11Texture2D* g_theaterSubtitleBand = nullptr;
+    ID3D11ShaderResourceView* g_theaterSubtitleBandSrv = nullptr;
+    D3D11_TEXTURE2D_DESC g_theaterSubtitleBandDesc{};
+    // First backbuffer V the band holds; negative means no band this frame.
+    float g_theaterSubtitleBandStartV = -1.0f;
     ID3D11VertexShader* g_theaterProjectionVs = nullptr;
     ID3D11PixelShader* g_theaterProjectionPs = nullptr;
     ID3D11Buffer* g_theaterProjectionCb = nullptr;
@@ -384,7 +396,8 @@ namespace
         // z: source already passed through the normal IQ output encoding.
         float color[4]{};
         // x/y: first and last source V the cine bars leave showing; z: nonzero
-        // once those bars are active at all.
+        // once those bars are active at all; w: first V covered by the subtitle
+        // band, or negative when no band was captured.
         float matte[4]{};
     };
     static_assert(sizeof(TheaterProjectionParams) == 96);
@@ -2028,9 +2041,90 @@ float4 ps_rcas(VSOut i) : SV_Target
         g_theaterResolvedDesc = {};
     }
 
+    void ReleaseTheaterSubtitleBand()
+    {
+        if (g_theaterSubtitleBandSrv)
+            g_theaterSubtitleBandSrv->Release();
+        if (g_theaterSubtitleBand)
+            g_theaterSubtitleBand->Release();
+        g_theaterSubtitleBandSrv = nullptr;
+        g_theaterSubtitleBand = nullptr;
+        g_theaterSubtitleBandDesc = {};
+        g_theaterSubtitleBandStartV = -1.0f;
+    }
+
+    // Copy the lower band of the title's finished backbuffer. The band shares
+    // the backbuffer's format and covers full width, so its U is the screen's U
+    // and the text keeps the horizontal position the title gave it.
+    bool CaptureTheaterSubtitleBand(
+        ID3D11Texture2D* backbuffer, const D3D11_TEXTURE2D_DESC& backbufferDesc)
+    {
+        if (!g_device || !g_context || !backbuffer ||
+            !backbufferDesc.Width || !backbufferDesc.Height ||
+            // A multisampled backbuffer cannot be region-copied; the theatre
+            // keeps its stereo image and this feature stays off.
+            backbufferDesc.SampleDesc.Count != 1)
+            return false;
+        const UINT bandHeight = static_cast<UINT>(
+            static_cast<float>(backbufferDesc.Height) *
+            kTheaterSubtitleBandFraction);
+        if (!bandHeight || bandHeight > backbufferDesc.Height)
+            return false;
+        if (g_theaterSubtitleBandDesc.Width != backbufferDesc.Width ||
+            g_theaterSubtitleBandDesc.Height != bandHeight ||
+            g_theaterSubtitleBandDesc.Format != backbufferDesc.Format)
+        {
+            ReleaseTheaterSubtitleBand();
+            D3D11_TEXTURE2D_DESC desc{};
+            desc.Width = backbufferDesc.Width;
+            desc.Height = bandHeight;
+            desc.MipLevels = 1;
+            desc.ArraySize = 1;
+            // CopySubresourceRegion needs an identical format, so the band is
+            // created from the backbuffer's own. A typeless backbuffer would
+            // fail the view below and disable only this feature.
+            desc.Format = backbufferDesc.Format;
+            desc.SampleDesc.Count = 1;
+            desc.Usage = D3D11_USAGE_DEFAULT;
+            desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+            HRESULT hr = g_device->CreateTexture2D(
+                &desc, nullptr, &g_theaterSubtitleBand);
+            if (SUCCEEDED(hr))
+                hr = g_device->CreateShaderResourceView(
+                    g_theaterSubtitleBand, nullptr, &g_theaterSubtitleBandSrv);
+            if (FAILED(hr))
+            {
+                LOG("cutscene theatre: subtitle band unavailable "
+                    "(HRESULT 0x%08X); the theatre keeps its stereo image and "
+                    "the title's subtitles stay on the monitor only",
+                    static_cast<unsigned>(hr));
+                ReleaseTheaterSubtitleBand();
+                return false;
+            }
+            g_theaterSubtitleBandDesc = desc;
+            LOG("cutscene theatre: subtitle band armed (%ux%u from the bottom "
+                "%.0f%% of the %ux%u backbuffer)",
+                desc.Width, desc.Height,
+                kTheaterSubtitleBandFraction * 100.0f,
+                backbufferDesc.Width, backbufferDesc.Height);
+        }
+        D3D11_BOX box{};
+        box.left = 0;
+        box.right = backbufferDesc.Width;
+        box.top = backbufferDesc.Height - bandHeight;
+        box.bottom = backbufferDesc.Height;
+        box.front = 0;
+        box.back = 1;
+        g_context->CopySubresourceRegion(
+            g_theaterSubtitleBand, 0, 0, 0, 0, backbuffer, 0, &box);
+        g_theaterSubtitleBandStartV = 1.0f - kTheaterSubtitleBandFraction;
+        return true;
+    }
+
     void ReleaseTheaterProjectionResources()
     {
         ReleaseTheaterResolvedResources();
+        ReleaseTheaterSubtitleBand();
         for (int eye = 0; eye < 2; ++eye)
         {
             if (g_theaterDirectSourceSrv[eye])
@@ -2066,6 +2160,7 @@ float4 ps_rcas(VSOut i) : SV_Target
         {
             static const char* shader = R"(
 Texture2D srcTex : register(t0);
+Texture2D bandTex : register(t1);
 SamplerState smp : register(s0);
 cbuffer TheaterProjectionParams : register(b0)
 {
@@ -2088,22 +2183,45 @@ float enc(float c)
     c = max(c, 0.0);
     return c <= 0.0031308 ? c * 12.92 : 1.055 * pow(c, 1.0/2.4) - 0.055;
 }
-float4 ps_main(VSOut i) : SV_Target
+float3 recode(float3 c)
 {
-    // Cine bars: the strips of the authored frame a monitor never shows are
-    // returned as opaque black before anything is sampled or converted.
-    if (matteParams.z > 0.5 &&
-        (i.uv.y < matteParams.x || i.uv.y > matteParams.y))
-        return float4(0.0, 0.0, 0.0, 1.0);
-    float4 c = srcTex.SampleLevel(smp, i.uv, 0);
     if (colorParams.z < 0.5)
     {
         if (colorParams.x < 0.5)
-            c.rgb = float3(lin(c.r), lin(c.g), lin(c.b));
+            c = float3(lin(c.r), lin(c.g), lin(c.b));
         if (colorParams.y > 0.5)
-            c.rgb = float3(enc(c.r), enc(c.g), enc(c.b));
+            c = float3(enc(c.r), enc(c.g), enc(c.b));
     }
     return c;
+}
+float luma(float3 c) { return dot(c, float3(0.299, 0.587, 0.114)); }
+float4 ps_main(VSOut i) : SV_Target
+{
+    // Cine bars: the strips of the authored frame a monitor never shows are
+    // opaque black. Subtitles still draw over them, exactly as on a monitor.
+    float3 outColor = 0.0;
+    bool inBar = matteParams.z > 0.5 &&
+        (i.uv.y < matteParams.x || i.uv.y > matteParams.y);
+    if (!inBar)
+        outColor = recode(srcTex.SampleLevel(smp, i.uv, 0).rgb);
+    if (matteParams.w >= 0.0 && i.uv.y >= matteParams.w)
+    {
+        // The band came from the same frame at the same U, so the text lands
+        // where the title put it. Take only bright, near-neutral pixels that
+        // are also clearly brighter than what the stereo image already shows
+        // there: that is glyph over background, and nothing else in a frame
+        // satisfies all three at once.
+        float2 bandUv = float2(
+            i.uv.x, (i.uv.y - matteParams.w) / max(1.0 - matteParams.w, 0.0001));
+        float3 b = recode(bandTex.SampleLevel(smp, bandUv, 0).rgb);
+        float bandLuma = luma(b);
+        float chroma = max(max(b.r, b.g), b.b) - min(min(b.r, b.g), b.b);
+        float key = saturate((bandLuma - 0.72) / 0.28) *
+                    saturate((0.16 - chroma) / 0.16) *
+                    saturate((bandLuma - luma(outColor)) * 4.0);
+        outColor = lerp(outColor, b, key);
+    }
+    return float4(outColor, 1.0);
 }
 )";
             ID3DBlob* errors = nullptr;
@@ -2263,6 +2381,9 @@ float4 ps_main(VSOut i) : SV_Target
         params.matte[0] = matte.vMin;
         params.matte[1] = matte.vMax;
         params.matte[2] = matte.active ? 1.0f : 0.0f;
+        const bool bandReady = g_theaterSubtitleBandSrv &&
+            g_theaterSubtitleBandStartV >= 0.0f;
+        params.matte[3] = bandReady ? g_theaterSubtitleBandStartV : -1.0f;
         g_context->UpdateSubresource(
             g_theaterProjectionCb, 0, nullptr, &params, 0, 0);
 
@@ -2270,8 +2391,12 @@ float4 ps_main(VSOut i) : SV_Target
         backup.Capture(g_context);
         ID3D11Buffer* savedVsCb0 = nullptr;
         ID3D11Buffer* savedPsCb0 = nullptr;
+        // D3DStateBackup restores pixel shader resource slot 0 only, and the
+        // subtitle band binds slot 1. Return that slot to the title itself.
+        ID3D11ShaderResourceView* savedPsSrv1 = nullptr;
         g_context->VSGetConstantBuffers(0, 1, &savedVsCb0);
         g_context->PSGetConstantBuffers(0, 1, &savedPsCb0);
+        g_context->PSGetShaderResources(1, 1, &savedPsSrv1);
         const float black[4]{0,0,0,1};
         g_context->ClearRenderTargetView(targetRtv, black);
         g_context->OMSetRenderTargets(1, &targetRtv, nullptr);
@@ -2290,14 +2415,18 @@ float4 ps_main(VSOut i) : SV_Target
         g_context->GSSetShader(nullptr,nullptr,0);
         g_context->PSSetShader(g_theaterProjectionPs,nullptr,0);
         g_context->PSSetConstantBuffers(0,1,&g_theaterProjectionCb);
-        g_context->PSSetShaderResources(0,1,&sourceSrv);
+        ID3D11ShaderResourceView* projectionSrvs[2]{
+            sourceSrv, bandReady ? g_theaterSubtitleBandSrv : nullptr};
+        g_context->PSSetShaderResources(0,2,projectionSrvs);
         g_context->PSSetSamplers(0,1,&g_blitSampler);
         g_context->Draw(4,0);
         backup.Restore(g_context);
         g_context->VSSetConstantBuffers(0,1,&savedVsCb0);
         g_context->PSSetConstantBuffers(0,1,&savedPsCb0);
+        g_context->PSSetShaderResources(1,1,&savedPsSrv1);
         if (savedVsCb0) savedVsCb0->Release();
         if (savedPsCb0) savedPsCb0->Release();
+        if (savedPsSrv1) savedPsSrv1->Release();
         static bool logged = false;
         if (!logged && targetEye == 1)
         {
@@ -6877,6 +7006,7 @@ float4 ps_scope_linearize(VSOut i):SV_Target { return paint(i.uv,true); }
                     {
                         LOG("cutscene theatre: returned to immersive presentation");
                         ReleaseTheaterResolvedResources();
+                        ReleaseTheaterSubtitleBand();
                         Game_Recenter();
                     }
                 }
@@ -6964,6 +7094,17 @@ float4 ps_scope_linearize(VSOut i):SV_Target { return paint(i.uv,true); }
                         EnsureTheaterProjectionResources(
                             g_stereoW, g_stereoH,
                             !theaterDirectSampling);
+                    // The backbuffer in hand is the frame the title just
+                    // finished, subtitles included. Copy the band before the
+                    // theatre composite reads it; a failure only clears the
+                    // band and leaves the stereo image alone.
+                    g_theaterSubtitleBandStartV = -1.0f;
+                    if (theaterProjectionAttempted &&
+                        g_config.cutscene_theater_subtitles &&
+                        !CaptureTheaterSubtitleBand(backbuffer, bd))
+                    {
+                        g_theaterSubtitleBandStartV = -1.0f;
+                    }
                     const XrResult stereoAcquire =
                         xrAcquireSwapchainImage(g_stereoChain, &ai, &idx);
                     const bool stereoAcquired = reachTitle

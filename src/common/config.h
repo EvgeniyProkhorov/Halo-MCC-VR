@@ -169,6 +169,10 @@ struct Config
     // Slides the retained window up (positive) or down inside that frame, as a
     // fraction of the frame height. The window never changes size.
     float cutscene_theater_matte_offset = 0.0f;
+    // Put the title's own subtitle text back on the theatre screen. Subtitles
+    // are interface text drawn after both eye captures, so they reach the
+    // monitor and never the headset without this.
+    bool cutscene_theater_subtitles = true;
 
     // F1 menu panel placement. The panel is its own composition quad, separate
     // from the virtual screen above. The defaults are the fixed constants the

@@ -681,6 +681,16 @@ namespace
             "so without bars you see scene above and below the intended shot.\n"
             "1.78 is a TV picture, 2.39 a wide cinema crop. The picture is never\n"
             "resized, only covered. Slide moves what stays showing up or down.");
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Text("Subtitles");
+        changed |= ImGui::Checkbox(
+            "Show subtitles on the theatre screen",
+            &g_config.cutscene_theater_subtitles);
+        ImGui::TextDisabled(
+            "The game draws subtitles after it hands us the two eye images, so they\n"
+            "reach your monitor but not your headset. This puts the text back on the\n"
+            "screen where the game placed it. MCC's own subtitle setting must be on.");
         }
 
         if (g_activeCategory == Cat_Controls)

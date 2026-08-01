@@ -292,6 +292,8 @@ void ConfigLoad(const wchar_t* path)
             ParseFloatSetting(key, val, g_config.cutscene_theater_matte_aspect);
         else if (!strcmp(key, "cutscene_theater_matte_offset"))
             ParseFloatSetting(key, val, g_config.cutscene_theater_matte_offset);
+        else if (!strcmp(key, "cutscene_theater_subtitles"))
+            g_config.cutscene_theater_subtitles = atoi(val) != 0;
         else if (!strcmp(key, "menu_distance_m"))
             ParseFloatSetting(key, val, g_config.menu_distance_m);
         else if (!strcmp(key, "menu_width_m"))
@@ -631,6 +633,13 @@ void ConfigSave()
              d.cutscene_theater_matte_offset);
     fprintf(f, "cutscene_theater_matte_offset = %.2f\n\n",
              g_config.cutscene_theater_matte_offset);
+    fprintf(f, "# Show the game's own subtitle text on the theatre screen. Subtitles\n");
+    fprintf(f, "# are interface text the game draws after the two eye images are\n");
+    fprintf(f, "# taken, which is why they appear on the monitor but not in the\n");
+    fprintf(f, "# headset. Turn MCC's own subtitle setting on as well. (default %d)\n",
+             d.cutscene_theater_subtitles ? 1 : 0);
+    fprintf(f, "cutscene_theater_subtitles = %d\n\n",
+             g_config.cutscene_theater_subtitles ? 1 : 0);
     fprintf(f, "# Where the F1 menu panel floats. You do not need to edit these by\n");
     fprintf(f, "# hand: grab the bar along the top of the panel with your right\n");
     fprintf(f, "# trigger to move it, and push the right stick up/down while holding\n");
