@@ -4979,6 +4979,54 @@ int main()
                 "gate rejects wrong-frame anchors");
         }
 
+        // C17 native parenting: calibration must preserve the exact Blender
+        // point, while every later world-space movement comes from the native
+        // camera even when the sampled object frame does not move at all.
+        {
+            Halo3Frame frame{};
+            frame.pos[0] = 10.0f; frame.pos[1] = -3.0f; frame.pos[2] = 2.0f;
+            frame.fwd[1] = 1.0f; frame.up[2] = 1.0f;
+            const float nativeLocal[3] = {0.40f, -0.10f, 0.50f};
+            const float authoredLocal[3] = {0.62f, 0.18f, 0.81f};
+            float nativeOffset[3];
+            Halo3FrameRotate(frame, nativeLocal, nativeOffset);
+            float nativeWorld[3] = {
+                frame.pos[0] + nativeOffset[0],
+                frame.pos[1] + nativeOffset[1],
+                frame.pos[2] + nativeOffset[2]};
+            float recoveredLocal[3];
+            const float relative[3] = {
+                nativeWorld[0] - frame.pos[0],
+                nativeWorld[1] - frame.pos[1],
+                nativeWorld[2] - frame.pos[2]};
+            Halo3FrameUnrotate(frame, relative, recoveredLocal);
+            float anchor[3];
+            Halo3NativeParentedAnchor(frame, nativeWorld, recoveredLocal,
+                                      authoredLocal, anchor);
+            float authoredOffset[3];
+            Halo3FrameRotate(frame, authoredLocal, authoredOffset);
+            const bool placementExact =
+                std::fabs(anchor[0] - (frame.pos[0] + authoredOffset[0])) < 1e-5f &&
+                std::fabs(anchor[1] - (frame.pos[1] + authoredOffset[1])) < 1e-5f &&
+                std::fabs(anchor[2] - (frame.pos[2] + authoredOffset[2])) < 1e-5f;
+
+            const float nativeDelta[3] = {1.25f, -0.75f, 0.33f};
+            const float movedNative[3] = {
+                nativeWorld[0] + nativeDelta[0],
+                nativeWorld[1] + nativeDelta[1],
+                nativeWorld[2] + nativeDelta[2]};
+            float movedAnchor[3];
+            Halo3NativeParentedAnchor(frame, movedNative, recoveredLocal,
+                                      authoredLocal, movedAnchor);
+            const bool nativeOwnsMotion =
+                std::fabs((movedAnchor[0] - anchor[0]) - nativeDelta[0]) < 1e-5f &&
+                std::fabs((movedAnchor[1] - anchor[1]) - nativeDelta[1]) < 1e-5f &&
+                std::fabs((movedAnchor[2] - anchor[2]) - nativeDelta[2]) < 1e-5f;
+            Check(placementExact && nativeOwnsMotion,
+                "Native seat motion passes through exactly while the Blender "
+                "point remains the calibrated camera placement");
+        }
+
         // C8 fingerprint: the same physics type covers several vehicles, so
         // the authored point is keyed on the tag's node-0 offset recovered
         // from data already sampled. It must be independent of where the

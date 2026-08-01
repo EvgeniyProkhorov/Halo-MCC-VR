@@ -4903,6 +4903,9 @@ namespace
     // First-person vehicle camera helpers, defined with the vehicle probe
     // module below (they run on this same engine camera thread).
     bool Halo3ComputeAuthoredAnchor(float out[3], int* outTrimSlot = nullptr);
+    bool Halo3ComputeNativeParentedAnchor(const float nativeWorld[3],
+                                          float out[3],
+                                          int* outTrimSlot = nullptr);
     bool Halo3VehicleFpActive();
     // C9: folds the hull's rotation into the shared yaw reference and decides
     // whether this seat's steering is authored instead of closed-loop aimed.
@@ -5028,21 +5031,17 @@ namespace
             up[2] = cgp * cr;
         }
 
-        // First-person vehicle camera (C5): place the camera on the
-        // USER-AUTHORED seat point (Blender kit), carried by the measured
-        // vehicle transform, plus the forward/up trims along the current view
-        // heading. Forward/up were written from the HMD above and the lean
-        // block below adds full 6DOF head motion on top, so the player's
-        // head owns the view from the seat. Never active in cinematics;
-        // every input is frame-level, so anything stale, unproven, or
-        // lacking an authored point leaves the stock chase position
-        // untouched. (The C3 engine-focus anchor was headset-rejected —
-        // inside/under the hull on marker-less driver seats.)
+        // C17 first-person vehicle camera. Halo's native seated camera carries
+        // rendered motion and bounce; only the local difference to the user's
+        // Blender-authored point is applied here. Forward/up were written from
+        // the HMD above, the trim follows the current view heading, and the lean
+        // block below adds full 6DOF head motion. Never active in cinematics;
+        // stale or unproven inputs leave the native position untouched.
         if (!cinematic && Halo3VehicleFpActive())
         {
             float anchor[3];
             int anchorTrimSlot = -1;
-            if (Halo3ComputeAuthoredAnchor(anchor, &anchorTrimSlot))
+            if (Halo3ComputeNativeParentedAnchor(pos, anchor, &anchorTrimSlot))
             {
                 // C13: each SEAT may carry its own trim; anything without one
                 // follows the universal pair (config.h accessors).
@@ -5249,6 +5248,40 @@ namespace
     };
     Halo3VehicleTransform g_halo3VehicleTransform;
 
+    enum class Halo3NativeSeatState : uint32_t
+    {
+        Stock = 0,
+        Active,
+        StockFallback,
+    };
+
+    // C17 loaded-tag transaction. Camera-thread owned; worker-visible fields
+    // are atomics used only for transition logging. The saved values are
+    // restored on seat change/exit or when the feature is disabled.
+    struct Halo3NativeSeatPatch
+    {
+        uint32_t generation = 0;
+        uint32_t definitionIndex = 0xFFFFFFFFu;
+        int seatIndex = -1;
+        uint32_t* flags = nullptr;
+        int32_t* cameraTrackCount = nullptr;
+        uint32_t originalFlags = 0;
+        int32_t originalCameraTrackCount = 0;
+        bool active = false;
+    };
+    Halo3NativeSeatPatch g_halo3NativeSeatPatch;
+    std::atomic<uint32_t> g_halo3NativeSeatState{
+        static_cast<uint32_t>(Halo3NativeSeatState::Stock)};
+    std::atomic<uint32_t> g_halo3NativeSeatSerial{0};
+
+    struct Halo3NativeAnchorCalibration
+    {
+        uint32_t serial = 0;
+        bool valid = false;
+        float nativeLocal[3] = {0.0f, 0.0f, 0.0f};
+    };
+    Halo3NativeAnchorCalibration g_halo3NativeAnchorCalibration;
+
     // C9 vibration diagnostic. Counters are written only by the camera thread
     // and read/reset by the 50 ms worker; lastPos/lastUp never leave the
     // camera thread. Nothing here feeds behavior.
@@ -5369,8 +5402,146 @@ namespace
     std::atomic<uint32_t> g_halo3VehicleFpStable{
         static_cast<uint32_t>(Halo3VehicleState::Unknown)};
 
+    void Halo3RestoreNativeSeatPatch()
+    {
+        Halo3NativeSeatPatch& patch = g_halo3NativeSeatPatch;
+        const bool hadState = patch.active ||
+            g_halo3NativeSeatState.load(std::memory_order_relaxed) !=
+                static_cast<uint32_t>(Halo3NativeSeatState::Stock);
+        if (patch.active)
+        {
+            __try
+            {
+                const uint32_t patchedFlags = patch.originalFlags &
+                    ~kHalo3SeatThirdPersonCameraBit;
+                // Restore only values that are still ours. A concurrent engine
+                // change wins rather than being overwritten during teardown.
+                if (patch.flags && *patch.flags == patchedFlags)
+                    *patch.flags = patch.originalFlags;
+                if (patch.cameraTrackCount && *patch.cameraTrackCount == 0)
+                    *patch.cameraTrackCount = patch.originalCameraTrackCount;
+            }
+            __except (EXCEPTION_EXECUTE_HANDLER)
+            {
+                // The loaded map may already be disappearing. Feature cleanup
+                // must never disarm the working camera core.
+            }
+        }
+        patch = {};
+        g_halo3NativeAnchorCalibration = {};
+        g_halo3NativeSeatState.store(
+            static_cast<uint32_t>(Halo3NativeSeatState::Stock),
+            std::memory_order_release);
+        if (hadState)
+            g_halo3NativeSeatSerial.fetch_add(1, std::memory_order_release);
+    }
+
+    bool Halo3EnsureNativeSeatPatch(uint32_t definitionIndex, int seatIndex,
+                                    uint32_t generation)
+    {
+        Halo3NativeSeatPatch& patch = g_halo3NativeSeatPatch;
+        const bool sameSeat = patch.generation == generation &&
+            patch.definitionIndex == definitionIndex &&
+            patch.seatIndex == seatIndex;
+        if (!g_config.vehicle_first_person)
+        {
+            Halo3RestoreNativeSeatPatch();
+            return false;
+        }
+        if (sameSeat && patch.active)
+            return true;
+        if (sameSeat && g_halo3NativeSeatState.load(
+                std::memory_order_relaxed) ==
+                static_cast<uint32_t>(Halo3NativeSeatState::StockFallback))
+            return false;
+
+        Halo3RestoreNativeSeatPatch();
+        patch.generation = generation;
+        patch.definitionIndex = definitionIndex;
+        patch.seatIndex = seatIndex;
+        bool installed = false;
+        __try
+        {
+            void** instSlot = g_halo3TagInstanceTable;
+            void** baseSlot = g_halo3TagDataBase;
+            auto* instTable = instSlot
+                ? static_cast<unsigned char*>(*instSlot) : nullptr;
+            auto* tagBase = baseSlot
+                ? static_cast<unsigned char*>(*baseSlot) : nullptr;
+            if (instTable && tagBase && definitionIndex <= 0xFFFFu &&
+                seatIndex >= 0 && seatIndex <= kHalo3VehicleSeatMax)
+            {
+                const uint32_t instanceDword =
+                    *reinterpret_cast<const uint32_t*>(
+                        instTable + static_cast<size_t>(definitionIndex) * 8 + 4);
+                auto* definition = instanceDword
+                    ? tagBase + static_cast<size_t>(instanceDword) * 4 : nullptr;
+                const int32_t seatCount = definition
+                    ? *reinterpret_cast<const int32_t*>(
+                          definition + kHalo3VehicleSeatsBlockOffset)
+                    : 0;
+                const uint32_t seatsAddress = definition
+                    ? *reinterpret_cast<const uint32_t*>(
+                          definition + kHalo3VehicleSeatsBlockOffset + 4)
+                    : 0;
+                if (definition && seatCount > 0 && seatCount <= 126 &&
+                    seatIndex < seatCount && seatsAddress)
+                {
+                    auto* seat = tagBase +
+                        static_cast<size_t>(seatsAddress) * 4 +
+                        static_cast<size_t>(seatIndex) * kHalo3VehicleSeatStride;
+                    auto* flags = reinterpret_cast<uint32_t*>(seat);
+                    auto* trackCount = reinterpret_cast<int32_t*>(
+                        seat + kHalo3SeatCameraTracksBlockOffset);
+                    const uint32_t originalFlags = *flags;
+                    const int32_t originalTrackCount = *trackCount;
+                    // Every official H3 player seat has bit 4. Requiring it is
+                    // the live layout proof that keeps a bad tag walk stock.
+                    if ((originalFlags & kHalo3SeatThirdPersonCameraBit) &&
+                        originalTrackCount >= 0 && originalTrackCount <= 16)
+                    {
+                        patch.flags = flags;
+                        patch.cameraTrackCount = trackCount;
+                        patch.originalFlags = originalFlags;
+                        patch.originalCameraTrackCount = originalTrackCount;
+                        patch.active = true;
+                        *flags = originalFlags &
+                            ~kHalo3SeatThirdPersonCameraBit;
+                        *trackCount = 0;
+                        installed = *flags == (originalFlags &
+                                ~kHalo3SeatThirdPersonCameraBit) &&
+                            *trackCount == 0;
+                    }
+                }
+            }
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            installed = false;
+        }
+        if (!installed)
+        {
+            Halo3RestoreNativeSeatPatch();
+            patch.generation = generation;
+            patch.definitionIndex = definitionIndex;
+            patch.seatIndex = seatIndex;
+            g_halo3NativeSeatState.store(
+                static_cast<uint32_t>(Halo3NativeSeatState::StockFallback),
+                std::memory_order_release);
+            g_halo3NativeSeatSerial.fetch_add(1, std::memory_order_release);
+            return false;
+        }
+        g_halo3NativeAnchorCalibration = {};
+        g_halo3NativeSeatState.store(
+            static_cast<uint32_t>(Halo3NativeSeatState::Active),
+            std::memory_order_release);
+        g_halo3NativeSeatSerial.fetch_add(1, std::memory_order_release);
+        return true;
+    }
+
     void Halo3DisableVehicleProbe(const char* /*reason logged by worker*/)
     {
+        Halo3RestoreNativeSeatPatch();
         g_halo3VehicleSnapshot.store(0, std::memory_order_release);
         g_halo3VehicleFaults.fetch_add(1, std::memory_order_relaxed);
         g_halo3VehicleBinding.store(
@@ -5549,6 +5720,10 @@ namespace
 
         const bool seated = seat >= 0 && parent != -1 &&
             parentKind == kHalo3ObjectKindVehicle;
+        if (seated)
+            Halo3EnsureNativeSeatPatch(defIndex, seat, generation);
+        else
+            Halo3RestoreNativeSeatPatch();
         // Publish the vehicle transform for the authored-point camera.
         // C7: root parents publish their +0x50 frame directly; attached
         // parents (mounted turrets) compose carrier ∘ local, since their
@@ -6028,6 +6203,62 @@ namespace
         return true;
     }
 
+    // C17: keep the engine-computed seated camera as the motion parent. On the
+    // first stable native frame, measure its vehicle-local point; afterward add
+    // only the local difference to the Blender-authored point. Native motion,
+    // including render interpolation and seat/vehicle animation, passes through
+    // exactly instead of being reconstructed from the 60 Hz object sampler.
+    bool Halo3ComputeNativeParentedAnchor(const float nativeWorld[3],
+                                          float out[3], int* outTrimSlot)
+    {
+        if (g_halo3NativeSeatState.load(std::memory_order_acquire) !=
+                static_cast<uint32_t>(Halo3NativeSeatState::Active) ||
+            !nativeWorld || !out)
+            return false;
+        for (int i = 0; i < 3; ++i)
+            if (!isfinite(nativeWorld[i]))
+                return false;
+
+        Halo3SeatSnapshot seat;
+        if (!Halo3ReadSeatSnapshot(seat))
+            return false;
+        const Halo3SeatPoint* point = Halo3FindSeatPoint(
+            static_cast<Halo3VehicleId>(seat.identity), seat.seatIndex,
+            seat.mounted);
+        if (!point)
+            return false;
+        if (outTrimSlot)
+            *outTrimSlot = ConfigSeatTrimSlot(static_cast<int>(seat.identity),
+                                              seat.seatIndex, seat.mounted);
+
+        Halo3Frame frame{};
+        memcpy(frame.pos, seat.pos, sizeof(frame.pos));
+        memcpy(frame.fwd, seat.fwd, sizeof(frame.fwd));
+        memcpy(frame.up, seat.up, sizeof(frame.up));
+        Halo3NativeAnchorCalibration& calibration =
+            g_halo3NativeAnchorCalibration;
+        const uint32_t serial =
+            g_halo3NativeSeatSerial.load(std::memory_order_acquire);
+        if (!calibration.valid || calibration.serial != serial)
+        {
+            const float relative[3] = {
+                nativeWorld[0] - frame.pos[0],
+                nativeWorld[1] - frame.pos[1],
+                nativeWorld[2] - frame.pos[2]};
+            Halo3FrameUnrotate(frame, relative, calibration.nativeLocal);
+            for (int i = 0; i < 3; ++i)
+                if (!isfinite(calibration.nativeLocal[i]) ||
+                    fabsf(calibration.nativeLocal[i]) > 10.0f)
+                    return false;
+            calibration.serial = serial;
+            calibration.valid = true;
+        }
+        const float authoredLocal[3] = {point->x, point->y, point->z};
+        Halo3NativeParentedAnchor(frame, nativeWorld,
+                                  calibration.nativeLocal, authoredLocal, out);
+        return isfinite(out[0]) && isfinite(out[1]) && isfinite(out[2]);
+    }
+
     // C3 camera gate, evaluated once per camera write on the camera thread.
     // Both the debounced state (entry/exit settling) and the raw snapshot
     // (immediate frame-level staleness, generation keying, 500 ms sampler
@@ -6194,8 +6425,8 @@ namespace
     // C7 identity probe (log-only, worker thread, transition-gated by the
     // caller): resolve the seated vehicle's LOADED definition and dump the
     // §E5 discriminator fields so the values can be verified in-process
-    // before any camera keys off them. Tag data is immutable while a map is
-    // loaded (the probe only runs while seated); SEH covers unload races.
+    // before any camera keys off them. These identity fields are not part of
+    // C17's live seat transaction; SEH covers unload races.
     bool Halo3ReadDefinitionFields(uint32_t defIndex, int32_t counts[10],
                                    float jeepFields[2], int32_t* scoutSpecific,
                                    float* scoutAccel, float tails[3])
@@ -6294,6 +6525,23 @@ namespace
     // distinct probe capture, plus a one-shot StockFallback notice.
     void LogHalo3VehicleProbeIfNew()
     {
+        static uint32_t nativeSeatSerialLogged = 0;
+        const uint32_t nativeSeatSerial =
+            g_halo3NativeSeatSerial.load(std::memory_order_acquire);
+        if (nativeSeatSerial != nativeSeatSerialLogged)
+        {
+            const auto nativeState = static_cast<Halo3NativeSeatState>(
+                g_halo3NativeSeatState.load(std::memory_order_acquire));
+            if (nativeState == Halo3NativeSeatState::Active)
+                LOG("H3 native seat camera: Active; Halo owns rendered vehicle "
+                    "motion, Blender placement correction enabled");
+            else if (nativeState == Halo3NativeSeatState::StockFallback)
+                LOG("H3 native seat camera: StockFallback; loaded seat layout "
+                    "did not validate, camera core unaffected");
+            else
+                LOG("H3 native seat camera: restored stock seat fields");
+            nativeSeatSerialLogged = nativeSeatSerial;
+        }
         static bool fallbackLogged = false;
         const uint8_t binding =
             g_halo3VehicleBinding.load(std::memory_order_acquire);

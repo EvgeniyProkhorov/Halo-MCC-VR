@@ -200,6 +200,38 @@ inline void Halo3FrameRotate(const Halo3Frame& frame, const float v[3],
         out[i] = frame.fwd[i] * v[0] + left[i] * v[1] + frame.up[i] * v[2];
 }
 
+// Express a world vector in the frame's authored axes (x fwd, y left, z up).
+inline void Halo3FrameUnrotate(const Halo3Frame& frame, const float v[3],
+                               float out[3])
+{
+    float left[3];
+    Halo3FrameLeft(frame, left);
+    out[0] = frame.fwd[0] * v[0] + frame.fwd[1] * v[1] +
+        frame.fwd[2] * v[2];
+    out[1] = left[0] * v[0] + left[1] * v[1] + left[2] * v[2];
+    out[2] = frame.up[0] * v[0] + frame.up[1] * v[1] +
+        frame.up[2] * v[2];
+}
+
+// C17: the native seated camera owns all large/render-rate motion. The object
+// frame rotates only the small, fixed correction from the native seat point to
+// the user's Blender-authored point; its sampled origin is deliberately absent.
+inline void Halo3NativeParentedAnchor(const Halo3Frame& sampledFrame,
+                                      const float nativeWorld[3],
+                                      const float nativeLocal[3],
+                                      const float authoredLocal[3],
+                                      float out[3])
+{
+    const float localCorrection[3] = {
+        authoredLocal[0] - nativeLocal[0],
+        authoredLocal[1] - nativeLocal[1],
+        authoredLocal[2] - nativeLocal[2]};
+    Halo3FrameRotate(sampledFrame, localCorrection, out);
+    out[0] += nativeWorld[0];
+    out[1] += nativeWorld[1];
+    out[2] += nativeWorld[2];
+}
+
 // ---- C10: render-rate smoothing of the sampled hull frame ----------------
 // MEASURED (2026-07-31 Steam session, source b25a414): the camera hook runs at
 // 240/sec and the seated parent's +0x50/+0x5C/+0x68 change on exactly 25% of
@@ -965,6 +997,15 @@ inline constexpr uintptr_t kHalo3ScoutAccelerationOffset = 0x10;  // element
 inline constexpr uintptr_t kHalo3DefMinFlipVelocityOffset = 0x39C;
 inline constexpr uintptr_t kHalo3DefMaxFlipVelocityOffset = 0x3A0;
 inline constexpr uintptr_t kHalo3DefBlurSpeedOffset = 0x3B4;
+
+// C17 native seat-camera ownership. These are the Halo 3 cache-layout fields
+// independently described by the official H3EK seat exports and Assembly's
+// Halo3MCC vehi plugin. The runtime patches only the currently occupied loaded
+// tag, saving and restoring both values; no map file is ever changed.
+inline constexpr uintptr_t kHalo3VehicleSeatsBlockOffset = 0x258;
+inline constexpr size_t kHalo3VehicleSeatStride = 0xD4;
+inline constexpr uint32_t kHalo3SeatThirdPersonCameraBit = 1u << 4;
+inline constexpr uintptr_t kHalo3SeatCameraTracksBlockOffset = 0x80;
 
 // C8 vehicle identity. Physics type is a CLASS, not a vehicle: (1,seat 0) is
 // warthog AND mongoose, (3,seat 0) is ghost, wraith AND mauler. The C7

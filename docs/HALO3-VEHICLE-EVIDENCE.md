@@ -1267,3 +1267,45 @@ than snapping (the C12 review's finding, preserved).
 
 The 10-second log line now carries `blend N.NN`. Above 1.00 the seat is being
 extrapolated; pinned exactly at 1.00 while driving is this defect returning.
+
+## C17 — native seat ownership replaces object-sampler camera motion
+
+The C16 headset report rejected the architecture, not another interpolation
+constant: the player felt the car and camera alternately catching up and wanted
+the natural bounce of being inside the rendered vehicle. The attached Nexus
+mod archive (`Halo 3 first person warthog run-544-1-0-1615062444 (1).zip`,
+SHA-256 `9BA49F10BD44BE88AF917C991A9F6F273A1A5A00637804B9032FD8F49BF34E5F`)
+contains only a replacement `120_halo.map`. It is from an older MCC cache build,
+so a whole-file binary diff against the current stock map is not valid evidence.
+
+The relevant method is independently bounded by two readable sources:
+
+- Official H3EK exports already recorded in E1 prove every stock player seat
+  sets seat flag bit 4, `third person camera`, and that seat camera markers are
+  optional.
+- Assembly's open-source `Formats/Engines/Halo3MCC/Plugins/vehi.xml` describes
+  the MCC cache layout used by map mods: the vehicle seats block is at `0x258`,
+  each seat is `0xD4` bytes, flags are at seat `+0x00`, and the camera-tracks
+  block is at seat `+0x80`. This layout agrees with the E1 field ordering and
+  flag values rather than supplying semantics of its own.
+
+C17 applies that map-mod method only to the currently occupied loaded tag:
+clear bit 4 and temporarily zero the seat camera-track count. Both original
+values are saved and restored on seat exit, seat change, or feature disable;
+the map on disk is never touched. Counts, indices, pointers, the expected bit,
+and post-write values are validated under SEH. Any mismatch is a loud
+`StockFallback` for this feature only and leaves the Halo 3 camera core armed.
+
+Most importantly, the engine-computed native seated camera position is now the
+motion parent. It supplies translation, suspension/occupant bounce and MCC's
+render-rate hierarchy directly. On the first stable native frame C17 measures
+that point in vehicle-local coordinates, then applies only the fixed local
+difference to the existing Blender-authored point. The sampled object origin is
+not used in the camera result; the sampled basis rotates only that small
+placement correction and continues to serve seat identity/yaw behavior.
+
+The pure regression proves two invariants: initial calibration lands exactly on
+the Blender point, and any later native-camera translation passes through to the
+final anchor exactly while the sampled object frame remains unchanged.
+
+Status: implemented, build/test and headset acceptance pending.
