@@ -712,7 +712,7 @@ namespace
         ImGui::TextDisabled(
             "OFF restores the stock behind-the-vehicle view instantly.");
         ImGui::Spacing();
-        // C13: the same two sliders always, bound to whichever SEAT is under
+        // C19: the same three sliders always, bound to whichever SEAT is under
         // you — driver, passenger and gunner of the same vehicle are all
         // independent. Seated, they edit THAT seat's own trim (created on
         // first touch, saved to the config, reloaded whenever you sit there
@@ -741,7 +741,8 @@ namespace
             ImGui::Text("Adjusting: every seat (universal trim)");
         float seatFwd = ConfigSeatCamForward(g_config, seatSlot);
         if (ImGui::SliderFloat("Seat forward (m)", &seatFwd,
-                               -0.50f, 1.00f, "%.2f"))
+                               kVehicleCamForwardMin,
+                               kVehicleCamForwardMax, "%.2f"))
         {
             if (perSeat)
             {
@@ -754,7 +755,7 @@ namespace
         }
         float seatUp = ConfigSeatCamUp(g_config, seatSlot);
         if (ImGui::SliderFloat("Seat height (m)", &seatUp,
-                               -0.50f, 1.00f, "%.2f"))
+                               kVehicleCamUpMin, kVehicleCamUpMax, "%.2f"))
         {
             if (perSeat)
             {
@@ -765,13 +766,29 @@ namespace
                 g_config.vehicle_cam_up_m = seatUp;
             changed = true;
         }
+        float seatRight = ConfigSeatCamRight(g_config, seatSlot);
+        if (ImGui::SliderFloat("Seat left / right (m)", &seatRight,
+                               kVehicleCamRightMin,
+                               kVehicleCamRightMax, "%.2f"))
+        {
+            if (perSeat)
+            {
+                g_config.vehicle_cam_right_v[seatSlot] = seatRight;
+                g_config.vehicle_cam_right_set[seatSlot] = true;
+            }
+            else
+                g_config.vehicle_cam_right_m = seatRight;
+            changed = true;
+        }
         if (perSeat && (g_config.vehicle_cam_forward_set[seatSlot] ||
-                        g_config.vehicle_cam_up_set[seatSlot]))
+                        g_config.vehicle_cam_up_set[seatSlot] ||
+                        g_config.vehicle_cam_right_set[seatSlot]))
         {
             if (ImGui::SmallButton("Back to the universal trim##seattrim"))
             {
                 g_config.vehicle_cam_forward_set[seatSlot] = false;
                 g_config.vehicle_cam_up_set[seatSlot] = false;
+                g_config.vehicle_cam_right_set[seatSlot] = false;
                 changed = true;
             }
         }
@@ -780,16 +797,16 @@ namespace
             "a vehicle's driver, passengers and gunner each remember their\n"
             "own. On foot they set the shared base every unadjusted seat\n"
             "follows. The base is your Blender-authored point for that seat;\n"
-            "vehicle and occupant motion are parented around that baseline.");
+            "vehicle and occupant motion are parented around that baseline.\n"
+            "Left/right: negative moves left, positive moves right.");
         ImGui::Spacing();
         ImGui::Separator();
         ImGui::Text("Turning with the vehicle");
-        changed |= ImGui::SliderFloat("View follows the vehicle",
-            &g_config.vehicle_view_follow, 0.00f, 1.00f, "%.2f");
+        changed |= ImGui::Checkbox("View follows the vehicle",
+                                   &g_config.vehicle_view_follow);
         ImGui::TextDisabled(
-            "1 = you turn with the vehicle like a real driver. 0 = the view\n"
-            "stays locked to the world and every control goes back to exactly\n"
-            "what it was before this feature.");
+            "ON (default) turns with the vehicle through hard impacts and\n"
+            "spins. OFF keeps the view locked to the world.");
         changed |= ImGui::Checkbox("Match the rendered vehicle motion",
                                    &g_config.vehicle_cam_smoothing);
         ImGui::TextDisabled(

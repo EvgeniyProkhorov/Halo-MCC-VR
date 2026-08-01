@@ -1070,18 +1070,12 @@ struct Halo3SeatYaw
 
 // A hull heading needs a horizontal forward to exist at all. A Banshee pulled
 // through the vertical has none, and atan2 of a near-zero pair swings wildly,
-// so the follow re-references there instead of accumulating that swing.
+// so the follow holds the last valid heading until a usable sample returns.
 inline constexpr float kHalo3SeatYawMinHorizontal = 0.25f;
-// Ceiling on one frame's hull rotation. Halo 3's fastest authored turn rate is
-// 9.4 rad/s (540 deg/s), which is 0.16 rad even across a whole 60 Hz sim tick,
-// so anything past this is a teleport, respawn or seat swap — never steering.
-inline constexpr float kHalo3SeatYawMaxStep = 0.60f;
-
 // fwd = the seated parent's measured world forward (the CARRIER's for a mounted
-// gunner). active = the FP seat camera owns the view this frame; a stale, torn
-// or unproven transform must pass false, which re-references on the next entry.
-// weight = vehicle_view_follow, 0 = the world-locked view Alpha 0.3.1 shipped,
-// 1 = welded to the hull.
+// gunner). active means the same concrete FP seat owns the view. The caller
+// keys that identity and skips torn/missing samples, so the next valid heading
+// catches up from the last valid one instead of losing rotation.
 //
 // Returns this frame's yaw step to fold into the shared view/aim reference —
 // a delta, not a total. Rebasing the one reference every consumer already
@@ -1093,22 +1087,22 @@ inline constexpr float kHalo3SeatYawMaxStep = 0.60f;
 // reference follows the hull, the closed loop's error stops depending on the
 // hull's heading and a fixed hand offset becomes a constant turn RATE.
 inline float Halo3SeatYawDelta(Halo3SeatYaw& state, const float fwd[3],
-                               bool active, float weight)
+                               bool active)
 {
-    if (!active || !std::isfinite(weight) || !std::isfinite(fwd[0]) ||
-        !std::isfinite(fwd[1]))
+    if (!active)
     {
         state.armed = false;
         state.total = 0.0f;
         return 0.0f;
     }
+    // Preserve the last valid heading across a bad/vertical sample. Resetting
+    // here permanently lost whatever turn occurred before the next good frame.
+    if (!std::isfinite(fwd[0]) || !std::isfinite(fwd[1]))
+        return 0.0f;
     const float horizontal =
         std::sqrt(fwd[0] * fwd[0] + fwd[1] * fwd[1]);
     if (horizontal < kHalo3SeatYawMinHorizontal)
-    {
-        state.armed = false;
         return 0.0f;
-    }
     const float yaw = std::atan2(fwd[1], fwd[0]);
     if (!state.armed)
     {
@@ -1119,12 +1113,11 @@ inline float Halo3SeatYawDelta(Halo3SeatYaw& state, const float fwd[3],
     }
     const float step = Halo3WrapPi(yaw - state.lastYaw);
     state.lastYaw = yaw;
-    if (std::fabs(step) > kHalo3SeatYawMaxStep)
-        return 0.0f;
-    const float w = weight < 0.0f ? 0.0f : (weight > 1.0f ? 1.0f : weight);
-    const float delta = step * w;
-    state.total = Halo3WrapPi(state.total + delta);
-    return delta;
+    // A hard collision or spin can exceed the old 0.60-radian cap in one
+    // sample. Concrete seat identity now rejects seat swaps/teleports, so every
+    // finite wrapped step within that identity is real vehicle motion.
+    state.total = Halo3WrapPi(state.total + step);
+    return step;
 }
 
 
@@ -1499,15 +1492,14 @@ inline constexpr bool Halo3SeatFollowsHull(Halo3VehicleId id, int seatIndex,
 
 // The one gate that hands a seat's steering to the wheel/stick author instead
 // of the closed-loop hand aim. It must switch on exactly the same condition
-// that makes the view follow the hull, which is why the follow weight is an
-// argument: at weight 0 nothing rotates, the closed loop still has its
+// that makes the view follow the hull, which is why the follow toggle is an
+// argument: when off nothing rotates, the closed loop still has its
 // feedback, and every control stays exactly as Alpha 0.3.1 shipped it.
 inline constexpr bool Halo3SeatAuthorsSteering(Halo3VehicleId id, int seatIndex,
                                                bool mountedTurret,
-                                               float followWeight)
+                                               bool followEnabled)
 {
-    return followWeight > 0.01f && Halo3SeatIsDriver(id, seatIndex,
-                                                     mountedTurret) &&
+    return followEnabled && Halo3SeatIsDriver(id, seatIndex, mountedTurret) &&
         Halo3VehicleIsLookSteered(id);
 }
 

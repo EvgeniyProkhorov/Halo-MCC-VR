@@ -1529,3 +1529,51 @@ the explicit smoothing-off raw-node A/B remains available.
 **Status: C18 DESIGN/CANDIDATE ONLY - NOT HEADSET ACCEPTED.** It must not advance
 `docs/CURRENT-STATE.md` until the user accepts the exact packaged DLL in the
 headset. The accepted-build pointer remains unchanged.
+
+## C18 headset result and C19 exact-follow controls - 2026-08-01
+
+Candidate `9df5ec3`, DLL SHA-256
+`8B2D2616F9B0CB5400C43350C4BC366B3F8A41FE541AB00B972650B79646F640`,
+was tested in the Steam edition on SteamVR/OpenXR 2.17.6, reported headset
+`SteamVR/OpenXR : oculus`, at 120 Hz. The preserved live log has SHA-256
+`8C1AEB40DC84CC5BF3BF85C179C51BEEC012B553FD6ABD2A56A58466CF3B6B87`.
+It reports the rendered-node path on every sampled frame, zero anchor
+fallbacks, and long settled runs with occupant-head parenting. The user
+explicitly confirmed that the vibrating/incorrect vehicle mesh behavior is
+gone. This is positive headset evidence for retaining C18's rendered-node
+placement path.
+
+The same test rejected the remaining turning behavior: after a hard collision
+or spin, the view can remain rotationally offset from the vehicle. The run had
+`view follow 1.00`, so fractional weighting is not a sufficient explanation
+for this result. Static inspection identifies a direct loss mechanism in the
+active path: `Halo3SeatYawDelta` updated `lastYaw` but returned zero for any
+single sample above 0.60 radians. That rotation could never be recovered, so
+the shared view reference permanently lagged the car by the discarded angle.
+A transient invalid/near-vertical sample also disarmed the accumulator and
+lost the angle traversed before the next valid sample.
+
+C19 makes follow an ON/OFF control, ON by default. It retains compatibility
+with existing configs: every finite old non-zero value, including 0.82,
+loads as ON; zero loads as OFF; saving writes 1 or 0. ON consumes every finite
+wrapped heading change from the same concrete
+`(runtime generation, parent handle, seat index, vehicle identity, mounted)`
+seat. That same key, rather than angular magnitude, separates a seat/vehicle
+switch from a violent rotation of the current car. Missing, torn, invalid or
+near-vertical samples retain the last valid heading so the next valid sample
+catches up. OFF clears the yaw ownership and preserves the prior world-locked
+behavior.
+
+C19 also adds a third per-seat placement axis without changing the C18 parent.
+`vehicle_cam_right_m` and
+`vehicle_cam_right_m_<vehicle>_<seat>` use positive values toward the
+vehicle's right (negative tag-left); they are added to the Blender point before
+the stored-default-inverse -> live-rendered-node transform. Forward, height and
+right therefore remain tag-space placement coordinates and cannot slide
+against the mesh as the vehicle turns or banks. The F1 sliders remain bound to
+the concrete current seat. Forward and height ranges expand from -0.5..1.0 m
+to -1.0..1.5 m; lateral range is -1.0..1.0 m.
+
+**Status: C18 rendered-node mesh behavior HEADSET CONFIRMED; C19 candidate
+changes NOT YET HEADSET ACCEPTED.** The accepted-build pointer remains
+unchanged pending the exact packaged C19 headset result.

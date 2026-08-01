@@ -3981,6 +3981,7 @@ int main()
         "cutscene_theater_distance_m",
         "turn_smooth", "turn_snap_deg", "turn_smooth_deg_s", "dpad_hand",
         "vehicle_first_person", "vehicle_cam_forward_m", "vehicle_cam_up_m",
+        "vehicle_cam_right_m",
         "vehicle_view_follow", "vehicle_cam_smoothing",
         "vehicle_motion", "vehicle_wheel_max_deg",
         "vehicle_wheel_deadzone_deg",
@@ -4012,6 +4013,9 @@ int main()
         file << "haptic_intensity = 2.0\n";
         file << "headset_smoothing = 1.0\n";
         file << "aim_stabilization = -1.0\n";
+        file << "vehicle_cam_forward_m = -9.0\n";
+        file << "vehicle_cam_up_m = 9.0\n";
+        file << "vehicle_cam_right_m = 9.0\n";
         file << "aa_mode = 4\n";
     }
     ConfigLoad(primary.c_str());
@@ -4019,6 +4023,10 @@ int main()
     Check(g_config.headset_smoothing == 0.10f,
         "Headset smoothing is capped at the low-latency maximum");
     Check(g_config.aim_stabilization == 0.0f, "Aim stabilization is safely clamped");
+    Check(g_config.vehicle_cam_forward_m == kVehicleCamForwardMin &&
+              g_config.vehicle_cam_up_m == kVehicleCamUpMax &&
+              g_config.vehicle_cam_right_m == kVehicleCamRightMax,
+        "Vehicle forward, height and lateral trims use the expanded safe ranges");
     Check(g_config.aa_mode == 4,
         "SMAA 1x plus FXAA Strong survives config loading");
     Check(g_config.cutscene_theater_enabled &&
@@ -4039,12 +4047,15 @@ int main()
         file << "config_version = 5\n";
         file << "vehicle_cam_forward_m = 0.20\n";
         file << "vehicle_cam_up_m = -0.10\n";
+        file << "vehicle_cam_right_m = 0.12\n";
         file << "vehicle_cam_forward_m_warthog_driver = 0.44\n";
         file << "vehicle_cam_up_m_warthog_gunner = 0.31\n";
+        file << "vehicle_cam_right_m_warthog_passenger = -0.27\n";
         file << "vehicle_cam_up_m_hornet_passenger2 = 0.33\n";
         file << "vehicle_cam_forward_m_gondola_driver = 9.0\n";
         file << "vehicle_cam_forward_m_ghost_navigator = 9.0\n";
         file << "vehicle_cam_up_m_ghost_driver = broken\n";
+        file << "vehicle_view_follow = 0.82\n";
         file << "vehicle_cam_lead = 0.50\n";
     }
     ConfigLoad(primary.c_str());
@@ -4074,31 +4085,49 @@ int main()
               ConfigSeatCamUp(g_config, hogDriver) == -0.10f &&
               ConfigSeatCamUp(g_config, hornetSeat2) == 0.33f &&
               ConfigSeatCamUp(g_config, ghostDriver) == -0.10f &&
-              ConfigSeatCamForward(g_config, -1) == 0.20f,
+              ConfigSeatCamForward(g_config, -1) == 0.20f &&
+              ConfigSeatCamRight(g_config, hogPassenger) == -0.27f &&
+              ConfigSeatCamRight(g_config, hogDriver) == 0.12f &&
+              ConfigSeatCamRight(g_config, -1) == 0.12f &&
+              g_config.vehicle_view_follow,
         "A seat overrides exactly the axis written for it; the same "
         "vehicle's other seats, and every unset axis, follow the universal "
-        "trim");
+        "trim; a legacy non-zero follow fraction migrates to ON");
     ConfigSave();
     const std::string perSeatConfig = ReadTextFile(primary);
     Check(CountText(perSeatConfig, "\nvehicle_cam_forward_m_warthog_driver = ") == 1 &&
               CountText(perSeatConfig, "\nvehicle_cam_up_m_warthog_gunner = ") == 1 &&
               CountText(perSeatConfig, "\nvehicle_cam_up_m_hornet_passenger2 = ") == 1 &&
+              CountText(perSeatConfig, "\nvehicle_cam_right_m_warthog_passenger = ") == 1 &&
               CountText(perSeatConfig, "vehicle_cam_up_m_warthog_driver") == 0 &&
+              CountText(perSeatConfig, "vehicle_cam_right_m_warthog_driver") == 0 &&
               CountText(perSeatConfig, "vehicle_cam_forward_m_warthog_gunner") == 0 &&
               CountText(perSeatConfig, "\nvehicle_cam_up_m_ghost_driver") == 0 &&
               CountText(perSeatConfig, "gondola") == 0 &&
               CountText(perSeatConfig, "navigator") == 0 &&
-              CountText(perSeatConfig, "vehicle_cam_lead") == 0,
+              CountText(perSeatConfig, "vehicle_cam_lead") == 0 &&
+              CountText(perSeatConfig, "\nvehicle_view_follow = 1") == 1,
         "Saving writes a per-seat line only for overrides that exist, drops "
         "unknown vehicle and seat names and malformed values, and retires "
         "vehicle_cam_lead");
     ConfigLoad(primary.c_str());
     Check(ConfigSeatCamForward(g_config, hogDriver) == 0.44f &&
               ConfigSeatCamUp(g_config, hogGunner) == 0.31f &&
+              ConfigSeatCamRight(g_config, hogPassenger) == -0.27f &&
               ConfigSeatCamUp(g_config, hornetSeat2) == 0.33f &&
               !g_config.vehicle_cam_up_set[hogDriver] &&
-              !g_config.vehicle_cam_forward_set[hogGunner],
+              !g_config.vehicle_cam_forward_set[hogGunner] &&
+              !g_config.vehicle_cam_right_set[hogDriver] &&
+              g_config.vehicle_view_follow,
         "Per-seat trim overrides survive a save/load round trip");
+    {
+        std::ofstream file(primary);
+        file << "config_version = 5\n";
+        file << "vehicle_view_follow = 0\n";
+    }
+    ConfigLoad(primary.c_str());
+    Check(!g_config.vehicle_view_follow,
+        "The vehicle-follow toggle can still select the world-locked view");
     // A C12-era whole-vehicle key means every seat of that vehicle. These are
     // the user's OWN tuned lines, copied from their live halomccvr.cfg on
     // 2026-07-31 — six vehicles they had already trimmed by hand before the
@@ -5264,7 +5293,7 @@ int main()
             hogInverse.position[1] = 7.03e-10f;
             hogInverse.position[2] = -0.42f;
             const float hogAdjustedPoint[3] = {
-                0.0299f + 0.0328084f, 0.1683f,
+                0.0299f + 0.0328084f, 0.1683f - 0.0492126f,
                 0.6663f + 0.0164042f};
             float hogRestAnchor[3] = {};
             const bool actualTagFixture = Halo3ComputeNodeAnchoredPoint(
@@ -5576,7 +5605,7 @@ int main()
                     const double a = 6.283185307 * i / steps;
                     fwd[0] = static_cast<float>(std::cos(a));
                     fwd[1] = static_cast<float>(std::sin(a));
-                    total += Halo3SeatYawDelta(yaw, fwd, true, 1.0f);
+                    total += Halo3SeatYawDelta(yaw, fwd, true);
                 }
                 Check(std::fabs(total - 6.283185307) < 1e-3,
                     "A full circle folds exactly one full turn into the view "
@@ -5644,21 +5673,21 @@ int main()
             Halo3SeatYaw seat;
             hullFwd(1.0f, fwd);
             const bool idleZero =
-                Halo3SeatYawDelta(seat, fwd, false, 1.0f) == 0.0f &&
+                Halo3SeatYawDelta(seat, fwd, false) == 0.0f &&
                 !seat.armed;
             // Sitting down at heading 1.0 rad: this heading is straight ahead.
             const bool entryZero =
-                Halo3SeatYawDelta(seat, fwd, true, 1.0f) == 0.0f && seat.armed;
+                Halo3SeatYawDelta(seat, fwd, true) == 0.0f && seat.armed;
             // Hull swings 20 deg left -> the view follows by exactly that.
             hullFwd(1.0f + 0.34906585f, fwd);
             const bool followsHull = std::fabs(
-                Halo3SeatYawDelta(seat, fwd, true, 1.0f) - 0.34906585f) < 1e-4f;
+                Halo3SeatYawDelta(seat, fwd, true) - 0.34906585f) < 1e-4f;
             // Getting out re-references: sitting in a car facing the other way
             // must read straight ahead again, not 180 degrees out.
-            Halo3SeatYawDelta(seat, fwd, false, 1.0f);
+            Halo3SeatYawDelta(seat, fwd, false);
             hullFwd(-2.5f, fwd);
             const bool reentryZero = !seat.armed &&
-                Halo3SeatYawDelta(seat, fwd, true, 1.0f) == 0.0f;
+                Halo3SeatYawDelta(seat, fwd, true) == 0.0f;
 
             // Two full left turns at full weight, three degrees at a time: the
             // steps sum to the hull's whole rotation and none of them is a
@@ -5666,81 +5695,81 @@ int main()
             // would snap by 2*pi*weight every time the hull passed +/-pi.
             Halo3SeatYaw spin;
             hullFwd(0.0f, fwd);
-            Halo3SeatYawDelta(spin, fwd, true, 1.0f);
+            Halo3SeatYawDelta(spin, fwd, true);
             bool fullOk = true;
             double sum = 0.0;
             for (int i = 1; i <= 240; ++i)
             {
                 hullFwd(Halo3WrapPi(static_cast<float>(i) * 0.05236f), fwd);
-                const float step = Halo3SeatYawDelta(spin, fwd, true, 1.0f);
+                const float step = Halo3SeatYawDelta(spin, fwd, true);
                 if (std::fabs(step) > 0.1f)
                     fullOk = false;
                 sum += step;
             }
             fullOk = fullOk && std::fabs(sum - 240.0 * 0.05236) < 1e-2;
-            // Half weight over the same two turns is exactly half the view
-            // rotation, still with no discontinuity.
-            Halo3SeatYaw half;
-            hullFwd(0.0f, fwd);
-            Halo3SeatYawDelta(half, fwd, true, 0.5f);
-            bool halfOk = true;
-            double halfSum = 0.0;
-            for (int i = 1; i <= 240; ++i)
-            {
-                hullFwd(Halo3WrapPi(static_cast<float>(i) * 0.05236f), fwd);
-                const float step = Halo3SeatYawDelta(half, fwd, true, 0.5f);
-                if (std::fabs(step) > 0.1f)
-                    halfOk = false;
-                halfSum += step;
-            }
-            halfOk = halfOk && std::fabs(halfSum - 120.0 * 0.05236) < 1e-2;
-
-            // Zero weight is exactly the world-locked view Alpha 0.3.1
-            // shipped, and it is also what turns the steering author off.
+            // Toggle-off is represented by the caller making the transaction
+            // inactive. It clears the old reference, so turning it back on in
+            // the current seat establishes a fresh zero without a snap.
             Halo3SeatYaw off;
             hullFwd(0.0f, fwd);
-            Halo3SeatYawDelta(off, fwd, true, 0.0f);
+            Halo3SeatYawDelta(off, fwd, true);
             hullFwd(0.3f, fwd);
-            const bool weightZero =
-                Halo3SeatYawDelta(off, fwd, true, 0.0f) == 0.0f;
+            const bool toggleOff =
+                Halo3SeatYawDelta(off, fwd, false) == 0.0f && !off.armed &&
+                Halo3SeatYawDelta(off, fwd, true) == 0.0f && off.armed;
 
-            // A respawn, teleport or seat swap arrives as an impossible
-            // one-frame rotation. It must move the view by nothing and
-            // re-reference, so the next real step is still correct.
-            Halo3SeatYaw jump;
+            // This is the user-reported collision/spin regression. A legitimate
+            // same-car 2.6-rad step must be consumed in full; the old 0.60-rad
+            // cap discarded it and left the car permanently rotated under the
+            // view. A concrete seat switch is reset explicitly instead.
+            Halo3SeatYaw collision;
             hullFwd(0.0f, fwd);
-            Halo3SeatYawDelta(jump, fwd, true, 1.0f);
+            Halo3SeatYawDelta(collision, fwd, true);
             hullFwd(2.6f, fwd);
-            const bool jumpRejected =
-                Halo3SeatYawDelta(jump, fwd, true, 1.0f) == 0.0f;
+            const bool collisionFollowed = std::fabs(
+                Halo3SeatYawDelta(collision, fwd, true) - 2.6f) < 1e-4f;
             hullFwd(2.7f, fwd);
-            const bool recoversAfterJump = std::fabs(
-                Halo3SeatYawDelta(jump, fwd, true, 1.0f) - 0.1f) < 1e-4f;
+            const bool continuesAfterCollision = std::fabs(
+                Halo3SeatYawDelta(collision, fwd, true) - 0.1f) < 1e-4f;
+            Halo3SeatYaw switched;
+            hullFwd(0.0f, fwd);
+            Halo3SeatYawDelta(switched, fwd, true);
+            Halo3SeatYawDelta(switched, fwd, false);
+            hullFwd(2.6f, fwd);
+            const bool seatSwitchRearmed =
+                Halo3SeatYawDelta(switched, fwd, true) == 0.0f;
 
             // A Banshee pulled through the vertical has no heading at all;
-            // a near-degenerate atan2 there would whip the view around.
+            // hold the last valid yaw, then catch up when heading exists again.
             Halo3SeatYaw vertical;
             hullFwd(0.0f, fwd);
-            Halo3SeatYawDelta(vertical, fwd, true, 1.0f);
+            Halo3SeatYawDelta(vertical, fwd, true);
             float nose[3] = {0.02f, 0.0f, 0.9998f};
             const bool verticalHeld =
-                Halo3SeatYawDelta(vertical, nose, true, 1.0f) == 0.0f &&
-                !vertical.armed;
+                Halo3SeatYawDelta(vertical, nose, true) == 0.0f &&
+                vertical.armed;
+            hullFwd(0.9f, fwd);
+            const bool verticalCaughtUp = std::fabs(
+                Halo3SeatYawDelta(vertical, fwd, true) - 0.9f) < 1e-4f;
 
             Halo3SeatYaw junk;
             hullFwd(0.0f, fwd);
-            Halo3SeatYawDelta(junk, fwd, true, 1.0f);
+            Halo3SeatYawDelta(junk, fwd, true);
             float bad[3] = {std::nanf(""), 0.0f, 0.0f};
             const bool junkSafe =
-                Halo3SeatYawDelta(junk, bad, true, 1.0f) == 0.0f &&
-                !junk.armed;
+                Halo3SeatYawDelta(junk, bad, true) == 0.0f && junk.armed;
+            hullFwd(0.5f, fwd);
+            const bool junkCaughtUp = std::fabs(
+                Halo3SeatYawDelta(junk, fwd, true) - 0.5f) < 1e-4f;
 
             Check(idleZero && entryZero && followsHull && reentryZero &&
-                  fullOk && halfOk && weightZero && jumpRejected &&
-                  recoversAfterJump && verticalHeld && junkSafe,
-                "Seat yaw turns the view with the hull by whole-rotation "
-                "steps, re-references on entry, and refuses jumps and "
-                "degenerate headings");
+                  fullOk && toggleOff && collisionFollowed &&
+                  continuesAfterCollision && seatSwitchRearmed &&
+                  verticalHeld && verticalCaughtUp && junkSafe &&
+                  junkCaughtUp,
+                "Seat yaw follows every same-car collision/spin step, resets "
+                "only at an explicit ownership boundary, and catches up after "
+                "invalid or degenerate samples");
         }
 
         // C9 steering ownership. The seat that authors steering must be
@@ -5777,19 +5806,19 @@ int main()
                 !Halo3VehicleUsesWheel(Halo3VehicleId::Scorpion);
             const bool gate =
                 Halo3SeatAuthorsSteering(Halo3VehicleId::Warthog, 0, false,
-                                         1.0f) &&
+                                         true) &&
                 Halo3SeatAuthorsSteering(Halo3VehicleId::Banshee, 0, false,
-                                         0.5f) &&
+                                         true) &&
                 // Follow off -> the closed loop still has its feedback, so
                 // every control stays exactly as it shipped.
                 !Halo3SeatAuthorsSteering(Halo3VehicleId::Warthog, 0, false,
-                                          0.0f) &&
+                                           false) &&
                 !Halo3SeatAuthorsSteering(Halo3VehicleId::Scorpion, 0, false,
-                                          1.0f) &&
+                                           true) &&
                 !Halo3SeatAuthorsSteering(Halo3VehicleId::Warthog, 1, false,
-                                          1.0f) &&
+                                           true) &&
                 !Halo3SeatAuthorsSteering(Halo3VehicleId::Warthog, 0, true,
-                                          1.0f);
+                                           true);
             // The follow itself must never reach a seat whose aim channel
             // turns the very frame being followed while nothing replaces that
             // loop. A walk-up turret is published in its OWN object frame, so

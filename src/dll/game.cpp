@@ -5501,6 +5501,7 @@ namespace
         uint32_t generation, int nodeObjectHandle,
         uint32_t nodeDefinitionIndex, int nodeIndex, Halo3VehicleId vehicleId,
         int seatIndex, bool mounted, float trimForward, float trimUp,
+        float trimRight,
         float outNodeLocal[3])
     {
         Halo3SeatNodeCache& cache = g_halo3SeatNodeCache;
@@ -5510,7 +5511,9 @@ namespace
             if (!point || !cache.valid)
                 return false;
             const float authored[3] = {
-                point->x + trimForward, point->y, point->z + trimUp};
+                point->x + trimForward,
+                point->y - trimRight,
+                point->z + trimUp};
             return Halo3MatrixTransformPoint(
                 cache.defaultInverse, authored, outNodeLocal);
         };
@@ -6255,8 +6258,9 @@ namespace
                     mountedTurret ? carrierDefIndex : defIndex;
                 const int nodeIndex =
                     mountedTurret ? directParentNode : unitParentNode;
-                // Forward means toward the windshield and up means out of the
-                // seat. They are placement coordinates in vehicle/tag space,
+                // Forward means toward the windshield, up means out of the
+                // seat, and right is the negative tag-left axis. They are
+                // placement coordinates in vehicle/tag space,
                 // so they must go through the same live node as the Blender
                 // point; applying them later in HMD/world axes would slide a
                 // tuned camera against the mesh while turning or banking.
@@ -6267,6 +6271,8 @@ namespace
                     ConfigSeatCamForward(g_config, trimSlot) * trimScale;
                 const float trimUp =
                     ConfigSeatCamUp(g_config, trimSlot) * trimScale;
+                const float trimRight =
+                    ConfigSeatCamRight(g_config, trimSlot) * trimScale;
 
                 Halo3Frame meshFrame = world;
                 Halo3Matrix4x3 liveNode{};
@@ -6280,7 +6286,7 @@ namespace
                     Halo3ResolveAuthoredNodeLocal(
                         generation, nodeObject, nodeDefinition, nodeIndex,
                         anchorId, seat, mountedTurret, trimForward, trimUp,
-                        authoredNodeLocal) &&
+                        trimRight, authoredNodeLocal) &&
                     Halo3ReadLiveNodeMatrix(
                         nodeObject, nodeObjectData, nodeIndex, liveNode,
                         nodeInterpolated);
@@ -6530,7 +6536,7 @@ namespace
                 (g_halo3VehicleFpDebounce.stable == Halo3VehicleState::Vehicle ||
                  previousStable == Halo3VehicleState::Vehicle))
             {
-                if (g_config.vehicle_view_follow > 0.01f)
+                if (g_config.vehicle_view_follow)
                 {
                     // C10: a plain recenter takes its heading from the ENGINE
                     // camera, which at seat entry is mid-swing around the
@@ -6840,7 +6846,7 @@ namespace
             haveAuthoredSeat &&
             Halo3SeatFollowsHull(static_cast<Halo3VehicleId>(seat.identity),
                                  seat.seatIndex, seat.mounted);
-        const float weight = g_config.vehicle_view_follow;
+        const bool followEnabled = g_config.vehicle_view_follow;
 
         // Position-neutral and yaw-neutral are different transactions. Every
         // concrete authored seat gets a fresh OpenXR position zero exactly once,
@@ -6848,12 +6854,25 @@ namespace
         // turret whose yaw intentionally does not follow. A torn/missing frame
         // leaves the last key intact, so it cannot re-zero a player's lean.
         static Halo3SeatPositionKey positionSeat;
+        // Yaw uses the same concrete identity boundary. Unlike the old
+        // magnitude cap, this distinguishes a real seat/vehicle switch from a
+        // violent rotation of the same car.
+        static Halo3SeatPositionKey yawSeat;
         const bool positionGateStable =
             g_config.vehicle_first_person &&
             g_halo3VehicleFpStable.load(std::memory_order_relaxed) ==
                 static_cast<uint32_t>(Halo3VehicleState::Vehicle);
         if (!positionGateStable)
+        {
             positionSeat = {};
+            yawSeat = {};
+            g_halo3SeatYaw = {};
+        }
+        else if (!followEnabled)
+        {
+            yawSeat = {};
+            g_halo3SeatYaw = {};
+        }
         if (haveAuthoredSeat)
         {
             const uint32_t generation =
@@ -6899,7 +6918,7 @@ namespace
             {
                 g_halo3SeatEntryMs.store(0, std::memory_order_relaxed);
             }
-            else if (active && VR_GetHeadPose(hq, hp))
+            else if (followEnabled && active && VR_GetHeadPose(hq, hp))
             {
                 if (nowMs - lastEntryAlignMs > 1500)
                 {
@@ -6916,20 +6935,35 @@ namespace
             }
         }
 
-        // C18: feed the same rendered seat/attachment-node forward used by the
-        // anchor. The follow integrates every heading step, so a synthetic
-        // predictor or a different frame would accumulate as visible drift.
-        const float delta =
-            Halo3SeatYawDelta(g_halo3SeatYaw, seat.rawFwd, active, weight);
-        if (delta != 0.0f)
-            g_gameYawRef = WrapPi(g_gameYawRef + delta);
+        // C19: full follow consumes every wrapped heading change from the same
+        // concrete seat, including collision/spin steps above the old 0.60-rad
+        // cutoff. A torn/missing frame keeps the identity and last valid yaw,
+        // so the next valid sample catches up instead of accumulating drift.
+        const bool followActive = followEnabled && active;
+        if (followActive)
+        {
+            const uint32_t generation =
+                g_halo3RuntimeGeneration.load(std::memory_order_relaxed);
+            if (!yawSeat.Matches(
+                    generation, seat.parentHandle, seat.seatIndex,
+                    seat.identity, seat.mounted))
+            {
+                yawSeat.Set(generation, seat.parentHandle, seat.seatIndex,
+                            seat.identity, seat.mounted);
+                g_halo3SeatYaw = {};
+            }
+            const float delta =
+                Halo3SeatYawDelta(g_halo3SeatYaw, seat.rawFwd, true);
+            if (delta != 0.0f)
+                g_gameYawRef = WrapPi(g_gameYawRef + delta);
+        }
         g_halo3SeatYawTotal.store(g_halo3SeatYaw.total,
                                   std::memory_order_relaxed);
         // Steering ownership switches on exactly the condition that removes
         // the closed loop's feedback, so the two can never be out of step.
-        const bool authors = active && Halo3SeatAuthorsSteering(
+        const bool authors = followActive && Halo3SeatAuthorsSteering(
             static_cast<Halo3VehicleId>(seat.identity), seat.seatIndex,
-            seat.mounted, weight);
+            seat.mounted, followEnabled);
         // The wheel state itself belongs to the input thread, which releases it
         // on the same condition; only the published atomics are cleared here,
         // so a game that stopped polling input cannot leave a steer latched.
@@ -7330,7 +7364,7 @@ namespace
             "%.2f deg; node interpolated %u (%.0f%%), raw %u (%.0f%%), "
             "head-parented %u (%.0f%%), anchor fallback %u (%.0f%%); "
             "seat frame %s; "
-            "view follow %.2f, hull turned %.0f deg since entry, steering by %s",
+            "view follow %s, hull turned %.0f deg since entry, steering by %s",
             frames, moved, moved * scale, tilted, tilted * scale,
             diag.maxPosStep.load(std::memory_order_relaxed),
             diag.maxTiltDeg.load(std::memory_order_relaxed),
@@ -7341,7 +7375,7 @@ namespace
             g_config.vehicle_cam_smoothing
                 ? "RENDERED NODE (no synthetic predictor)"
                 : "RAW NODE (explicit smoothing-off A/B)",
-            g_config.vehicle_view_follow,
+            g_config.vehicle_view_follow ? "ON" : "OFF",
             g_halo3SeatYawTotal.load(std::memory_order_relaxed) * 57.2957795f,
             g_halo3SeatAuthorsSteering.load(std::memory_order_relaxed)
                 ? (g_halo3WheelDriving.load(std::memory_order_relaxed)

@@ -69,6 +69,17 @@ inline constexpr const char* kVehicleSeatNames[kVehicleSeatSlots] = {
     "driver", "passenger", "passenger2", "gunner"};
 inline constexpr int kVehicleTrimSlots = kVehicleTrimCount * kVehicleSeatSlots;
 
+// Vehicle placement controls are authored in metres, then converted to Halo
+// world units at the same boundary as the Blender seat point. Forward/height
+// have a little more travel than the original -0.5..1.0 sliders; lateral trim
+// is symmetric because it moves across the width of the seat.
+inline constexpr float kVehicleCamForwardMin = -1.00f;
+inline constexpr float kVehicleCamForwardMax = 1.50f;
+inline constexpr float kVehicleCamUpMin = -1.00f;
+inline constexpr float kVehicleCamUpMax = 1.50f;
+inline constexpr float kVehicleCamRightMin = -1.00f;
+inline constexpr float kVehicleCamRightMax = 1.00f;
+
 // The storage slot for one seat, or -1 when the seat cannot be keyed (on
 // foot, unidentified vehicle, or a seat index Halo 3 never authors).
 inline constexpr int ConfigSeatTrimSlot(int vehicleId, int seatIndex,
@@ -148,19 +159,21 @@ struct Config
     bool vehicle_first_person = true;
     float vehicle_cam_forward_m = 0.10f; // + = toward the windshield
     float vehicle_cam_up_m = 0.05f;      // + = raise out of the seat
-    // Per-SEAT overrides of the two trims above. An entry only exists once the
+    float vehicle_cam_right_m = 0.0f;    // + = toward the vehicle's right
+    // Per-SEAT overrides of the three trims above. An entry only exists once the
     // user adjusts the F1 sliders while SITTING IN that seat (or writes the
     // config line by hand); every other seat keeps following the universal
-    // trim, including live edits to it. The F1 sliders are the same two
+    // trim, including live edits to it. The F1 sliders are the same three
     // widgets always — they simply bind to whichever seat is under you.
     float vehicle_cam_forward_v[kVehicleTrimSlots] = {};
     float vehicle_cam_up_v[kVehicleTrimSlots] = {};
+    float vehicle_cam_right_v[kVehicleTrimSlots] = {};
     bool vehicle_cam_forward_set[kVehicleTrimSlots] = {};
     bool vehicle_cam_up_set[kVehicleTrimSlots] = {};
-    // How much of the vehicle's turning the view takes with it. 1 = you turn
-    // with the vehicle like a real driver; 0 = the world-locked view Alpha
-    // 0.3.1 shipped, which also leaves every control exactly as it was.
-    float vehicle_view_follow = 1.0f;
+    bool vehicle_cam_right_set[kVehicleTrimSlots] = {};
+    // ON turns the view by every heading change from the same concrete vehicle
+    // seat. OFF keeps the world-locked view Alpha 0.3.1 shipped.
+    bool vehicle_view_follow = true;
     // Use the same interpolated seat/attachment node the visible vehicle uses,
     // plus occupant-head motion relative to the settled pose in that seat.
     // 0 = raw node matrices as a diagnostic A/B.
@@ -479,6 +492,13 @@ inline float ConfigSeatCamUp(const Config& c, int slot)
     if (slot >= 0 && slot < kVehicleTrimSlots && c.vehicle_cam_up_set[slot])
         return c.vehicle_cam_up_v[slot];
     return c.vehicle_cam_up_m;
+}
+
+inline float ConfigSeatCamRight(const Config& c, int slot)
+{
+    if (slot >= 0 && slot < kVehicleTrimSlots && c.vehicle_cam_right_set[slot])
+        return c.vehicle_cam_right_v[slot];
+    return c.vehicle_cam_right_m;
 }
 
 void ConfigLoad(const wchar_t* path); // missing file -> file is created with defaults

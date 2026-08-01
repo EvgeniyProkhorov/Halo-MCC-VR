@@ -29,8 +29,9 @@ static bool ParseFloatSetting(const char* key, const char* text, float& destinat
     return true;
 }
 
-// C13 per-seat trim keys. `suffix` is what follows vehicle_cam_forward_m_ /
-// vehicle_cam_up_m_ and is either "<vehicle>_<seat>" or the C12-era
+// C19 per-seat trim keys. `suffix` is what follows vehicle_cam_forward_m_ /
+// vehicle_cam_up_m_ / vehicle_cam_right_m_ and is either "<vehicle>_<seat>" or
+// the C12-era
 // "<vehicle>", which meant the whole vehicle and so migrates onto every seat
 // slot of it. An unknown vehicle or seat name is reported and dropped rather
 // than misfiled, and a malformed value never creates an override.
@@ -107,17 +108,25 @@ static void Clamp()
     g_config.turn_snap_deg = std::clamp(g_config.turn_snap_deg, 5.0f, 90.0f);
     g_config.turn_smooth_deg_s = std::clamp(g_config.turn_smooth_deg_s, 30.0f, 360.0f);
     g_config.vehicle_cam_forward_m =
-        std::clamp(g_config.vehicle_cam_forward_m, -0.5f, 1.0f);
+        std::clamp(g_config.vehicle_cam_forward_m,
+                   kVehicleCamForwardMin, kVehicleCamForwardMax);
     g_config.vehicle_cam_up_m =
-        std::clamp(g_config.vehicle_cam_up_m, -0.5f, 1.0f);
-    g_config.vehicle_view_follow =
-        std::clamp(g_config.vehicle_view_follow, 0.0f, 1.0f);
+        std::clamp(g_config.vehicle_cam_up_m,
+                   kVehicleCamUpMin, kVehicleCamUpMax);
+    g_config.vehicle_cam_right_m =
+        std::clamp(g_config.vehicle_cam_right_m,
+                   kVehicleCamRightMin, kVehicleCamRightMax);
     for (int i = 0; i < kVehicleTrimSlots; ++i)
     {
         g_config.vehicle_cam_forward_v[i] =
-            std::clamp(g_config.vehicle_cam_forward_v[i], -0.5f, 1.0f);
+            std::clamp(g_config.vehicle_cam_forward_v[i],
+                       kVehicleCamForwardMin, kVehicleCamForwardMax);
         g_config.vehicle_cam_up_v[i] =
-            std::clamp(g_config.vehicle_cam_up_v[i], -0.5f, 1.0f);
+            std::clamp(g_config.vehicle_cam_up_v[i],
+                       kVehicleCamUpMin, kVehicleCamUpMax);
+        g_config.vehicle_cam_right_v[i] =
+            std::clamp(g_config.vehicle_cam_right_v[i],
+                       kVehicleCamRightMin, kVehicleCamRightMax);
     }
     g_config.vehicle_wheel_max_deg =
         std::clamp(g_config.vehicle_wheel_max_deg, 30.0f, 180.0f);
@@ -260,6 +269,8 @@ void ConfigLoad(const wchar_t* path)
             g_config.vehicle_cam_forward_m = (float)atof(val);
         else if (!strcmp(key, "vehicle_cam_up_m"))
             g_config.vehicle_cam_up_m = (float)atof(val);
+        else if (!strcmp(key, "vehicle_cam_right_m"))
+            g_config.vehicle_cam_right_m = (float)atof(val);
         // Per-seat trim overrides: vehicle_cam_forward_m_warthog_passenger.
         // The exact matches above cannot fire for these (different length).
         // A malformed value must NOT invent an override (the seat keeps
@@ -271,8 +282,17 @@ void ConfigLoad(const wchar_t* path)
         else if (!strncmp(key, "vehicle_cam_up_m_", 17))
             ParseSeatTrim(key, key + 17, val, g_config.vehicle_cam_up_v,
                           g_config.vehicle_cam_up_set);
+        else if (!strncmp(key, "vehicle_cam_right_m_", 20))
+            ParseSeatTrim(key, key + 20, val, g_config.vehicle_cam_right_v,
+                          g_config.vehicle_cam_right_set);
         else if (!strcmp(key, "vehicle_view_follow"))
-            g_config.vehicle_view_follow = (float)atof(val);
+        {
+            // C19 changed the fractional control to a toggle. Preserve every
+            // old non-zero setting (including the user's 0.82) as ON.
+            float follow = g_config.vehicle_view_follow ? 1.0f : 0.0f;
+            if (ParseFloatSetting(key, val, follow))
+                g_config.vehicle_view_follow = follow != 0.0f;
+        }
         else if (!strcmp(key, "vehicle_cam_smoothing"))
             g_config.vehicle_cam_smoothing = atoi(val) != 0;
         else if (!strcmp(key, "vehicle_motion"))
@@ -646,16 +666,21 @@ void ConfigSave()
     fprintf(f, "vehicle_first_person = %d\n\n",
             g_config.vehicle_first_person ? 1 : 0);
     fprintf(f, "# Trim applied to every seat, in meters: forward toward the\n");
-    fprintf(f, "# windshield, and up out of the seat.\n");
-    fprintf(f, "# (defaults %.2f / %.2f, range -0.5 to 1)\n",
-            d.vehicle_cam_forward_m, d.vehicle_cam_up_m);
+    fprintf(f, "# windshield, up out of the seat, and right across the seat.\n");
+    fprintf(f, "# (defaults %.2f / %.2f / %.2f; forward+up range -1 to 1.5,\n",
+            d.vehicle_cam_forward_m, d.vehicle_cam_up_m,
+            d.vehicle_cam_right_m);
+    fprintf(f, "# right range -1 to 1; negative right moves left)\n");
     fprintf(f, "vehicle_cam_forward_m = %.2f\n", g_config.vehicle_cam_forward_m);
-    fprintf(f, "vehicle_cam_up_m = %.2f\n\n", g_config.vehicle_cam_up_m);
-    fprintf(f, "# Per-SEAT trim. A line appears here when you adjust the two\n");
+    fprintf(f, "vehicle_cam_up_m = %.2f\n", g_config.vehicle_cam_up_m);
+    fprintf(f, "vehicle_cam_right_m = %.2f\n\n", g_config.vehicle_cam_right_m);
+    fprintf(f, "# Per-SEAT trim. A line appears here when you adjust the three\n");
     fprintf(f, "# seat sliders while SITTING IN that seat; every seat without\n");
     fprintf(f, "# a line keeps using the universal trim above. Delete a line\n");
     fprintf(f, "# (or use the F1 button) to hand that seat back to it. Names:\n");
     fprintf(f, "#   vehicle_cam_forward_m_<vehicle>_<seat>\n");
+    fprintf(f, "#   vehicle_cam_up_m_<vehicle>_<seat>\n");
+    fprintf(f, "#   vehicle_cam_right_m_<vehicle>_<seat>\n");
     fprintf(f, "#   vehicles: scorpion warthog mongoose ghost wraith prowler\n");
     fprintf(f, "#             banshee hornet chopper turret\n");
     fprintf(f, "#   seats:    driver passenger passenger2 gunner\n");
@@ -674,14 +699,17 @@ void ConfigSave()
                 fprintf(f, "vehicle_cam_up_m_%s_%s = %.2f\n",
                         kVehicleTrimNames[v], kVehicleSeatNames[s],
                         g_config.vehicle_cam_up_v[i]);
+            if (g_config.vehicle_cam_right_set[i])
+                fprintf(f, "vehicle_cam_right_m_%s_%s = %.2f\n",
+                        kVehicleTrimNames[v], kVehicleSeatNames[s],
+                        g_config.vehicle_cam_right_v[i]);
         }
     fprintf(f, "\n");
-    fprintf(f, "# How much of the vehicle's turning your view takes with it.\n");
-    fprintf(f, "# 1 = you turn with the vehicle like a real driver; 0.5 = half,\n");
-    fprintf(f, "# for a gentler ride; 0 = the view stays locked to the world and\n");
-    fprintf(f, "# every control behaves exactly as it did before this feature.\n");
-    fprintf(f, "# (default %.2f, range 0 to 1)\n", d.vehicle_view_follow);
-    fprintf(f, "vehicle_view_follow = %.2f\n\n", g_config.vehicle_view_follow);
+    fprintf(f, "# ON turns the view with every heading change from the same car,\n");
+    fprintf(f, "# including hard collisions and spins. OFF keeps it world-locked.\n");
+    fprintf(f, "# (default %d)\n", d.vehicle_view_follow ? 1 : 0);
+    fprintf(f, "vehicle_view_follow = %d\n\n",
+            g_config.vehicle_view_follow ? 1 : 0);
     fprintf(f, "# ON (default) parents that point to the exact interpolated seat or\n");
     fprintf(f, "# attachment node Halo renders and adds only occupant-head motion\n");
     fprintf(f, "# relative to the settled seat pose. No filter or placement shift.\n");
