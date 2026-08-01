@@ -5,9 +5,10 @@ pointer. Detailed pre-cleanup experiments remain available in Git history; they
 are evidence, not instructions.
 
 > **Start here: "PUBLIC RELEASE: MCC VR Alpha 0.3.1 - 2026-07-30" below is the
-> current published state, and "ACCEPTED DEVELOPMENT BASELINE: Halo 3
-> first-person vehicles - 2026-08-01" immediately below it is the current
-> development baseline that the next hotfix/feature update builds on.**
+> current published state, and "ACCEPTED DEVELOPMENT BASELINE: Halo 3 animated
+> CHUD crosshair - 2026-08-01" is the current development baseline that the
+> next hotfix/feature update builds on. It descends from the Halo 3
+> first-person vehicle baseline recorded under it.**
 > Everything dated earlier is history.
 > Several older sections describe Reach features as impossible, mandatory, or
 > not yet built that have since been built and headset-confirmed - in
@@ -59,10 +60,56 @@ live, headset-tuned `halomccvr.cfg` and users are told to replace their old one
 artifact - do not rebuild and republish without repeating headset verification,
 since the DLL embeds its compile timestamp and a rebuild is never byte-identical.
 
-## ACCEPTED DEVELOPMENT BASELINE: Halo 3 first-person vehicles - 2026-08-01
+## ACCEPTED DEVELOPMENT BASELINE: Halo 3 animated CHUD crosshair - 2026-08-01
 
 **This is the current development baseline for the next hotfix/feature update.**
-It is on `feature/halo3-vehicles`, descends from the 0.3.1 line, and is not yet
+It is on `feature/halo3-vehicles`, sits one commit above the first-person
+vehicle baseline recorded below, and is not yet published.
+
+| Identity | Value |
+| --- | --- |
+| Baseline source | `643a6c191eacc5a0c3c722125a55494559a859f8` (branch `feature/halo3-vehicles`) |
+| Build | Release x64, preset `release`, ODST ON, Reach ON, ReachRender ON |
+| Candidate package | `out/candidates/643a6c1-reach-fp-parity-20260801-133044697Z` |
+| `halo3xr.dll` SHA-256 | `84D62264B544E351827FD779DE7C8331B04010A84DDB586280E0A2EEE7D358D7` |
+| `halo3xr_launcher.exe` SHA-256 | `FCF795CDC96329C14E9F9EA2998663BBC7BCE4BA88A3EC49FB2C4D4F081D4633` |
+| Installed editions | Steam and Microsoft Store; DLL and launcher hashes verified independently in both `Halo_MCC_VR` folders |
+| Accepted runtime | Steam edition, SteamVR/OpenXR 2.17.6, Quest 3 (`'SteamVR/OpenXR : oculus'`, vendor `0x28DE`) at 120 Hz |
+| Headset result | Accepted: "test was great crosshair is working again!" |
+| Preserved evidence | `out/test-runs/643a6c1-halo3-crosshair-animation-steam-pass-20260801-091400` |
+| Preserved log SHA-256 | `1FAD263DE243B20E4FF93FD8223A6EB50915EE4D442529B9493E336D1BC597E1` |
+
+**The trade this candidate made, and what the log measured.** The publish is
+paid for out of the per-frame offscreen CHUD capture Halo 3 was already doing:
+Halo 3 now samples the native CHUD only on the frames it publishes, so the
+capture cost leaves five frames in six and the upload joins the sixth. The
+preserved log settles both halves of that trade with numbers, not a prediction:
+
+- **The publish rate is exactly the design.** 360 of the 610 reported windows
+  read `40 uploaded, 0 skipped`, i.e. 20 publishes per second at 120 fps -
+  one in six, the floor `crosshair_animation_frames = 6` allows - and a further
+  153 windows sit at 36-39. Exactly one window in the whole session skipped a
+  single upload. The sample gap and the publish floor are the same number by
+  construction, so no capture work was spent and discarded.
+- **The frame rate held.** `fps ... (stereo on)` reads 119-120 against a
+  120 Hz panel through the animated stretch, so restoring the animation did not
+  reintroduce the performance loss that the plain 1-in-6 cadence caused on
+  2026-07-30.
+
+This closes the regression that the `ec3c981` -> `f205ce9` -> `06e76a2`
+performance pass introduced, and the `06e76a2` colour-ordering edge stays
+refuted: it was still frozen in the headset. ODST keeps its 1-in-30 sample and
+identity policy; Reach keeps its own bounded animation cadence.
+
+The same session entered the Halo 3 cutscene theatre three times on this exact
+build (`08:53:50`, `08:59:33`, `09:14:19`), so it is also the reference run for
+the theatre work that follows it.
+
+## ACCEPTED: Halo 3 first-person vehicles - 2026-08-01
+
+This was the development baseline until the crosshair result above superseded
+it; the crosshair candidate is the commit immediately after it. It is on
+`feature/halo3-vehicles`, descends from the 0.3.1 line, and is not yet
 published. It does not replace the 0.3.1 archive above.
 
 | Identity | Value |
@@ -145,11 +192,13 @@ axis still follows the universal trim.
 Full per-candidate disassembly, RVA tables and seat-layout evidence are in
 `docs/HALO3-VEHICLE-EVIDENCE.md`.
 
-## HEADSET-PENDING: Halo 3 animated CHUD crosshair - 2026-08-01
+### Background to the accepted crosshair candidate
 
-Built on the accepted `efe8bdb` baseline above; it does not advance the
-pointer. The user reported against `efe8bdb` that Halo 3's crosshair shows no
-shooting animation and no red/green target state.
+This section is the reasoning that produced `643a6c1`; it is **accepted**, and
+the result table is in the baseline section at the top of this file. It was
+built on the `efe8bdb` vehicle baseline above. The user reported against
+`efe8bdb` that Halo 3's crosshair shows no shooting animation and no red/green
+target state.
 
 **What was already known.** The 2026-07-27 entry "The crosshair blackout: one
 defect behind three symptoms" records the mechanism exactly: the art key
@@ -179,9 +228,11 @@ five frames in six, and the upload is added to the sixth. The sample gap and
 the publish floor are the same number by construction, so a sampled frame
 always publishes and no capture work is spent and discarded.
 
-**Deliberately not claimed.** Whether that trade is net-neutral or better in
-the render window is a headset measurement, not a prediction. Two things make
-the session decisive rather than a guess:
+**Deliberately not claimed at the time, and since measured.** Whether that trade
+is net-neutral or better in the render window was left to the headset rather
+than predicted. The accepted run answered it: 20 publishes per second with one
+skipped upload in the whole session, at 119-120 fps. Two things made that
+session decisive rather than a guess:
 
 - `crosshair_animation_frames` is live in the F1 menu (Crosshair category).
   0 turns the animation off and holds one image - strictly cheaper than the
