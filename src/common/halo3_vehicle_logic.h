@@ -290,6 +290,66 @@ inline bool Halo3ComputeNodeAnchoredPoint(
         Halo3MatrixTransformPoint(liveNode, nodeLocal, out);
 }
 
+// How far the occupant's head may carry the camera away from the settled seat
+// pose. Beyond this the contribution SATURATES; it is never dropped.
+inline constexpr float kHalo3HeadMaximumLocalDelta = 0.08f;
+
+// C22 — the occupant-head contribution saturates continuously.
+//
+// The measured defect: C18 gated head parenting on the delta staying inside
+// this limit and dropped the whole contribution when it did not, then demanded
+// a fresh 1.5 s + 500 ms settle before it could return. Driving breaches the
+// limit constantly, and the settle needs the head to hold still inside a 4.5 cm
+// sphere for half a second, which never happens on a moving vehicle. The
+// 2026-08-01 06:19 log shows the result directly: consecutive ten-second
+// windows at head-parented 0%, 35%, 19%, 27%, 0%, 0%, 0%, 42%, 0%, 16%, 0%
+// with zero anchor fallbacks. Every one of those transitions stepped the
+// camera by the whole accumulated bounce, which is the "reset" the user
+// reported — and with C21 the arms hold the rigid seat point, so each step
+// also showed up as the hands jumping against the view.
+//
+// Clamping the delta to the same limit is continuous at the boundary
+// (|d| <= L is identity, |d| > L scales to exactly L), so the camera can
+// never step. A large entry or seat-switch animation is still bounded to the
+// same distance it was before, but it now arrives and leaves smoothly instead
+// of snapping to zero. This is strictly less state and less work per frame
+// than the drop-and-re-settle it replaces.
+inline bool Halo3ClampedHeadLocalDelta(const float currentLocal[3],
+                                       const float reference[3],
+                                       float outDelta[3])
+{
+    if (!currentLocal || !reference || !outDelta)
+        return false;
+    float delta[3];
+    float lengthSquared = 0.0f;
+    for (int i = 0; i < 3; ++i)
+    {
+        if (!std::isfinite(currentLocal[i]) || !std::isfinite(reference[i]))
+            return false;
+        delta[i] = currentLocal[i] - reference[i];
+        lengthSquared += delta[i] * delta[i];
+    }
+    if (!std::isfinite(lengthSquared))
+        return false;
+    if (lengthSquared >
+        kHalo3HeadMaximumLocalDelta * kHalo3HeadMaximumLocalDelta)
+    {
+        const float length = std::sqrt(lengthSquared);
+        if (!std::isfinite(length) || length <= 0.0f)
+            return false;
+        const float scale = kHalo3HeadMaximumLocalDelta / length;
+        for (int i = 0; i < 3; ++i)
+            delta[i] *= scale;
+    }
+    for (int i = 0; i < 3; ++i)
+    {
+        if (!std::isfinite(delta[i]))
+            return false;
+        outDelta[i] = delta[i];
+    }
+    return true;
+}
+
 // Keep the animated occupant head translation relative to the settled pose.
 // At the latch pose this emits the authored node-local point
 // exactly; later head-local movement is added around that point while the live
@@ -309,10 +369,14 @@ inline bool Halo3ComputeHeadParentedPoint(
     if (!Halo3MatrixInverseTransformPoint(
             liveSeatNode, headWorld, currentHeadLocal))
         return false;
+    float delta[3];
+    if (!Halo3ClampedHeadLocalDelta(currentHeadLocal, headLocalReference,
+                                    delta))
+        return false;
     const float cameraLocal[3] = {
-        authoredNodeLocal[0] + currentHeadLocal[0] - headLocalReference[0],
-        authoredNodeLocal[1] + currentHeadLocal[1] - headLocalReference[1],
-        authoredNodeLocal[2] + currentHeadLocal[2] - headLocalReference[2]};
+        authoredNodeLocal[0] + delta[0],
+        authoredNodeLocal[1] + delta[1],
+        authoredNodeLocal[2] + delta[2]};
     return Halo3MatrixTransformPoint(liveSeatNode, cameraLocal, out);
 }
 
@@ -324,7 +388,6 @@ inline bool Halo3ComputeHeadParentedPoint(
 inline constexpr uint64_t kHalo3HeadSettleMinimumAgeMs = 1500;
 inline constexpr uint64_t kHalo3HeadSettleQuietMs = 500;
 inline constexpr float kHalo3HeadSettleRadius = 0.015f;
-inline constexpr float kHalo3HeadMaximumLocalDelta = 0.08f;
 
 struct Halo3HeadSettleLatch
 {
@@ -380,6 +443,9 @@ struct Halo3HeadSettleLatch
     }
 };
 
+// SUPERSEDED by Halo3ClampedHeadLocalDelta (C22). Kept because it states the
+// boundary the clamp saturates at, and the clamp's continuity is tested
+// against it: inside the limit the two must agree exactly.
 inline bool Halo3HeadLocalDeltaWithinLimit(const float currentLocal[3],
                                            const float reference[3])
 {

@@ -1742,3 +1742,74 @@ table has an authored point — Warthog seat 1, Mongoose seat 1, Hornet seats
 and the rigid hand anchor.
 
 **Status: C20 ACCEPTED; C21 candidate NOT YET HEADSET ACCEPTED.**
+
+## C22 — the occupant-head contribution saturates; it never drops out
+
+The C21 headset sitting reported the arms and gun "losing tracking and then
+resetting", and "it's weird how the whole car resets". The cause is measured,
+not inferred, and it is **not** specific to passenger seats or to C21 — it is
+the shared seat mechanism, so this fixes every seat in every vehicle.
+
+### The measurement
+
+`H3 seat motion` in the C21 run (`8fdd238`, Steam, 2026-08-01 06:19) reports the
+head-parented share of each ten-second window:
+
+| Window (06:2x) | head-parented | anchor fallback |
+| --- | --- | --- |
+| 1:19 | 0% | 0% |
+| 1:29 | 35% | 0% |
+| 1:39 | 19% | 0% |
+| 1:49 | 27% | 0% |
+| 1:59 | 0% | 0% |
+| 2:09 | 0% | 0% |
+| 2:19 | 0% | 0% |
+| 2:29 | 42% | 0% |
+| 2:39 | 0% | 0% |
+| 2:49 | 16% | 0% |
+| 2:59 | 0% | 0% |
+
+Node interpolation is 100% and anchor fallback is 0% throughout, so the seat
+placement itself never failed. What toggled is the occupant-head contribution,
+and **every toggle steps the camera by the whole accumulated bounce**.
+
+### Why it toggled
+
+C18 gated head parenting on `Halo3HeadLocalDeltaWithinLimit` (0.08 wu) and, on
+a breach, threw the settle latch away and demanded a fresh window before the
+contribution could return. That window is `kHalo3HeadSettleMinimumAgeMs` 1500 ms
+of seat age plus `kHalo3HeadSettleQuietMs` 500 ms with the head inside a
+`kHalo3HeadSettleRadius` 0.015 wu (4.5 cm) sphere.
+
+Driving breaches 0.08 wu routinely, and a head on a moving vehicle never holds
+inside 4.5 cm for half a second — so once dropped it stayed dropped until the
+car was calm. That is exactly the pattern in the table: partial windows while
+manoeuvring gently, whole windows at 0% while actually driving, and a step at
+each edge. With C21 the arms hold the rigid seat point while the camera does
+not, so each step also read as the hands jumping against the view.
+
+### The change
+
+`Halo3ClampedHeadLocalDelta` clamps the delta to the same 0.08 wu instead of
+gating on it, and the in-limit test and its re-settle branch are gone. The
+clamp is the identity inside the limit — so it agrees exactly with the boundary
+the old gate enforced — and scales to exactly the limit outside it, which makes
+it continuous at `|d| = L`. A camera step therefore cannot occur at any head
+displacement.
+
+A large entry or seat-switch animation is still bounded to the same distance it
+was before; it now arrives and leaves smoothly rather than snapping to zero,
+which is strictly less jarring than the behavior it replaces. Once a seat has
+settled, the contribution stays on for that whole seat session.
+
+This is **less** state and less work per frame than the drop-and-re-settle it
+replaces: one clamp versus a distance gate, a latch reset and a re-observation.
+There is no filter, no smoothing window, no predictor and no new clock — the
+2026-07-31/08-01 rejections of phase, lead and prediction machinery all stand.
+
+Tested for the properties that matter rather than for a value: identity inside
+the limit, exact saturation on it, agreement between just-inside and on-limit
+(the continuity that forbids a step), and refusal on a non-finite sample so the
+caller keeps the exact authored point.
+
+**Status: C22 candidate — NOT HEADSET ACCEPTED.**

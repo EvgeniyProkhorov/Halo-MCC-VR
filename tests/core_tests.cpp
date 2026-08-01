@@ -5239,6 +5239,63 @@ int main()
                     safeBounce, settle.reference) &&
                 !Halo3HeadLocalDeltaWithinLimit(
                     animationJump, settle.reference);
+
+            // C22: the same boundary, but the contribution SATURATES there
+            // rather than dropping to zero. Inside the limit the clamp must be
+            // the identity, so it agrees exactly with the old gate; outside it
+            // must land exactly ON the limit, which makes the function
+            // continuous and the camera unable to step.
+            float insideDelta[3] = {}, outsideDelta[3] = {}, edgeDelta[3] = {};
+            const float farAnimation[3] = {
+                seatedHead[0] + 3.0f, seatedHead[1] - 4.0f, seatedHead[2]};
+            const float atEdge[3] = {
+                seatedHead[0] + kHalo3HeadMaximumLocalDelta, seatedHead[1],
+                seatedHead[2]};
+            const bool clampIdentityInside =
+                Halo3ClampedHeadLocalDelta(
+                    safeBounce, settle.reference, insideDelta) &&
+                std::fabs(insideDelta[0] - 0.079f) < 1e-6f &&
+                std::fabs(insideDelta[1]) < 1e-6f &&
+                std::fabs(insideDelta[2]) < 1e-6f;
+            // 3/-4/0 has length 5; clamped it must be the same direction with
+            // length exactly kHalo3HeadMaximumLocalDelta.
+            const bool clampSaturates =
+                Halo3ClampedHeadLocalDelta(
+                    farAnimation, settle.reference, outsideDelta) &&
+                std::fabs(outsideDelta[0] -
+                          kHalo3HeadMaximumLocalDelta * 0.6f) < 1e-6f &&
+                std::fabs(outsideDelta[1] +
+                          kHalo3HeadMaximumLocalDelta * 0.8f) < 1e-6f &&
+                std::fabs(outsideDelta[2]) < 1e-6f;
+            // Continuity at the boundary is the whole point: approaching the
+            // limit from inside and sitting exactly on it must agree, so no
+            // amount of head movement can produce a step.
+            const float justInside[3] = {
+                seatedHead[0] + kHalo3HeadMaximumLocalDelta - 1e-5f,
+                seatedHead[1], seatedHead[2]};
+            float justInsideDelta[3] = {};
+            const bool clampContinuous =
+                Halo3ClampedHeadLocalDelta(
+                    atEdge, settle.reference, edgeDelta) &&
+                Halo3ClampedHeadLocalDelta(
+                    justInside, settle.reference, justInsideDelta) &&
+                std::fabs(edgeDelta[0] - kHalo3HeadMaximumLocalDelta) < 1e-6f &&
+                std::fabs(edgeDelta[0] - justInsideDelta[0]) < 1e-4f;
+            // A non-finite sample must refuse rather than emit a partial or
+            // stale delta, so the caller keeps the exact authored point.
+            const float brokenHead[3] = {
+                std::numeric_limits<float>::quiet_NaN(), 0.0f, 0.0f};
+            float brokenDelta[3] = {};
+            const bool clampRefusesBroken =
+                !Halo3ClampedHeadLocalDelta(
+                    brokenHead, settle.reference, brokenDelta) &&
+                !Halo3ClampedHeadLocalDelta(
+                    safeBounce, settle.reference, nullptr);
+            Check(clampIdentityInside && clampSaturates && clampContinuous &&
+                  clampRefusesBroken,
+                "The occupant-head contribution is the identity inside its "
+                "limit, saturates exactly on it, is continuous across it, and "
+                "refuses a non-finite sample");
             settle = {};
             const bool seatSwitchRestarts =
                 !settle.Update(2701, seatedHead) && !settle.valid &&

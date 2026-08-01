@@ -6392,10 +6392,16 @@ namespace
                         Halo3MatrixInverseTransformPoint(
                             liveNode, headWorld, currentHeadLocal))
                     {
+                        // C22: once this seat has settled, the head
+                        // contribution stays on for the whole seat session and
+                        // SATURATES at the limit instead of dropping out. The
+                        // old in-limit gate plus its re-settle is what stepped
+                        // the camera every time the car moved enough to breach
+                        // the limit — and on a moving vehicle the head never
+                        // holds still long enough to earn the contribution
+                        // back, so it stayed off until the car stopped.
                         float headAnchor[3] = {};
                         if (headRef.settle.Update(nowMs, currentHeadLocal) &&
-                            Halo3HeadLocalDeltaWithinLimit(
-                                currentHeadLocal, headRef.settle.reference) &&
                             Halo3ComputeHeadParentedPoint(
                                 liveNode, headWorld, headRef.settle.reference,
                                 authoredNodeLocal, headAnchor) &&
@@ -6406,17 +6412,6 @@ namespace
                             memcpy(cameraAnchor, headAnchor,
                                    sizeof(cameraAnchor));
                             headParented = true;
-                        }
-                        else if (headRef.settle.valid &&
-                                 !Halo3HeadLocalDeltaWithinLimit(
-                                     currentHeadLocal,
-                                     headRef.settle.reference))
-                        {
-                            // A large later animation is not natural bounce.
-                            // Return immediately to the exact Blender point and
-                            // require the same identity to settle again.
-                            headRef.settle = {};
-                            headRef.settle.Update(nowMs, currentHeadLocal);
                         }
                     }
                     else if (!headRef.settle.valid)
