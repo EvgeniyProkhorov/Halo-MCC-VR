@@ -297,6 +297,8 @@ void ConfigLoad(const wchar_t* path)
             g_config.vehicle_cam_smoothing = atoi(val) != 0;
         else if (!strcmp(key, "vehicle_hide_body"))
             g_config.vehicle_hide_body = atoi(val) != 0;
+        else if (!strcmp(key, "vehicle_hands_follow_body"))
+            g_config.vehicle_hands_follow_body = atoi(val) != 0;
         else if (!strcmp(key, "vehicle_motion"))
             g_config.vehicle_motion = atoi(val) != 0;
         else if (!strcmp(key, "vehicle_wheel_max_deg"))
@@ -726,6 +728,14 @@ void ConfigSave()
     fprintf(f, "# when vehicle_first_person = 0.\n");
     fprintf(f, "# (default %d)\n", d.vehicle_hide_body ? 1 : 0);
     fprintf(f, "vehicle_hide_body = %d\n\n", g_config.vehicle_hide_body ? 1 : 0);
+    fprintf(f, "# ON (default) hangs your arms and gun off the SEAT while you\n");
+    fprintf(f, "# are riding in first person, so they stay with the vehicle and\n");
+    fprintf(f, "# your hands while your head turns freely. OFF anchors them to\n");
+    fprintf(f, "# Halo's seated camera, which is your character's head, so\n");
+    fprintf(f, "# turning to look around drags the gun with your face.\n");
+    fprintf(f, "# (default %d)\n", d.vehicle_hands_follow_body ? 1 : 0);
+    fprintf(f, "vehicle_hands_follow_body = %d\n\n",
+            g_config.vehicle_hands_follow_body ? 1 : 0);
     fprintf(f, "# Motion steering. In a Warthog, Mongoose, Ghost, Prowler or\n");
     fprintf(f, "# Chopper, DOUBLE-CLICK both grips to take hold of an invisible\n");
     fprintf(f, "# steering wheel: hold your hands as if on a wheel and tilt it,\n");

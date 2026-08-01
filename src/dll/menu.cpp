@@ -820,6 +820,13 @@ namespace
             "seat, so your own body is no longer drawn where your head is.\n"
             "Only the seat you occupy is changed and it is restored the\n"
             "instant you get out. Third-person driving is unaffected.");
+        changed |= ImGui::Checkbox("Arms ride the seat, not my head",
+                                   &g_config.vehicle_hands_follow_body);
+        ImGui::TextDisabled(
+            "ON (default) hangs your arms and gun off the seat, so they stay\n"
+            "with the vehicle and your hands while your head turns freely.\n"
+            "OFF anchors them to Halo's seated camera - your character's own\n"
+            "head - so looking around drags the gun with your face.");
         ImGui::Spacing();
         ImGui::Separator();
         ImGui::Text("Motion steering");

@@ -5888,6 +5888,48 @@ int main()
                 "on a seat proven to have it, and restores exactly");
         }
 
+        // C21 hand origin: the seat carries the arms, the head never does.
+        {
+            const float camera[3] = {10.0f, 20.0f, 30.0f};
+            const float body[3] = {1.0f, 2.0f, 3.0f};
+            float origin[3] = {camera[0], camera[1], camera[2]};
+            const bool takesBody =
+                Halo3SelectHandOrigin(true, true, body, origin) &&
+                origin[0] == body[0] && origin[1] == body[1] &&
+                origin[2] == body[2];
+
+            // Every refusal must leave the caller's origin byte-for-byte alone,
+            // so the fallback is exactly the head-anchored behavior this
+            // replaces and never an invented position.
+            bool untouched = true;
+            const float nan3[3] = {1.0f, std::numeric_limits<float>::quiet_NaN(),
+                                   3.0f};
+            const float inf3[3] = {std::numeric_limits<float>::infinity(),
+                                   2.0f, 3.0f};
+            struct Refusal { bool follow; bool valid; const float* src; };
+            const Refusal refusals[] = {
+                {false, true, body},   // feature off
+                {true, false, body},   // on foot / no seat sample this frame
+                {false, false, body},  // both
+                {true, true, nan3},    // torn or unfinished sample
+                {true, true, inf3},
+                {true, true, nullptr}, // no publication at all
+            };
+            for (const Refusal& r : refusals)
+            {
+                float kept[3] = {camera[0], camera[1], camera[2]};
+                if (Halo3SelectHandOrigin(r.follow, r.valid, r.src, kept))
+                    untouched = false;
+                if (kept[0] != camera[0] || kept[1] != camera[1] ||
+                    kept[2] != camera[2])
+                    untouched = false;
+            }
+            Check(takesBody && untouched,
+                "The vehicle hand origin takes the rigid seat placement when "
+                "it is published and finite, and otherwise leaves the camera "
+                "origin exactly as it was");
+        }
+
         // C9 virtual wheel: two gripped hands, the tilt of the line between
         // them, read in the head's own heading plane.
         {

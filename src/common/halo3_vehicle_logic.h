@@ -1302,6 +1302,31 @@ inline constexpr uint32_t Halo3FirstPersonSeatFlags(uint32_t seatFlags)
     return seatFlags & ~kHalo3SeatThirdPersonCameraBit;
 }
 
+// C21 — which origin the first-person arms and gun hang off.
+//
+// Halo's seated camera resolves the OCCUPANT'S `head` marker, so using the
+// engine camera source as the hand origin in a vehicle seat parents the arms
+// to the character's face: turning the view animates the head and drags the
+// gun with it. The seat's own rigid placement is the body-side origin.
+//
+// Selection is deliberately conservative. The body origin is taken only when
+// the feature is enabled AND the seat published a finite placement for this
+// frame; every other case leaves the caller's existing origin untouched, so a
+// missing, torn or unseated sample can only fall back to the exact behavior
+// this replaces — never to an invented position.
+inline bool Halo3SelectHandOrigin(bool followBody, bool bodyValid,
+                                  const float body[3], float origin[3])
+{
+    if (!followBody || !bodyValid || !body || !origin)
+        return false;
+    for (int i = 0; i < 3; ++i)
+        if (!std::isfinite(body[i]))
+            return false;
+    for (int i = 0; i < 3; ++i)
+        origin[i] = body[i];
+    return true;
+}
+
 // C8 vehicle identity. Physics type is a CLASS, not a vehicle: (1,seat 0) is
 // warthog AND mongoose, (3,seat 0) is ghost, wraith AND mauler. The C7
 // session log (2026-07-31 09:32, Steam, cand ebd0e14) confirmed IN PROCESS

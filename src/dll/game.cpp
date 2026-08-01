@@ -2527,6 +2527,9 @@ namespace
     bool ControllerWorldPose(float basis[9],float pos[3],float& scale);
     bool ControllerWorldPoseEx(bool left,float basis[9],float pos[3],float& scale);
     bool DesiredWristWorld(bool left, BoneMatrix& out, float& meshScale);
+    // C21: the rigid, vehicle-parented seat placement the hands hang off while
+    // a first-person vehicle seat owns the view. False everywhere else.
+    bool Halo3ComputeSeatBodyAnchor(float out[3]);
 
     void BuildTrackedGameBasis(const float q[4], bool head, float basis[9])
     {
@@ -4604,7 +4607,18 @@ namespace
             (cg*roomForward+sg*roomRight)*s,
             (sg*roomForward-cg*roomRight)*s,
             dy*s};
-        const float cam[3] = {g_baseCamX.load(),g_baseCamY.load(),g_baseCamZ.load()};
+        float cam[3] = {g_baseCamX.load(),g_baseCamY.load(),g_baseCamZ.load()};
+        // C21: in a first-person vehicle seat the engine camera source is the
+        // occupant's own head marker, so using it here hangs the arms and gun
+        // off the seated biped's FACE — rotate the view and they are dragged
+        // with it. Anchor them to the seat itself instead: rigid in the
+        // vehicle's frame, so the vehicle still carries them and the head no
+        // longer does. Unavailable anchor keeps the existing origin, so this
+        // can only ever fall back to the behavior it replaces.
+        float bodyAnchor[3] = {};
+        const bool bodyAnchorValid = Halo3ComputeSeatBodyAnchor(bodyAnchor);
+        Halo3SelectHandOrigin(g_config.vehicle_hands_follow_body,
+                              bodyAnchorValid, bodyAnchor, cam);
         // Forward standoff along the controller's own aim direction (basis
         // column 0 = forward). EVERY left-hand use — support hand AND the
         // dual-wield gun seat — is the same wrist-to-palm PALM point (23:17
@@ -5260,7 +5274,13 @@ namespace
         // parenting. Kept separate from the node origin because the user's
         // Blender points are tag/model-space coordinates.
         float anchor[3];
+        // C21: the same placement BEFORE the occupant-head bounce is folded in
+        // — rigid in the vehicle's own frame. The camera wants the bounce; the
+        // hands must not have it, or they inherit the seated biped's head
+        // animation. See Halo3ComputeSeatBodyAnchor.
+        float anchorBase[3];
         uint32_t anchorValid = 0;
+        uint32_t anchorBaseValid = 0;
         uint32_t nodeInterpolated = 0;
         uint32_t headParented = 0;
         int32_t directType = -1;
@@ -5933,6 +5953,7 @@ namespace
         Halo3VehicleTransform& xf = g_halo3VehicleTransform;
         xf.seq.fetch_add(1, std::memory_order_acq_rel);
         xf.anchorValid = 0;
+        xf.anchorBaseValid = 0;
         xf.nodeInterpolated = 0;
         xf.headParented = 0;
         xf.valid.store(0, std::memory_order_relaxed);
@@ -6295,8 +6316,10 @@ namespace
                 Halo3Matrix4x3 liveNode{};
                 float authoredNodeLocal[3] = {};
                 float cameraAnchor[3] = {};
+                float bodyAnchor[3] = {};
                 bool nodeInterpolated = false;
                 bool anchorValid = false;
+                bool bodyAnchorValid = false;
                 bool headParented = false;
                 const bool haveLiveNode =
                     frameBoundsValid &&
@@ -6320,6 +6343,12 @@ namespace
                         Halo3AnchorWithinBounds(
                             cameraAnchor, frameBoundsCenter, frameBoundsRadius,
                             2.0f);
+                    // C21: keep this pre-bounce placement. It is the seat
+                    // itself, rigid in the vehicle frame, and it is what the
+                    // hands hang off; the head bounce below belongs only to
+                    // the camera.
+                    memcpy(bodyAnchor, cameraAnchor, sizeof(bodyAnchor));
+                    bodyAnchorValid = anchorValid;
 
                     // The attached mod's natural bounce comes from this exact
                     // phase-matched occupant-head marker. The enum-only seat
@@ -6479,7 +6508,9 @@ namespace
                 memcpy(xf.up, meshFrame.up, sizeof(xf.up));
                 memcpy(xf.rawFwd, meshFrame.fwd, sizeof(xf.rawFwd));
                 memcpy(xf.anchor, cameraAnchor, sizeof(xf.anchor));
+                memcpy(xf.anchorBase, bodyAnchor, sizeof(xf.anchorBase));
                 xf.anchorValid = anchorValid ? 1u : 0u;
+                xf.anchorBaseValid = bodyAnchorValid ? 1u : 0u;
                 xf.nodeInterpolated = nodeInterpolated ? 1u : 0u;
                 xf.headParented = headParented ? 1u : 0u;
                 xf.directType = directType;
@@ -6496,6 +6527,7 @@ namespace
             {
                 xf.seq.fetch_add(1, std::memory_order_acq_rel);  // -> odd
                 xf.anchorValid = 0;
+                xf.anchorBaseValid = 0;
                 xf.nodeInterpolated = 0;
                 xf.headParented = 0;
                 xf.valid.store(0, std::memory_order_relaxed);
@@ -6691,7 +6723,9 @@ namespace
         float rawFwd[3] = {0.0f, 0.0f, 0.0f};
         float up[3] = {0.0f, 0.0f, 0.0f};
         float anchor[3] = {0.0f, 0.0f, 0.0f};
+        float anchorBase[3] = {0.0f, 0.0f, 0.0f};
         bool anchorValid = false;
+        bool anchorBaseValid = false;
         bool nodeInterpolated = false;
         bool headParented = false;
         int seatIndex = -1;
@@ -6716,7 +6750,9 @@ namespace
         memcpy(out.rawFwd, xf.rawFwd, sizeof(out.rawFwd));
         memcpy(out.up, xf.up, sizeof(out.up));
         memcpy(out.anchor, xf.anchor, sizeof(out.anchor));
+        memcpy(out.anchorBase, xf.anchorBase, sizeof(out.anchorBase));
         out.anchorValid = xf.anchorValid != 0;
+        out.anchorBaseValid = xf.anchorBaseValid != 0;
         out.nodeInterpolated = xf.nodeInterpolated != 0;
         out.headParented = xf.headParented != 0;
         out.seatIndex = xf.seatIndex;
@@ -6728,7 +6764,8 @@ namespace
         for (int i = 0; i < 3; ++i)
             if (!isfinite(out.pos[i]) || !isfinite(out.fwd[i]) ||
                 !isfinite(out.rawFwd[i]) || !isfinite(out.up[i]) ||
-                (out.anchorValid && !isfinite(out.anchor[i])))
+                (out.anchorValid && !isfinite(out.anchor[i])) ||
+                (out.anchorBaseValid && !isfinite(out.anchorBase[i])))
                 return false;
         const float fLen = out.fwd[0] * out.fwd[0] + out.fwd[1] * out.fwd[1] +
             out.fwd[2] * out.fwd[2];
@@ -6751,6 +6788,38 @@ namespace
     // through the node's stored default inverse and the live rendered node.
     // Consume that exact world point directly. Applying the authored point to
     // the node frame a second time would shift every camera by its full offset.
+    // C21: where the occupant's BODY is, as opposed to where the camera is.
+    //
+    // On foot the hand/gun origin is the engine's own camera-source position,
+    // which is carried by the player's body and is therefore a sound anchor.
+    // In a first-person vehicle seat it is not: Halo's seated camera evaluator
+    // resolves the OCCUPANT'S `head` MARKER (halo3+0x355853, string id 0x9F),
+    // so the origin the hands hang off animates with the seated biped's head
+    // and neck as the view turns. That is the exact "chained to my face"
+    // behaviour — rotate the view and the arms and gun are dragged with it.
+    //
+    // This returns the seat placement BEFORE the occupant-head bounce is added:
+    // the authored point carried through the live rendered seat node and
+    // nothing else, so it is rigid in the vehicle's own frame. Rotating the
+    // head cannot move it, while the vehicle's motion, suspension and banking
+    // still do. The camera keeps the bounce; only the arms lose it.
+    //
+    // It is deliberately the same POINT the camera uses, not a lowered chest
+    // position: the controller displacement added to it is measured from the
+    // room-space head reference captured at this exact seat, so shifting the
+    // origin down would drop the hands by that amount rather than re-parent
+    // them. What changes is what the origin FOLLOWS, which is the body.
+    bool Halo3ComputeSeatBodyAnchor(float out[3])
+    {
+        if (!out || !Halo3VehicleFpActive())
+            return false;
+        Halo3SeatSnapshot seat;
+        if (!Halo3ReadSeatSnapshot(seat) || !seat.anchorBaseValid)
+            return false;
+        memcpy(out, seat.anchorBase, sizeof(seat.anchorBase));
+        return true;
+    }
+
     bool Halo3ComputeAuthoredAnchor(float out[3])
     {
         Halo3SeatSnapshot seat;

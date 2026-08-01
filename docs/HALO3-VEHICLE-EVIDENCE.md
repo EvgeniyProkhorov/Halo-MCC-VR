@@ -1655,3 +1655,90 @@ neither can disarm the camera core.
 
 **Status: C20 candidate — NOT HEADSET ACCEPTED.** The accepted-build pointer is
 unchanged.
+
+## C20 headset result, and C21 — the arms ride the seat, not the face
+
+**C20 (`8547b7d`, DLL `19089BF4…C656F5B`) is HEADSET ACCEPTED.** Steam edition,
+run at 05:40–05:51 on 2026-08-01. The user's words: "vehicles feel great." The
+log carries `H3 first-person seat: Active` on every seat entry and its matching
+`restored the seat's own camera flag` on every exit, with no `StockFallback`.
+Two things are now confirmed at runtime rather than predicted:
+
+1. Clearing seat flag bit 4 does suppress the occupant's character model.
+2. It also brings up the **first-person weapon** in `allows weapons` passenger
+   seats — the user reports hands and gun present there.
+
+Note the C20 run never entered a passenger seat (every `H3 vehicle probe` line
+is `seat=0`); the passenger observation came from a later sitting on the same
+build.
+
+### Why the engine builds first-person weapons for a vehicle occupant
+
+The gate is the director's PERSPECTIVE, and nothing in the chain asks whether
+the unit is in a vehicle:
+
+| Retail RVA | Role |
+| --- | --- |
+| `+0x131B40` | `set_camera_mode`. Constructs the camera for the requested mode, then stores `c_director::get_perspective()` at user record `+0x604` and the mode itself at `+0x608` (per-user stride `0xC`, block at TLS `+0x188`) |
+| `+0x131A00` | `c_director::get_perspective()` — calls the live camera's vtable slot 1, defaulting to `_director_perspective_neutral (3)` |
+| `+0x7961D0` | first-person camera vtable: `get_type` → `3` (`_camera_mode_first_person`), `get_perspective` → **`0`** (`_director_perspective_first_person`) |
+| `+0x28ADDC` | the first-person model cache. Zeroes `first_person_model_count`, sets `first_person_camera_object_index` to `-1`, and only when `+0x20F494` returns `-1` **and** user `+0x604 == 0` does it store the player's unit into `first_person_camera_object_index` and call `+0x2C0D20` to build the first-person weapon models |
+| `+0x2C0D20` → `+0x184B08` | builds those models through the exact first-person interpolation function this mod already hooks |
+
+The two render globals are `halo3+0xADAC20` (`first_person_camera_object_index`)
+and `halo3+0xADAC24` (`first_person_model_count`), decoded from three
+independent RIP-relative stores in `+0x28ADDC` that resolve to the same pair.
+The first is what makes the world renderer skip the player's own object — the
+mechanism behind C20's accepted result. `+0x20F494` is a scripted/cinematic
+first-person override that returns `-1` in ordinary gameplay.
+
+So: seat bit 4 clear → first-person camera → perspective `0` → the occupant's
+character model is skipped **and** their first-person weapon is built, in a
+vehicle exactly as on foot. This layout also independently corroborates
+ManagedDonkey's `s_render_object_first_person_globals` field order.
+
+### The defect C21 fixes
+
+The user's report, in a passenger seat: *"hands and guns show, the tracking
+sorta works, but as I rotate the camera I lose sync to the guns — the arms need
+to follow my chest, be careful not to chain it to my face."*
+
+`ControllerWorldPoseEx` places the wrists at `base + R(controller room offset)`,
+where `base` is `g_baseCam`, snapshotted from the engine's camera SOURCE
+position before `ApplyHeadLook` runs. On foot that source is carried by the
+player's body and is a sound origin.
+
+In a first-person vehicle seat it is not. The seated camera evaluator's
+bit-4-clear branch resolves the occupant's own `head` marker (`+0x355853`,
+string id `0x9F`) and overwrites the camera position with it. So after C20 the
+hand origin in a seat is literally the seated biped's head: turning the view
+drives the occupant's aim, which animates the head and neck, which moves the
+marker, which drags the arms and gun. That is precisely "chained to my face".
+
+C21 anchors the arms to the seat instead. The sampler already computes the
+authored placement twice — once as `P_base(t) = L(t) * P_node`, rigid in the
+vehicle's frame, and once with the C18 occupant-head bounce added. Only the
+second was published. C21 publishes both and gives the hand origin the rigid
+one, so the vehicle's motion, suspension and banking still carry the arms while
+head rotation cannot. The camera keeps its bounce; nothing about placement,
+yaw follow, trims or the C18 parent changes.
+
+It is deliberately the **same point** the camera uses, not a lowered chest
+position. The controller displacement added to it is measured from the
+room-space head reference captured at that exact seat, so moving the origin
+down would drop the hands by that amount rather than re-parent them. What
+changes is what the origin FOLLOWS, which is now the body.
+
+Selection is conservative and tested: the rigid anchor is taken only when the
+feature is on and the seat published a finite placement this frame. Off foot,
+on a torn or missing sample, or with the feature off, the existing camera
+origin is left byte-for-byte alone — the fallback is exactly the behavior C21
+replaces, never an invented position. New config `vehicle_hands_follow_body`
+(default 1) plus an F1 checkbox gives a one-click A/B.
+
+Coverage is already complete for the ask: every player passenger seat in the
+table has an authored point — Warthog seat 1, Mongoose seat 1, Hornet seats
+1–2, Prowler seats 1–2 — so all of them take both the first-person seat flag
+and the rigid hand anchor.
+
+**Status: C20 ACCEPTED; C21 candidate NOT YET HEADSET ACCEPTED.**

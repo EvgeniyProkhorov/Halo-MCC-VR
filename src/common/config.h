@@ -185,6 +185,11 @@ struct Config
     // is never modified. Ignored entirely when vehicle_first_person = 0, so
     // third-person driving is unaffected.
     bool vehicle_hide_body = true;
+    // Hang the first-person arms and gun off the SEAT rather than off Halo's
+    // seated camera, which is the occupant's own head marker. ON keeps them
+    // riding the vehicle while your head turns freely; OFF restores the
+    // head-anchored origin. Only applies inside a first-person vehicle seat.
+    bool vehicle_hands_follow_body = true;
 
     // Motion steering in look-steered ground driver seats: grab an invisible
     // wheel with both grips and turn it. 0 = the right stick steers.

@@ -326,3 +326,16 @@ binary claim adversarially re-derived). Verified facts, pinned module build
   first-person camera update `0x17DAEC` (bit 0 clear) or the following camera
   `0x2144C0`, and the seated camera evaluator `0x3555EC` gates its occupant
   `head`-marker branch on it at `0x3557F5`. Every stock player seat sets it.
+- First-person model gate is the director PERSPECTIVE, with no vehicle test
+  anywhere: `0x131B40` (set_camera_mode) stores `c_director::get_perspective()`
+  (`0x131A00`) at user record `+0x604` and the mode at `+0x608` (per-user
+  stride 0xC, block at engine TLS `+0x188`). The first-person camera vtable
+  `0x7961D0` reports type 3 / perspective 0. `0x28ADDC` requires
+  `+0x20F494 == -1` and perspective 0, then writes the player's unit into
+  `first_person_camera_object_index` (`0xADAC20`) — which is what makes the
+  world renderer skip the player's own model — and builds the first-person
+  weapon models via `0x2C0D20` -> `0x184B08`. `first_person_model_count` is
+  `0xADAC24`. So a first-person vehicle seat gets FP weapons exactly like foot.
+- The seated camera's position IS the occupant's `head` marker while bit 4 is
+  clear (`0x355853`, string id 0x9F). Anything anchored to the engine camera
+  source in a seat is therefore anchored to the character's head, not its body.
