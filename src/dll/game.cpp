@@ -28,7 +28,6 @@
 #include "../common/config.h"
 #include "../common/cutscene_theater_logic.h"
 #include "../common/halo3_theater_logic.h"
-#include "../common/halo3_scripted_input_logic.h"
 #include "../common/halo3_vehicle_logic.h"
 #include "../common/hud_layout_logic.h"
 #include "../common/input_logic.h"
@@ -207,45 +206,6 @@ namespace
     std::atomic<bool> g_vrAim{true};         // on by default; Insert toggles
     std::atomic<float> g_aimFwdX{1}, g_aimFwdY{0}, g_aimFwdZ{0};
     std::atomic<bool> g_aimSeen{false};
-
-    // Halo 3's Cortana/Gravemind channel deliberately scales every player
-    // input to 15%. The optional paired native setter/update observers below
-    // publish that authored ownership to both the camera and XInput threads
-    // without making either hot path inspect Halo memory or perform logging.
-    enum class Halo3ScriptedInputBindingState : uint8_t
-    {
-        NotInstalled = 0,
-        Installed,
-        StockFallback,
-        CleanupRequired,
-    };
-    enum class Halo3ScriptedInputStateReason : uint8_t
-    {
-        None = 0,
-        Engaged,
-        RestoreRequested,
-        RestoreComplete,
-        NativeStateChanged,
-        NativeStateUnavailable,
-        LifecycleReset,
-    };
-    using Halo3PlayerControlScaleAllInputFn = void(__fastcall*)(float, float);
-    using Halo3PlayerControlUpdateFn =
-        void(__fastcall*)(int, int, int, float, float);
-    Halo3PlayerControlScaleAllInputFn g_realHalo3PlayerControlScaleAllInput =
-        nullptr;
-    Halo3PlayerControlUpdateFn g_realHalo3PlayerControlUpdate = nullptr;
-    std::atomic<uint8_t> g_halo3ScriptedInputBinding{
-        static_cast<uint8_t>(Halo3ScriptedInputBindingState::NotInstalled)};
-    std::atomic<uint32_t> g_halo3ScriptedInputGeneration{0};
-    std::atomic<uintptr_t> g_halo3ScriptedInputTlsIndexAddress{0};
-    std::atomic<uint64_t> g_halo3ScriptedInputControl{0};
-    // One-shot native-record validation after install or a transient setter
-    // read failure. This closes the enable/publication window without turning
-    // the idle updater hook into a permanent polling probe.
-    std::atomic<bool> g_halo3ScriptedInputValidationPending{false};
-    std::atomic<float> g_halo3ScriptedInputTargetScale{1.0f};
-    std::atomic<float> g_halo3ScriptedInputDurationSeconds{0.0f};
 
     // Reach has no controller-aim body-heading contract yet, so its stock
     // movement heading is the yaw of the pristine per-frame compact camera (the
@@ -929,7 +889,7 @@ namespace
     // often, with which flag. Phase A then invokes it per eye ourselves.
     FpDriverFn g_origFpDriver = nullptr;
     int32_t* g_fpDriverGuard = nullptr; // zero-init global gating call site 1
-    constexpr size_t kMaxInstalledGameHooks = 24;
+    constexpr size_t kMaxInstalledGameHooks = 16;
     void* g_installedGameHooks[kMaxInstalledGameHooks]{};
     size_t g_installedGameHookCount = 0;
 
@@ -4866,422 +4826,6 @@ namespace
     float Clamp(float v, float lo, float hi) { return v < lo ? lo : (v > hi ? hi : v); }
     float WrapPi(float a) { while (a > 3.14159265f) a -= 6.2831853f; while (a < -3.14159265f) a += 6.2831853f; return a; }
 
-    constexpr uint64_t kHalo3ScriptedInputPhaseMask = 0xFFull;
-    constexpr uint64_t kHalo3ScriptedInputReasonShift = 8;
-    constexpr uint64_t kHalo3ScriptedInputEpochShift = 32;
-    // Halo's updater argument and 0x30 record index are input-user indices.
-    // The supported single-local-player VR path owns primary input user 0.
-    constexpr uint8_t kHalo3VrInputUser = 0;
-
-    Halo3ScriptedInputPhase Halo3ScriptedInputControlPhase(uint64_t state)
-    {
-        return static_cast<Halo3ScriptedInputPhase>(
-            state & kHalo3ScriptedInputPhaseMask);
-    }
-
-    Halo3ScriptedInputStateReason Halo3ScriptedInputControlReason(
-        uint64_t state)
-    {
-        return static_cast<Halo3ScriptedInputStateReason>(
-            (state >> kHalo3ScriptedInputReasonShift) & 0xFFull);
-    }
-
-    uint32_t Halo3ScriptedInputControlEpoch(uint64_t state)
-    {
-        return static_cast<uint32_t>(state >>
-                                     kHalo3ScriptedInputEpochShift);
-    }
-
-    uint64_t MakeHalo3ScriptedInputControl(
-        uint32_t epoch, Halo3ScriptedInputPhase phase,
-        Halo3ScriptedInputStateReason reason)
-    {
-        return (static_cast<uint64_t>(epoch) <<
-                    kHalo3ScriptedInputEpochShift) |
-            (static_cast<uint64_t>(reason) <<
-                    kHalo3ScriptedInputReasonShift) |
-            static_cast<uint64_t>(phase);
-    }
-
-    uint64_t PublishHalo3ScriptedInputControl(
-        Halo3ScriptedInputPhase phase,
-        Halo3ScriptedInputStateReason reason)
-    {
-        uint64_t observed =
-            g_halo3ScriptedInputControl.load(std::memory_order_acquire);
-        for (;;)
-        {
-            const uint64_t desired = MakeHalo3ScriptedInputControl(
-                Halo3ScriptedInputControlEpoch(observed) + 1, phase, reason);
-            if (g_halo3ScriptedInputControl.compare_exchange_weak(
-                    observed, desired, std::memory_order_acq_rel,
-                    std::memory_order_acquire))
-                return desired;
-        }
-    }
-
-    bool TransitionHalo3ScriptedInputControl(
-        uint64_t observed, Halo3ScriptedInputPhase phase,
-        Halo3ScriptedInputStateReason reason, bool advanceEpoch)
-    {
-        const uint32_t epoch =
-            Halo3ScriptedInputControlEpoch(observed) +
-            (advanceEpoch ? 1u : 0u);
-        const uint64_t desired =
-            MakeHalo3ScriptedInputControl(epoch, phase, reason);
-        return g_halo3ScriptedInputControl.compare_exchange_strong(
-            observed, desired, std::memory_order_acq_rel,
-            std::memory_order_acquire);
-    }
-
-    bool Halo3ScriptedInputBindingIsCurrent()
-    {
-        if (g_halo3ScriptedInputBinding.load(std::memory_order_acquire) !=
-            static_cast<uint8_t>(Halo3ScriptedInputBindingState::Installed))
-            return false;
-        const uint32_t generation =
-            g_halo3ScriptedInputGeneration.load(std::memory_order_acquire);
-        return generation != 0 &&
-            generation ==
-                g_halo3RuntimeGeneration.load(std::memory_order_acquire);
-    }
-
-    bool ReadHalo3ScriptedInputRecord(
-        uint8_t inputUser, Halo3ScriptedInputRecordState& out)
-    {
-        out = {};
-        if (inputUser >= kHalo3ScriptedInputUserCount)
-            return false;
-        const uintptr_t tlsIndexAddress =
-            g_halo3ScriptedInputTlsIndexAddress.load(
-                std::memory_order_acquire);
-        if (!tlsIndexAddress)
-            return false;
-
-        __try
-        {
-            const uint32_t tlsIndex =
-                *reinterpret_cast<const uint32_t*>(tlsIndexAddress);
-            // This is the PE static-TLS module index used by gs:[0x58], not
-            // the unrelated TlsAlloc slot number. The original function has
-            // just used it on this thread; SEH below guards a teardown race.
-            if (tlsIndex == TLS_OUT_OF_INDEXES)
-                return false;
-            auto** slots =
-                reinterpret_cast<void**>(__readgsqword(0x58));
-            auto* tls = slots
-                ? reinterpret_cast<unsigned char*>(slots[tlsIndex])
-                : nullptr;
-            auto* records = tls
-                ? *reinterpret_cast<unsigned char**>(
-                      tls + kHalo3ScriptedInputRecordsTlsOffset)
-                : nullptr;
-            if (!records)
-                return false;
-            const unsigned char* record =
-                records + static_cast<uintptr_t>(inputUser) *
-                    kHalo3ScriptedInputRecordStride;
-            out.active = *reinterpret_cast<const uint8_t*>(
-                record + kHalo3ScriptedInputActiveOffset);
-            out.currentScale = *reinterpret_cast<const float*>(
-                record + kHalo3ScriptedInputCurrentOffset);
-            out.targetScale = *reinterpret_cast<const float*>(
-                record + kHalo3ScriptedInputTargetOffset);
-            out.remainingSeconds = *reinterpret_cast<const float*>(
-                record + kHalo3ScriptedInputRemainingOffset);
-            out.stable = true;
-            return true;
-        }
-        __except (EXCEPTION_EXECUTE_HANDLER)
-        {
-            out = {};
-            return false;
-        }
-    }
-
-    void ResetHalo3ScriptedInputOwnership()
-    {
-        g_halo3ScriptedInputBinding.store(
-            static_cast<uint8_t>(Halo3ScriptedInputBindingState::NotInstalled),
-            std::memory_order_release);
-        g_halo3ScriptedInputGeneration.store(0, std::memory_order_release);
-        g_halo3ScriptedInputTlsIndexAddress.store(
-            0, std::memory_order_release);
-        g_halo3ScriptedInputValidationPending.store(
-            false, std::memory_order_release);
-        g_halo3ScriptedInputTargetScale.store(
-            1.0f, std::memory_order_relaxed);
-        g_halo3ScriptedInputDurationSeconds.store(
-            0.0f, std::memory_order_relaxed);
-
-        uint64_t observed =
-            g_halo3ScriptedInputControl.load(std::memory_order_acquire);
-        while (Halo3ScriptedInputControlPhase(observed) !=
-               Halo3ScriptedInputPhase::Idle)
-        {
-            const uint64_t desired = MakeHalo3ScriptedInputControl(
-                Halo3ScriptedInputControlEpoch(observed) + 1,
-                Halo3ScriptedInputPhase::Idle,
-                Halo3ScriptedInputStateReason::LifecycleReset);
-            if (g_halo3ScriptedInputControl.compare_exchange_weak(
-                    observed, desired, std::memory_order_acq_rel,
-                    std::memory_order_acquire))
-                break;
-        }
-    }
-
-    bool Halo3ScriptedInputOwnsVrTurning()
-    {
-        if (!Halo3ScriptedInputBindingIsCurrent())
-            return false;
-        return Halo3ScriptedInputControlPhase(
-                   g_halo3ScriptedInputControl.load(
-                       std::memory_order_acquire)) !=
-            Halo3ScriptedInputPhase::Idle;
-    }
-
-    void __fastcall Halo3PlayerControlScaleAllInputHook(
-        float targetScale, float durationSeconds)
-    {
-        const Halo3PlayerControlScaleAllInputFn original =
-            g_realHalo3PlayerControlScaleAllInput;
-        if (!original)
-            return;
-
-        // Observe only: Halo applies its native scale before the optional VR
-        // compatibility state is published. No log, allocation, or lock runs
-        // on this engine callback.
-        original(targetScale, durationSeconds);
-        if (!Halo3ScriptedInputBindingIsCurrent())
-            return;
-
-        const Halo3ScriptedInputPolicy policy =
-            ClassifyHalo3ScriptedInputScale(targetScale, durationSeconds);
-        if (policy.action == Halo3ScriptedInputAction::Ignore)
-            return;
-
-        g_halo3ScriptedInputTargetScale.store(
-            targetScale, std::memory_order_relaxed);
-        g_halo3ScriptedInputDurationSeconds.store(
-            durationSeconds, std::memory_order_relaxed);
-
-        Halo3ScriptedInputRecordState record;
-        const bool recordValid =
-            ReadHalo3ScriptedInputRecord(kHalo3VrInputUser, record) &&
-            record.stable && Halo3ScriptedInputRecordIsFinite(record) &&
-            record.remainingSeconds >=
-                -kHalo3ScriptedInputRemainingTolerance;
-        if (policy.action ==
-            Halo3ScriptedInputAction::SuppressVrTurning)
-        {
-            if (recordValid &&
-                Halo3ScriptedInputRecordShowsNativeSuppression(record))
-            {
-                PublishHalo3ScriptedInputControl(
-                    Halo3ScriptedInputPhase::Suppressed,
-                    Halo3ScriptedInputStateReason::Engaged);
-            }
-            else
-            {
-                PublishHalo3ScriptedInputControl(
-                    Halo3ScriptedInputPhase::Idle,
-                    Halo3ScriptedInputStateReason::NativeStateUnavailable);
-                // Arm retry after publishing Idle so no updater can consume
-                // the latch and then be overwritten by this setter event.
-                g_halo3ScriptedInputValidationPending.store(
-                    true, std::memory_order_release);
-            }
-            return;
-        }
-
-        uint64_t observed =
-            g_halo3ScriptedInputControl.load(std::memory_order_acquire);
-        if (Halo3ScriptedInputControlPhase(observed) ==
-            Halo3ScriptedInputPhase::Idle)
-            return;
-        if (!recordValid ||
-            !Halo3ScriptedInputScaleMatches(
-                record.targetScale, kHalo3ScriptedInputRestoreScale))
-        {
-            TransitionHalo3ScriptedInputControl(
-                observed, Halo3ScriptedInputPhase::Idle,
-                recordValid
-                    ? Halo3ScriptedInputStateReason::NativeStateChanged
-                    : Halo3ScriptedInputStateReason::NativeStateUnavailable,
-                true);
-            // A concurrent newer 0.15 setter may have raced this stale
-            // restore observation. Revalidate once from the native record
-            // after publishing fail-open Idle so suppression cannot be lost.
-            g_halo3ScriptedInputValidationPending.store(
-                true, std::memory_order_release);
-            return;
-        }
-
-        const uint32_t eventEpoch =
-            Halo3ScriptedInputControlEpoch(observed);
-        while (Halo3ScriptedInputControlPhase(observed) !=
-                   Halo3ScriptedInputPhase::Idle &&
-               Halo3ScriptedInputControlEpoch(observed) == eventEpoch)
-        {
-            const uint64_t desired = MakeHalo3ScriptedInputControl(
-                eventEpoch + 1, Halo3ScriptedInputPhase::Restoring,
-                Halo3ScriptedInputStateReason::RestoreRequested);
-            if (g_halo3ScriptedInputControl.compare_exchange_weak(
-                    observed, desired, std::memory_order_acq_rel,
-                    std::memory_order_acquire))
-                break;
-        }
-    }
-
-    void __fastcall Halo3PlayerControlUpdateHook(
-        int playerIndex, int inputUserIndex, int controllerIndex,
-        float arg4, float arg5)
-    {
-        const Halo3PlayerControlUpdateFn original =
-            g_realHalo3PlayerControlUpdate;
-        if (!original)
-            return;
-        original(playerIndex, inputUserIndex, controllerIndex, arg4, arg5);
-
-        // This is the H3EK-proven native input updater. Inspect only the local
-        // primary input-user record after Halo advances its scale from
-        // simulation time. The callback remains allocation/lock/log free.
-        if (inputUserIndex != kHalo3VrInputUser ||
-            !Halo3ScriptedInputBindingIsCurrent())
-            return;
-        const uint64_t observed =
-            g_halo3ScriptedInputControl.load(std::memory_order_acquire);
-        const Halo3ScriptedInputPhase phase =
-            Halo3ScriptedInputControlPhase(observed);
-        if (phase == Halo3ScriptedInputPhase::Idle &&
-            !g_halo3ScriptedInputValidationPending.exchange(
-                false, std::memory_order_acq_rel))
-            return;
-
-        Halo3ScriptedInputRecordState records[
-            kHalo3ScriptedInputUserCount]{};
-        if (!ReadHalo3ScriptedInputRecord(
-                kHalo3VrInputUser, records[kHalo3VrInputUser]))
-        {
-            if (phase != Halo3ScriptedInputPhase::Idle)
-            {
-                TransitionHalo3ScriptedInputControl(
-                    observed, Halo3ScriptedInputPhase::Idle,
-                    Halo3ScriptedInputStateReason::NativeStateUnavailable,
-                    true);
-            }
-            // Publish the fail-open state before retry becomes consumable.
-            g_halo3ScriptedInputValidationPending.store(
-                true, std::memory_order_release);
-            return;
-        }
-
-        if (phase == Halo3ScriptedInputPhase::Idle)
-        {
-            const Halo3ScriptedInputRecordState& record =
-                records[kHalo3VrInputUser];
-            if (Halo3ScriptedInputRecordShowsNativeSuppression(record))
-            {
-                g_halo3ScriptedInputTargetScale.store(
-                    record.targetScale, std::memory_order_relaxed);
-                g_halo3ScriptedInputDurationSeconds.store(
-                    record.remainingSeconds, std::memory_order_relaxed);
-                TransitionHalo3ScriptedInputControl(
-                    observed, Halo3ScriptedInputPhase::Suppressed,
-                    Halo3ScriptedInputStateReason::Engaged, true);
-            }
-            return;
-        }
-
-        const Halo3ScriptedInputObservation observation =
-            ObserveHalo3ScriptedInputRecords(
-                phase, records,
-                static_cast<uint8_t>(1u << kHalo3VrInputUser));
-        switch (observation)
-        {
-        case Halo3ScriptedInputObservation::Hold:
-            return;
-        case Halo3ScriptedInputObservation::NativeSuppressed:
-            if (phase != Halo3ScriptedInputPhase::Suppressed)
-            {
-                TransitionHalo3ScriptedInputControl(
-                    observed, Halo3ScriptedInputPhase::Suppressed,
-                    Halo3ScriptedInputControlReason(observed), false);
-            }
-            return;
-        case Halo3ScriptedInputObservation::NativeRestoring:
-            if (phase != Halo3ScriptedInputPhase::Restoring)
-            {
-                TransitionHalo3ScriptedInputControl(
-                    observed, Halo3ScriptedInputPhase::Restoring,
-                    Halo3ScriptedInputControlReason(observed), false);
-            }
-            return;
-        case Halo3ScriptedInputObservation::Restored:
-            TransitionHalo3ScriptedInputControl(
-                observed, Halo3ScriptedInputPhase::Idle,
-                Halo3ScriptedInputStateReason::RestoreComplete, true);
-            return;
-        case Halo3ScriptedInputObservation::Invalid:
-            TransitionHalo3ScriptedInputControl(
-                observed, Halo3ScriptedInputPhase::Idle,
-                Halo3ScriptedInputStateReason::NativeStateChanged, true);
-            return;
-        }
-    }
-
-    void Halo3ScriptedInputWorkerPoll(uint64_t)
-    {
-        static uint32_t loggedEpoch = 0;
-        const uint64_t state =
-            g_halo3ScriptedInputControl.load(std::memory_order_acquire);
-        const uint32_t epoch = Halo3ScriptedInputControlEpoch(state);
-        if (!epoch || epoch == loggedEpoch)
-            return;
-        loggedEpoch = epoch;
-
-        const float target =
-            g_halo3ScriptedInputTargetScale.load(std::memory_order_relaxed);
-        const float duration =
-            g_halo3ScriptedInputDurationSeconds.load(
-                std::memory_order_relaxed);
-        switch (Halo3ScriptedInputControlReason(state))
-        {
-        case Halo3ScriptedInputStateReason::Engaged:
-            LOG("H3 scripted input: native Cortana/Gravemind slowdown owns "
-                "turning; VR aim and snap/smooth turn suspended "
-                "(target %.3f over %.3fs)", target, duration);
-            break;
-        case Halo3ScriptedInputStateReason::RestoreRequested:
-            LOG("H3 scripted input: native restore requested (target %.3f "
-                "over %.3fs); turning remains suspended until Halo completes "
-                "its simulation-time interpolation", target, duration);
-            break;
-        case Halo3ScriptedInputStateReason::RestoreComplete:
-            LOG("H3 scripted input: Halo completed its native restore; VR aim "
-                "and snap/smooth turn resumed");
-            break;
-        case Halo3ScriptedInputStateReason::NativeStateChanged:
-            LOG("H3 scripted input: native input-user-0 scale state changed "
-                "outside "
-                "the Cortana/Gravemind contract; this feature yielded to stock "
-                "input without affecting the camera core");
-            break;
-        case Halo3ScriptedInputStateReason::NativeStateUnavailable:
-            LOG("H3 scripted input: native input-user-0 scale record was "
-                "unavailable "
-                "or invalid; this transition stayed stock and the camera core "
-                "was unaffected");
-            break;
-        case Halo3ScriptedInputStateReason::LifecycleReset:
-            LOG("H3 scripted input: title lifecycle reset released VR turning "
-                "ownership");
-            break;
-        case Halo3ScriptedInputStateReason::None:
-            break;
-        }
-    }
-
     // Rodrigues rotation of v (in place) about the unit axis by the angle
     // whose cosine/sine are given.
     void RotateAboutAxis(float* v, const float* axis, float cosA, float sinA)
@@ -5573,8 +5117,6 @@ namespace
     void ApplyVrTurn(const VrPadState& pad)
     {
         if (!g_vrAim.load())
-            return;
-        if (Halo3ScriptedInputOwnsVrTurning())
             return;
         if (!pad.valid)
             return;
@@ -10521,89 +10063,6 @@ namespace
     const char* kFpCameraUploadSig =
         "48 8B C4 48 89 58 08 48 89 70 10 48 89 78 18 55 48 8D 68 A1 48 81 EC C0 00 00 00 0F 29 70 E8 48 8B FA F3 0F 10 35 ?? ?? ?? ?? 48 8D 55 B7";
 
-    // player_control_scale_all_input (pinned retail halo3.dll+0xF9304).
-    // Official H3EK names and defines this function; its Cortana/Gravemind
-    // channel is the only official script path that requests target 0.15.
-    // This complete entry/TLS shape has exactly one match in the pinned retail
-    // module. The optional observer calls the native function unchanged and
-    // publishes only those exact authored target transitions.
-    inline constexpr uintptr_t kHalo3PlayerControlScaleAllInputExpectedRva =
-        0xF9304;
-    const char* kHalo3PlayerControlScaleAllInputSig =
-        "48 8B C4 48 89 58 08 57 48 83 EC 70 8B 0D ?? ?? ?? ?? "
-        "0F 28 E1 0F 29 70 E8 0F 29 78 D8 44 0F 29 40 C8 44 0F "
-        "28 C0 65 48 8B 04 25 58 00 00 00 48 8B 1C C8 48 8D 4C "
-        "24 28 B8 10 00 00 00 48 8B 04 18";
-
-    // H3EK player_control_update_input, pinned retail halo3.dll+0xF66AC.
-    // The paired interpolation block proves the +1C/+20/+24/+28 scale-record
-    // semantics at entry+0x170; both patterns are unique in the pinned module.
-    inline constexpr uintptr_t kHalo3PlayerControlUpdateExpectedRva =
-        0xF66AC;
-    inline constexpr uintptr_t kHalo3PlayerControlInterpolationBlockOffset =
-        0x170;
-    const char* kHalo3PlayerControlUpdateSig =
-        "48 8B C4 48 89 58 20 44 89 40 18 89 50 10 89 48 08 55 "
-        "56 57 41 54 41 55 41 56 41 57 48 8D 68 A9 48 81 EC 00 "
-        "01 00 00 65 48 8B 0C 25 58 00 00 00 41 8B F8 0F 29 70 "
-        "B8 0F 28 F3 0F 29 78 A8 4C 63 FA 44 0F 29 40 98 4D 8B "
-        "E7 44 0F 29 48 88 44 0F 29 90 78 FF FF FF 8B 05 ?? ?? "
-        "?? ?? 4B 8D 1C 7F BA C0 00 00 00";
-    const char* kHalo3PlayerControlInterpolationBlockSig =
-        "40 38 7B 1C 0F 84 ?? ?? ?? ?? 4A 8B 0C 29 F3 0F 10 51 "
-        "08 0F 2F D7 76 ?? F3 0F 10 5B 28 0F 2F DA F3 0F 10 4B "
-        "24 76 ?? F3 0F 5C 4B 20";
-
-    bool Halo3ModuleRangeContains(uintptr_t base, size_t size,
-                                  uintptr_t address, size_t length)
-    {
-        if (address < base)
-            return false;
-        const uintptr_t offset = address - base;
-        return offset <= size && length <= size - offset;
-    }
-
-    bool Halo3StaticTlsIndexMatchesModule(
-        uintptr_t base, size_t size, uintptr_t tlsIndexAddress)
-    {
-        if (!Halo3ModuleRangeContains(
-                base, size, base, sizeof(IMAGE_DOS_HEADER)))
-            return false;
-        const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
-        if (dos->e_magic != IMAGE_DOS_SIGNATURE || dos->e_lfanew < 0)
-            return false;
-        const size_t ntOffset = static_cast<size_t>(dos->e_lfanew);
-        if (ntOffset > size)
-            return false;
-        const uintptr_t ntAddress = base + ntOffset;
-        if (!Halo3ModuleRangeContains(
-                base, size, ntAddress, sizeof(IMAGE_NT_HEADERS64)))
-            return false;
-        const auto* nt =
-            reinterpret_cast<const IMAGE_NT_HEADERS64*>(ntAddress);
-        if (nt->Signature != IMAGE_NT_SIGNATURE ||
-            nt->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC ||
-            nt->OptionalHeader.NumberOfRvaAndSizes <=
-                IMAGE_DIRECTORY_ENTRY_TLS)
-            return false;
-        const IMAGE_DATA_DIRECTORY& tlsData =
-            nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_TLS];
-        if (!tlsData.VirtualAddress ||
-            tlsData.VirtualAddress > size)
-            return false;
-        const uintptr_t tlsDirectoryAddress =
-            base + static_cast<uintptr_t>(tlsData.VirtualAddress);
-        if (!Halo3ModuleRangeContains(
-                base, size, tlsDirectoryAddress,
-                sizeof(IMAGE_TLS_DIRECTORY64)))
-            return false;
-        const auto* tlsDirectory =
-            reinterpret_cast<const IMAGE_TLS_DIRECTORY64*>(
-                tlsDirectoryAddress);
-        return static_cast<uintptr_t>(tlsDirectory->AddressOfIndex) ==
-            tlsIndexAddress;
-    }
-
     // Halo 3 vehicle-detection identities (docs/HALO3-VEHICLE-EVIDENCE.md).
     // Each measured exactly one raw match in the pinned module, twice
     // (analyst + independent adversarial re-scan). Native unit_in_vehicle
@@ -10883,227 +10342,10 @@ namespace
         }
     }
 
-    void InstallHalo3ScriptedInputObserver(
-        uintptr_t base, size_t size, uint32_t runtimeGeneration)
-    {
-        ResetHalo3ScriptedInputOwnership();
-
-        const uintptr_t scaleHit =
-            sig::Find(base, size, kHalo3PlayerControlScaleAllInputSig);
-        const bool uniqueScale = scaleHit &&
-            !sig::Find(scaleHit + 1, base + size - scaleHit - 1,
-                       kHalo3PlayerControlScaleAllInputSig);
-        const uintptr_t updateHit =
-            sig::Find(base, size, kHalo3PlayerControlUpdateSig);
-        const bool uniqueUpdate = updateHit &&
-            !sig::Find(updateHit + 1, base + size - updateHit - 1,
-                       kHalo3PlayerControlUpdateSig);
-        const uintptr_t interpolationHit =
-            sig::Find(base, size,
-                      kHalo3PlayerControlInterpolationBlockSig);
-        const bool uniqueInterpolation = interpolationHit &&
-            !sig::Find(interpolationHit + 1,
-                       base + size - interpolationHit - 1,
-                       kHalo3PlayerControlInterpolationBlockSig);
-
-        int32_t scaleTlsDisp = 0;
-        int32_t updateTlsDisp = 0;
-        constexpr size_t kScaleTlsDecodeLength = 0x12;
-        constexpr size_t kUpdateContractDecodeLength = 0x65;
-        const bool scaleDecodeValid = uniqueScale &&
-            Halo3ModuleRangeContains(
-                base, size, scaleHit, kScaleTlsDecodeLength);
-        const bool updateDecodeValid = uniqueUpdate &&
-            Halo3ModuleRangeContains(
-                base, size, updateHit, kUpdateContractDecodeLength) &&
-            *reinterpret_cast<const uint8_t*>(updateHit + 0x56) == 0x8B &&
-            *reinterpret_cast<const uint8_t*>(updateHit + 0x57) == 0x05 &&
-            *reinterpret_cast<const uint8_t*>(updateHit + 0x60) == 0xBA;
-        if (scaleDecodeValid)
-            memcpy(&scaleTlsDisp,
-                   reinterpret_cast<const void*>(scaleHit + 14),
-                   sizeof(scaleTlsDisp));
-        if (updateDecodeValid)
-            memcpy(&updateTlsDisp,
-                   reinterpret_cast<const void*>(updateHit + 0x58),
-                   sizeof(updateTlsDisp));
-        const uintptr_t scaleTlsIndex =
-            scaleDecodeValid ? scaleHit + 18 + scaleTlsDisp : 0;
-        const uintptr_t updateTlsIndex =
-            updateDecodeValid ? updateHit + 0x5C + updateTlsDisp : 0;
-        uint32_t recordsTlsMember = 0;
-        if (updateDecodeValid)
-            memcpy(&recordsTlsMember,
-                   reinterpret_cast<const void*>(updateHit + 0x61),
-                   sizeof(recordsTlsMember));
-        const bool tlsIdentityValid =
-            scaleDecodeValid && updateDecodeValid &&
-            scaleTlsIndex == updateTlsIndex &&
-            Halo3ModuleRangeContains(
-                base, size, scaleTlsIndex, sizeof(uint32_t)) &&
-            Halo3StaticTlsIndexMatchesModule(
-                base, size, scaleTlsIndex) &&
-            *reinterpret_cast<const uint32_t*>(scaleTlsIndex) !=
-                TLS_OUT_OF_INDEXES;
-        const bool nativeContractValid =
-            uniqueScale && uniqueUpdate && uniqueInterpolation &&
-            interpolationHit >= updateHit &&
-            interpolationHit - updateHit ==
-                kHalo3PlayerControlInterpolationBlockOffset &&
-            recordsTlsMember ==
-                kHalo3ScriptedInputRecordsTlsOffset &&
-            tlsIdentityValid;
-        if (!nativeContractValid)
-        {
-            g_halo3ScriptedInputBinding.store(
-                static_cast<uint8_t>(
-                    Halo3ScriptedInputBindingState::StockFallback),
-                std::memory_order_release);
-            LOG("H3 scripted input: StockFallback; paired native setter/update "
-                "contract missing, ambiguous, or internally inconsistent "
-                "(setter=%p update=%p interpolation=%p TLS=%s); the Cortana "
-                "compatibility feature stays off and camera core is unaffected",
-                (void*)scaleHit, (void*)updateHit, (void*)interpolationHit,
-                tlsIdentityValid ? "same" : "mismatch");
-            return;
-        }
-
-        void* const scaleTarget = reinterpret_cast<void*>(scaleHit);
-        void* const updateTarget = reinterpret_cast<void*>(updateHit);
-        const MH_STATUS scaleCreate = MH_CreateHook(
-            scaleTarget,
-            reinterpret_cast<void*>(&Halo3PlayerControlScaleAllInputHook),
-            reinterpret_cast<void**>(
-                &g_realHalo3PlayerControlScaleAllInput));
-        if (scaleCreate != MH_OK)
-        {
-            const bool cleanupRequired =
-                scaleCreate == MH_ERROR_ALREADY_CREATED;
-            if (cleanupRequired)
-                RememberInstalledGameHook(scaleTarget);
-            g_halo3ScriptedInputBinding.store(
-                static_cast<uint8_t>(cleanupRequired
-                    ? Halo3ScriptedInputBindingState::CleanupRequired
-                    : Halo3ScriptedInputBindingState::StockFallback),
-                std::memory_order_release);
-            LOG("H3 scripted input: %s; native scale observer "
-                "create failed at halo3.dll+0x%llX (%d); camera core and "
-                "existing VR input remain active",
-                cleanupRequired ? "CleanupRequired" : "StockFallback",
-                (unsigned long long)(scaleHit - base),
-                static_cast<int>(scaleCreate));
-            return;
-        }
-
-        const MH_STATUS updateCreate = MH_CreateHook(
-            updateTarget,
-            reinterpret_cast<void*>(&Halo3PlayerControlUpdateHook),
-            reinterpret_cast<void**>(&g_realHalo3PlayerControlUpdate));
-        if (updateCreate != MH_OK)
-        {
-            const MH_STATUS scaleRemove = MH_RemoveHook(scaleTarget);
-            const bool scaleCleanup =
-                scaleRemove != MH_OK &&
-                scaleRemove != MH_ERROR_NOT_CREATED;
-            const bool updateCleanup =
-                updateCreate == MH_ERROR_ALREADY_CREATED;
-            if (scaleCleanup)
-                RememberInstalledGameHook(scaleTarget);
-            else
-                g_realHalo3PlayerControlScaleAllInput = nullptr;
-            if (updateCleanup)
-                RememberInstalledGameHook(updateTarget);
-            else
-                g_realHalo3PlayerControlUpdate = nullptr;
-            const bool cleanupRequired = scaleCleanup || updateCleanup;
-            g_halo3ScriptedInputBinding.store(
-                static_cast<uint8_t>(cleanupRequired
-                    ? Halo3ScriptedInputBindingState::CleanupRequired
-                    : Halo3ScriptedInputBindingState::StockFallback),
-                std::memory_order_release);
-            LOG("H3 scripted input: %s; native update observer create failed "
-                "at halo3.dll+0x%llX (%d), setter rollback remove=%d; camera "
-                "core and existing VR input remain active",
-                cleanupRequired ? "CleanupRequired" : "StockFallback",
-                (unsigned long long)(updateHit - base),
-                static_cast<int>(updateCreate),
-                static_cast<int>(scaleRemove));
-            return;
-        }
-
-        // Enable the per-tick completion observer first. Until the setter is
-        // also enabled and binding is published, both hooks are pass-through.
-        const MH_STATUS updateEnable = MH_EnableHook(updateTarget);
-        const MH_STATUS scaleEnable = updateEnable == MH_OK
-            ? MH_EnableHook(scaleTarget)
-            : MH_UNKNOWN;
-        if (updateEnable != MH_OK || scaleEnable != MH_OK)
-        {
-            const MH_STATUS scaleDisable = MH_DisableHook(scaleTarget);
-            const MH_STATUS updateDisable = MH_DisableHook(updateTarget);
-            const MH_STATUS scaleRemove = MH_RemoveHook(scaleTarget);
-            const MH_STATUS updateRemove = MH_RemoveHook(updateTarget);
-            const bool scaleCleanup =
-                scaleRemove != MH_OK &&
-                scaleRemove != MH_ERROR_NOT_CREATED;
-            const bool updateCleanup =
-                updateRemove != MH_OK &&
-                updateRemove != MH_ERROR_NOT_CREATED;
-            const bool cleanupRequired =
-                scaleCleanup || updateCleanup;
-            if (scaleCleanup)
-                RememberInstalledGameHook(scaleTarget);
-            else
-                g_realHalo3PlayerControlScaleAllInput = nullptr;
-            if (updateCleanup)
-                RememberInstalledGameHook(updateTarget);
-            else
-                g_realHalo3PlayerControlUpdate = nullptr;
-            g_halo3ScriptedInputBinding.store(
-                static_cast<uint8_t>(cleanupRequired
-                    ? Halo3ScriptedInputBindingState::CleanupRequired
-                    : Halo3ScriptedInputBindingState::StockFallback),
-                std::memory_order_release);
-            LOG("H3 scripted input: %s; paired observer enable failed "
-                "(update=%d setter=%d), rollback disable=(%d,%d) "
-                "remove=(%d,%d); camera core and existing VR input remain active",
-                cleanupRequired ? "CleanupRequired" : "StockFallback",
-                static_cast<int>(updateEnable),
-                static_cast<int>(scaleEnable),
-                static_cast<int>(updateDisable),
-                static_cast<int>(scaleDisable),
-                static_cast<int>(updateRemove),
-                static_cast<int>(scaleRemove));
-            return;
-        }
-
-        RememberInstalledGameHook(updateTarget);
-        RememberInstalledGameHook(scaleTarget);
-        g_halo3ScriptedInputTlsIndexAddress.store(
-            scaleTlsIndex, std::memory_order_release);
-        g_halo3ScriptedInputGeneration.store(
-            runtimeGeneration, std::memory_order_release);
-        g_halo3ScriptedInputValidationPending.store(
-            true, std::memory_order_release);
-        g_halo3ScriptedInputBinding.store(
-            static_cast<uint8_t>(Halo3ScriptedInputBindingState::Installed),
-            std::memory_order_release);
-        LOG("H3 scripted input: Installed paired native setter/update "
-            "observers at halo3.dll+(0x%llX,0x%llX), expected "
-            "(0x%llX,0x%llX), unique; H3EK Cortana/Gravemind 0.15 can "
-            "suspend VR turning until Halo's native simulation-time restore",
-            (unsigned long long)(scaleHit - base),
-            (unsigned long long)(updateHit - base),
-            (unsigned long long)
-                kHalo3PlayerControlScaleAllInputExpectedRva,
-            (unsigned long long)kHalo3PlayerControlUpdateExpectedRva);
-    }
-
     bool InstallHook(uintptr_t base, size_t size, uint32_t runtimeGeneration)
     {
         if (!runtimeGeneration)
             return false;
-        ResetHalo3ScriptedInputOwnership();
         LocateNativePauseFlag(base, size);
         LocateCinematicState(base, size);
         uintptr_t hit = sig::Find(base, size, kCamCopySig);
@@ -11180,7 +10422,6 @@ namespace
         LOG("M1: camera hooked. F2 head tracking, F3 recenter, F6 leaning, F8/F9 pitch trim, F10 screen-follow (yaw/pitch/up flips: F1 menu)");
 
         RememberInstalledGameHook(target);
-        InstallHalo3ScriptedInputObserver(base, size, runtimeGeneration);
         // Comfort invariant: the OpenXR pose, not Halo's authored screen-shake
         // transform, owns the view while head tracking is active. This hook is
         // independent from stereo and fails open to Halo's stock behavior.
@@ -21711,7 +20952,6 @@ namespace
                 g_enabled.store(false, std::memory_order_release);
                 g_autoVrOwned.store(false, std::memory_order_release);
                 g_autoVrUserVeto.store(false, std::memory_order_release);
-                ResetHalo3ScriptedInputOwnership();
                 g_halo3RuntimeGeneration.store(0, std::memory_order_release);
                 haloAttemptedGeneration = 0;
                 // MCC can unload and later map halo3.dll at the same address.
@@ -21998,7 +21238,6 @@ namespace
                 LogHalo3ParentXformIfDriving(); // H3 vehicle-transform measurement
                 LogHalo3SeatMotionIfDriving(); // H3 seat-motion vibration diagnostic
             }
-            Halo3ScriptedInputWorkerPoll(pollNow);
             VR_FramePacingWorkerPoll();
             Sleep(50);
 #else
@@ -22009,7 +21248,6 @@ namespace
                 LogHalo3ParentXformIfDriving(); // H3 vehicle-transform measurement
                 LogHalo3SeatMotionIfDriving(); // H3 seat-motion vibration diagnostic
             }
-            Halo3ScriptedInputWorkerPoll(pollNow);
             VR_FramePacingWorkerPoll();
             Sleep(50);
 #endif
@@ -23373,18 +22611,6 @@ const char* Game_Halo3SeatTrimName(int slot)
 
 bool Game_ComputeAimStick(float& outRx, float& outRy)
 {
-    // Halo's Cortana/Gravemind channel still consumes locomotion at its native
-    // 15% scale, but the mod's closed-loop aim author must yield completely.
-    // Returning true with neutral axes is intentional: false would make the
-    // XInput merger leak the raw OpenXR turn stick into the same native path.
-    if (g_vrAim.load(std::memory_order_acquire) &&
-        g_enabled.load(std::memory_order_acquire) &&
-        Halo3ScriptedInputOwnsVrTurning())
-    {
-        outRx = 0.0f;
-        outRy = 0.0f;
-        return true;
-    }
     if (!Game_HasTitleCapability(TitleCapability_ControllerAim) &&
         !ReachControllerAimActive())
         return false;
