@@ -5031,17 +5031,15 @@ namespace
             up[2] = cgp * cr;
         }
 
-        // C17 first-person vehicle camera. Halo's native seated camera carries
-        // rendered motion and bounce; only the local difference to the user's
-        // Blender-authored point is applied here. Forward/up were written from
-        // the HMD above, the trim follows the current view heading, and the lean
-        // block below adds full 6DOF head motion. Never active in cinematics;
-        // stale or unproven inputs leave the native position untouched.
+        // C17 native-seat ownership was headset-rejected: it shifted every
+        // authored placement and did not cure the vehicle/eye mismatch. Restore
+        // the C5-C16 authored anchor as one explicit rollback candidate. The
+        // dormant C17 transaction remains below for evidence and later study.
         if (!cinematic && Halo3VehicleFpActive())
         {
             float anchor[3];
             int anchorTrimSlot = -1;
-            if (Halo3ComputeNativeParentedAnchor(pos, anchor, &anchorTrimSlot))
+            if (Halo3ComputeAuthoredAnchor(anchor, &anchorTrimSlot))
             {
                 // C13: each SEAT may carry its own trim; anything without one
                 // follows the universal pair (config.h accessors).
@@ -5720,10 +5718,9 @@ namespace
 
         const bool seated = seat >= 0 && parent != -1 &&
             parentKind == kHalo3ObjectKindVehicle;
-        if (seated)
-            Halo3EnsureNativeSeatPatch(defIndex, seat, generation);
-        else
-            Halo3RestoreNativeSeatPatch();
+        // C17 rollback: never mutate a loaded seat tag. This also restores a
+        // patch immediately if a config reload crosses an old live session.
+        Halo3RestoreNativeSeatPatch();
         // Publish the vehicle transform for the authored-point camera.
         // C7: root parents publish their +0x50 frame directly; attached
         // parents (mounted turrets) compose carrier ∘ local, since their

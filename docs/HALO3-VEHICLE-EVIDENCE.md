@@ -1308,4 +1308,16 @@ The pure regression proves two invariants: initial calibration lands exactly on
 the Blender point, and any later native-camera translation passes through to the
 final anchor exactly while the sampled object frame remains unchanged.
 
-Status: implemented, build/test and headset acceptance pending.
+### Headset rejection and rollback
+
+Candidate `ee5351a` / DLL `23695970…74A2CD6D`, Steam edition, SteamVR/OpenXR
+2.17.6, Oculus headset at 120 Hz. The runtime log proves the transaction was
+actually active on Warthog and Prowler seats; it never entered StockFallback.
+The headset result was an absolute regression: vehicle-mesh behavior remained
+incorrect and every authored camera placement shifted deeply out of place.
+Therefore this is not a layout-validation failure and must not be tuned past.
+
+Status: **HEADSET REJECTED**. The next candidate disables both C17 consumers:
+the loaded-seat tag transaction never runs and `ApplyHeadLook` again consumes
+the C5-C16 authored anchor. C17 code remains dormant, per the project rollback
+rule; deleting it would be a separate headset-tested cleanup candidate.
