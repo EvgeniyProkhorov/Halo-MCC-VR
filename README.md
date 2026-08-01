@@ -1,3 +1,7 @@
+https://discord.gg/rfq4z8tpNG -- Join for Help, tips, ive dev updates and more!
+
+
+
 <img width="1280" height="640" alt="heromxall" src="https://github.com/user-attachments/assets/fc1a542c-2a3d-4d44-bbc2-68b2f9626ca2" />
 
 ### REACH/3/ODST Now Playable in VR 
