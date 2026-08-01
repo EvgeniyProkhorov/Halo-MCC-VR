@@ -541,6 +541,9 @@ namespace
     // compile its render-thread producers and worker consumer out of normal
     // builds. The independent wait-pipeline fault reporting remains active.
     constexpr bool kEnableFramePacingTransitionCapture = false;
+    // The raster-order trace produced its discovery evidence. Keep the bounded
+    // implementation dormant without leaving atomics or logging in render hooks.
+    constexpr bool kEnableRetiredRasterTrace = false;
     constexpr uint32_t kFramePacingQueueSize = 1024;
     std::array<FramePacingRecord, kFramePacingQueueSize> g_framePacingQueue{};
     std::atomic<uint32_t> g_framePacingQueueHead{0};
@@ -6178,12 +6181,14 @@ float4 ps_scope_linearize(VSOut i):SV_Target { return paint(i.uv,true); }
             const uint32_t waitSessionEpoch =
                 g_framePacingSessionEpoch.load(std::memory_order_acquire);
             LARGE_INTEGER waitStart{}, waitEnd{};
-            QueryPerformanceCounter(&waitStart);
+            if constexpr (kEnableFramePacingTransitionCapture)
+                QueryPerformanceCounter(&waitStart);
             g_waitCallInFlight.store(waitSequence, std::memory_order_release);
             if (!SetEvent(g_waitStartedEvent))
                 g_waitEventSignalFailures.fetch_add(1, std::memory_order_relaxed);
             const XrResult r = xrWaitFrame(g_session, &waitInfo, &state);
-            QueryPerformanceCounter(&waitEnd);
+            if constexpr (kEnableFramePacingTransitionCapture)
+                QueryPerformanceCounter(&waitEnd);
             const uint32_t returnSessionEpoch =
                 g_framePacingSessionEpoch.load(std::memory_order_acquire);
             g_waitCallInFlight.store(0, std::memory_order_release);
@@ -6201,17 +6206,21 @@ float4 ps_scope_linearize(VSOut i):SV_Target { return paint(i.uv,true); }
                 continue;
             }
             LARGE_INTEGER ready{};
-            QueryPerformanceCounter(&ready);
+            if constexpr (kEnableFramePacingTransitionCapture)
+                QueryPerformanceCounter(&ready);
             // Version the existing packet handoff so a consumed-event timeout
             // and overwrite cannot be mislabeled as an exact diagnostic row.
             g_waitedPacketVersion.fetch_add(1, std::memory_order_acq_rel);
             g_waitedFrameState = state;
-            g_waitedCallStartQpc.store(
-                waitStart.QuadPart, std::memory_order_relaxed);
-            g_waitedCallEndQpc.store(
-                waitEnd.QuadPart, std::memory_order_relaxed);
-            g_waitedReadyQpc.store(
-                ready.QuadPart, std::memory_order_relaxed);
+            if constexpr (kEnableFramePacingTransitionCapture)
+            {
+                g_waitedCallStartQpc.store(
+                    waitStart.QuadPart, std::memory_order_relaxed);
+                g_waitedCallEndQpc.store(
+                    waitEnd.QuadPart, std::memory_order_relaxed);
+                g_waitedReadyQpc.store(
+                    ready.QuadPart, std::memory_order_relaxed);
+            }
             g_waitedSessionEpochStart.store(
                 waitSessionEpoch, std::memory_order_relaxed);
             g_waitedSessionEpochEnd.store(
@@ -6445,12 +6454,15 @@ float4 ps_scope_linearize(VSOut i):SV_Target { return paint(i.uv,true); }
                 const uint64_t sequenceBefore =
                     g_waitedPacketSequence.load(std::memory_order_acquire);
                 frameState = g_waitedFrameState;
-                waitCallStartQpc = g_waitedCallStartQpc.load(
-                    std::memory_order_relaxed);
-                waitCallEndQpc = g_waitedCallEndQpc.load(
-                    std::memory_order_relaxed);
-                waitReadyQpc = g_waitedReadyQpc.load(
-                    std::memory_order_relaxed);
+                if constexpr (kEnableFramePacingTransitionCapture)
+                {
+                    waitCallStartQpc = g_waitedCallStartQpc.load(
+                        std::memory_order_relaxed);
+                    waitCallEndQpc = g_waitedCallEndQpc.load(
+                        std::memory_order_relaxed);
+                    waitReadyQpc = g_waitedReadyQpc.load(
+                        std::memory_order_relaxed);
+                }
                 const uint32_t epochAtStart =
                     g_waitedSessionEpochStart.load(std::memory_order_relaxed);
                 const uint32_t epochAtEnd =
@@ -6529,7 +6541,8 @@ float4 ps_scope_linearize(VSOut i):SV_Target { return paint(i.uv,true); }
         if (ShouldReleaseFrameWaitWorkerBeforeBegin(
                 g_waitThread != nullptr, workerPacketClaimed))
         {
-            QueryPerformanceCounter(&consumedSignal);
+            if constexpr (kEnableFramePacingTransitionCapture)
+                QueryPerformanceCounter(&consumedSignal);
             g_waitConsumedSequence.store(waitSequence, std::memory_order_release);
             if (!SetEvent(g_waitConsumedEvent))
             {
@@ -6538,7 +6551,8 @@ float4 ps_scope_linearize(VSOut i):SV_Target { return paint(i.uv,true); }
                     1, std::memory_order_relaxed);
             }
 
-            QueryPerformanceCounter(&nextWaitDispatchGateStart);
+            if constexpr (kEnableFramePacingTransitionCapture)
+                QueryPerformanceCounter(&nextWaitDispatchGateStart);
             const uint64_t dispatchDeadlineMs = GetTickCount64() + 1000;
             for (;;)
             {
@@ -6575,7 +6589,8 @@ float4 ps_scope_linearize(VSOut i):SV_Target { return paint(i.uv,true); }
             nextWaitDispatchObservedBeforeBegin =
                 IsExpectedNextFrameWaitDispatch(
                     waitSequence, nextWaitDispatchSequence);
-            QueryPerformanceCounter(&nextWaitDispatchGateEnd);
+            if constexpr (kEnableFramePacingTransitionCapture)
+                QueryPerformanceCounter(&nextWaitDispatchGateEnd);
             if (!nextWaitDispatchObservedBeforeBegin)
             {
                 ++g_frameOrderFailures;
@@ -6586,7 +6601,8 @@ float4 ps_scope_linearize(VSOut i):SV_Target { return paint(i.uv,true); }
         FLog("xrBeginFrame before Halo render");
         XrFrameBeginInfo beginInfo{XR_TYPE_FRAME_BEGIN_INFO};
         LARGE_INTEGER beginStart{}, beginEnd{};
-        QueryPerformanceCounter(&beginStart);
+        if constexpr (kEnableFramePacingTransitionCapture)
+            QueryPerformanceCounter(&beginStart);
         const XrResult beginResult = xrBeginFrame(g_session, &beginInfo);
         QueryPerformanceCounter(&beginEnd);
         if (XR_FAILED(beginResult))
@@ -8680,6 +8696,8 @@ bool VR_CaptureBackbufferEye(int eye)
 
 void VR_TraceEvent(const char* tag, int a, int b)
 {
+    if constexpr (!kEnableRetiredRasterTrace)
+        return;
     // Arms ~8s after first call (a level is up), then logs the next 60 events
     // and disarms forever. One burst, zero steady-state cost beyond two loads.
     static std::atomic<DWORD> firstMs{0};
@@ -8709,13 +8727,15 @@ void VR_BeginRasterEye(int eye)
     // the required sRGB conversion.
     g_rasterRedirected[eye] = false;
     g_rasterEye = eye;
-    VR_TraceEvent("eye-begin", eye, 0);
+    if constexpr (kEnableRetiredRasterTrace)
+        VR_TraceEvent("eye-begin", eye, 0);
 }
 
 
 void VR_EndRasterEye()
 {
-    VR_TraceEvent("eye-end", g_rasterEye.load(), 0);
+    if constexpr (kEnableRetiredRasterTrace)
+        VR_TraceEvent("eye-end", g_rasterEye.load(), 0);
     // Promote any newly identified history, then save this eye's copies of
     // every tracked target before the other eye (or next frame) overwrites
     // them. A ping-pong pair only reveals its read side a frame after its
@@ -9118,10 +9138,13 @@ bool VR_RedirectRenderTargets(ID3D11DeviceContext* context, UINT count,
         else
         {
             g_rasterRedirected[eye] = true;
-            VR_TraceEvent("rtv-redirect", eye, 0);
-            static std::atomic<unsigned> logged{0};
-            if (logged.fetch_add(1) < 4)
-                LOG("M2 RASTER: redirected internal scene-color RTV to eye %d target", eye);
+            if constexpr (kEnableRetiredRasterTrace)
+            {
+                VR_TraceEvent("rtv-redirect", eye, 0);
+                static std::atomic<unsigned> logged{0};
+                if (logged.fetch_add(1) < 4)
+                    LOG("M2 RASTER: redirected internal scene-color RTV to eye %d target", eye);
+            }
         }
     }
     return changed;

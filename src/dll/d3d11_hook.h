@@ -26,10 +26,8 @@ bool D3D_FitActive();
 // smaller window instead of clipping it to a corner.
 void D3D_SetForcedClientLie(bool on);
 
-// --- Co-op drop probe (config.coop_probe) -----------------------------------
-// The VR frame is submitted inside MCC's own Present, on MCC's render thread --
-// the thread MCC paces its synchronised campaign co-op simulation from. This
-// records how long the mod holds that thread each frame and dumps the run-up
-// when a level is torn down, so a real co-op kick leaves measurements behind
-// instead of a theory. `reason` names the mode we fell out of.
+// --- Dormant co-op drop probe (config.coop_probe) ---------------------------
+// The lifecycle call remains wired for targeted diagnostic rebuilds. Production
+// builds compile out both Present sampling and this dump; reason names the mode
+// a diagnostic rebuild fell out of.
 void CoopProbe_DumpRunUp(const char* reason);

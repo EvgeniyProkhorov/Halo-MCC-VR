@@ -957,14 +957,11 @@ void ConfigSave()
     fprintf(f, "# (default %d)\n", d.desktop_present_unlocked ? 1 : 0);
     fprintf(f, "desktop_present_unlocked = %d\n\n",
             g_config.desktop_present_unlocked ? 1 : 0);
-    fprintf(f, "# Co-op kick probe (diagnostic, safe to leave on). Campaign co-op\n");
-    fprintf(f, "# has been dropping BOTH players to the menu. The VR frame is\n");
-    fprintf(f, "# submitted inside MCC's own present, on the same thread MCC paces\n");
-    fprintf(f, "# its co-op simulation from, so this measures how long the mod holds\n");
-    fprintf(f, "# that thread and writes a one-line-per-second summary to\n");
-    fprintf(f, "# halo3xr.log (search COOPPROBE) every time a level is torn down.\n");
-    fprintf(f, "# It changes nothing you can see or feel -- it only measures. Leave\n");
-    fprintf(f, "# it on if you are helping test the co-op drop. 1 = on, 0 = off.\n");
+    fprintf(f, "# Dormant co-op kick probe. This production build does not collect\n");
+    fprintf(f, "# Present samples or write COOPPROBE rows; both are compile-time\n");
+    fprintf(f, "# disabled. The key remains for a targeted diagnostic rebuild only.\n");
+    fprintf(f, "# Changing it in this build has no effect. 1 = request collection\n");
+    fprintf(f, "# when such a diagnostic rebuild is used, 0 = off.\n");
     fprintf(f, "# (default %d)\n", d.coop_probe ? 1 : 0);
     fprintf(f, "coop_probe = %d\n\n", g_config.coop_probe ? 1 : 0);
     fprintf(f, "# Draw distance: how far the game renders the whole scene, as a\n");

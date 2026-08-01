@@ -925,7 +925,8 @@ namespace
         // During the scope pass this driver must still run so the palette and
         // HUD hooks can suppress their final submissions. Returning here left
         // previously prepared gun/HUD packets available to the renderer.
-        VR_TraceEvent("fp-driver", (int)flag, g_stereoEye.load());
+        if constexpr (kEnableRetiredHalo3Diagnostics)
+            VR_TraceEvent("fp-driver", (int)flag, g_stereoEye.load());
         // (The hud_zoom layout-factor poke that lived here is retired
         // 2026-07-19: [view+0x2B0]+0x174 never resized the visible HUD. HUD
         // sizing is now the vr.cpp HUD panel — capture, erase, re-present.)
@@ -3664,7 +3665,9 @@ namespace
         // hand's rigid delta; it is never independently seated on a controller.
         // Slot-1 failures never touch the primary arm diagnostics.
         const bool dual=(context.slot==1);
-        const int perfEyeBucket = explicitTargets ? -1 : FramePerfEyeBucket();
+        const int perfEyeBucket = kEnableRetiredHalo3Diagnostics
+            ? (explicitTargets ? -1 : FramePerfEyeBucket())
+            : -1;
         if (kEnableRetiredHalo3Diagnostics && perfEyeBucket >= 0)
             g_perfFpPaletteRequests[perfEyeBucket].fetch_add(
                 1, std::memory_order_relaxed);
@@ -4119,7 +4122,9 @@ namespace
                             static std::atomic<bool> loggedLeft{false};
                             if (applyArm(context.lShoulder,context.lElbow,context.lWrist,
                                          context.lWristDescendants,false,desiredLeft,1.0f,
-                                         &probeLeft,0.0f))
+                                         kEnableRetiredHalo3Diagnostics
+                                             ? &probeLeft : nullptr,
+                                         0.0f))
                             {
                                 probeLeftValid=true;
                                 g_armFailurePublished.store(nullptr,std::memory_order_relaxed);
@@ -4415,7 +4420,9 @@ namespace
         // one for a weapon. A shotgun-only secondary arm palette can otherwise
         // render the authored pump grip over the correctly solved fp_body.
         // Atomic publication only; Present owns all formatting and logging.
-        const uint64_t key=g_fpSkeletonKey.load(std::memory_order_acquire);
+        const uint64_t key = kEnableRetiredHalo3Diagnostics
+            ? g_fpSkeletonKey.load(std::memory_order_acquire)
+            : 0;
         if (key)
         {
             uint64_t signature=key;
@@ -7248,8 +7255,9 @@ namespace
     }
 
     // Called from the 50 ms worker (NOT a hot hook), so logging is safe here.
-    // Transition-gated exactly like LogOdstNonFpCameraIfNew: one line per
-    // distinct probe capture, plus a one-shot StockFallback notice.
+    // Keep feature installation, rollback, and StockFallback transitions live:
+    // those are required failure-isolation evidence. The discovery capture
+    // below them remains available only when the retired diagnostic gate is on.
     void LogHalo3VehicleProbeIfNew()
     {
         // The node anchor and occupant bounce are independent optional
@@ -7338,6 +7346,9 @@ namespace
             return;
         }
         fallbackLogged = false;
+        if constexpr (!kEnableRetiredHalo3Diagnostics)
+            return;
+
         Halo3VehicleProbe& probe = g_halo3VehicleProbe;
         const uint32_t seq = probe.seq.load(std::memory_order_acquire);
         if ((seq & 1u) || seq == 0)
@@ -21220,9 +21231,9 @@ namespace
             LogOdstRenderSkipIfNew();      // emit why a frame stayed flat 2D
             LogOdstFpLayoutSelfCheckIfNew(); // emit FP weapon-layout self-check
             LogOdstNativeHudRouteOnce();    // bounded in-place CHUD route result
+            LogHalo3VehicleProbeIfNew();   // live H3 feature status/fallback
             if constexpr (kEnableRetiredHalo3Diagnostics)
             {
-                LogHalo3VehicleProbeIfNew();   // H3 vehicle probe transitions
                 LogHalo3ObserverIfDriving();   // H3 observer focus-field analysis
                 LogHalo3ParentXformIfDriving(); // H3 vehicle-transform measurement
                 LogHalo3SeatMotionIfDriving(); // H3 seat-motion vibration diagnostic
@@ -21230,9 +21241,9 @@ namespace
             VR_FramePacingWorkerPoll();
             Sleep(50);
 #else
+            LogHalo3VehicleProbeIfNew();   // live H3 feature status/fallback
             if constexpr (kEnableRetiredHalo3Diagnostics)
             {
-                LogHalo3VehicleProbeIfNew();   // H3 vehicle probe transitions
                 LogHalo3ObserverIfDriving();   // H3 observer focus-field analysis
                 LogHalo3ParentXformIfDriving(); // H3 vehicle-transform measurement
                 LogHalo3SeatMotionIfDriving(); // H3 seat-motion vibration diagnostic
@@ -22219,7 +22230,9 @@ void Game_AutoVrTick()
     }
     {
         static int loggedCount=0;
-        int available=g_fpBoneMapSnapshotCount.load(std::memory_order_acquire);
+        int available = kEnableRetiredHalo3Diagnostics
+            ? g_fpBoneMapSnapshotCount.load(std::memory_order_acquire)
+            : 0;
         if(available>16) available=16;
         while(loggedCount<available)
         {

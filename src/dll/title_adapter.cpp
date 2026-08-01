@@ -190,10 +190,9 @@ void TitleAdapter_SetRuntimeMode(RuntimeMode mode)
         return;
     LOG("Runtime mode: %s -> %s",
         RuntimeModeName(previous), RuntimeModeName(mode));
-    // A level falling to Loading is exactly the co-op kick edge. Dump the
-    // run-up here, while it is still in the ring -- a kick gives no warning, so
-    // there is no later moment to ask for it. Ordinary menu traffic (Shell or
-    // Unsupported -> Loading) is not a teardown and is skipped.
+    // Preserve the exact teardown edge for targeted co-op diagnostic rebuilds.
+    // Production builds compile the sampler and dump out, so this call is a
+    // no-op. Ordinary menu traffic is still excluded from the dormant path.
     if (mode == RuntimeMode::Loading && CoopProbeIsInLevelMode(previous))
         CoopProbe_DumpRunUp(RuntimeModeName(previous));
 }

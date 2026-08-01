@@ -61,10 +61,9 @@ void VR_NotifyCameraTransform();
 // VR_OnPresent diffs it against the finished frame to extract Halo's HUD pixels
 // for the floating HUD panel.
 
-// One-shot frame trace: logs the in-frame ORDER of render events (eye begin,
-// RTV redirect, FP driver runs, HUD element submits, eye end) for ~one frame,
-// a few seconds into a level. Names the correct pre-HUD snapshot anchor from
-// the game's own timeline instead of an assumption.
+// Dormant one-shot frame trace retained for targeted render-order discovery.
+// Normal builds compile out every call site so render hooks pay no atomic or
+// logging cost.
 void VR_TraceEvent(const char* tag, int a, int b);
 
 // Called from the menu: re-place the virtual screen in front of where the
