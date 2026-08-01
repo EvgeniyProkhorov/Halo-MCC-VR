@@ -314,12 +314,22 @@ inline constexpr float kHalo3HeadMaximumLocalDelta = 0.08f;
 // same distance it was before, but it now arrives and leaves smoothly instead
 // of snapping to zero. This is strictly less state and less work per frame
 // than the drop-and-re-settle it replaces.
+// C23: `gain` scales the whole contribution AFTER the clamp, so it is a plain
+// strength control, not a filter. 1 is the full C22 travel (0.08 wu, about
+// 24 cm — measured as too much: the user reported it as nauseating once C22
+// stopped it dropping out and they felt all of it for the first time). 0 bolts
+// the view to the seat exactly. Clamp-then-scale keeps both the saturation and
+// the scaling continuous, so no setting can reintroduce a step.
 inline bool Halo3ClampedHeadLocalDelta(const float currentLocal[3],
-                                       const float reference[3],
+                                       const float reference[3], float gain,
                                        float outDelta[3])
 {
-    if (!currentLocal || !reference || !outDelta)
+    if (!currentLocal || !reference || !outDelta || !std::isfinite(gain))
         return false;
+    if (gain < 0.0f)
+        gain = 0.0f;
+    if (gain > 1.0f)
+        gain = 1.0f;
     float delta[3];
     float lengthSquared = 0.0f;
     for (int i = 0; i < 3; ++i)
@@ -343,6 +353,7 @@ inline bool Halo3ClampedHeadLocalDelta(const float currentLocal[3],
     }
     for (int i = 0; i < 3; ++i)
     {
+        delta[i] *= gain;
         if (!std::isfinite(delta[i]))
             return false;
         outDelta[i] = delta[i];
@@ -357,7 +368,7 @@ inline bool Halo3ClampedHeadLocalDelta(const float currentLocal[3],
 inline bool Halo3ComputeHeadParentedPoint(
     const Halo3Matrix4x3& liveSeatNode, const float headWorld[3],
     const float headLocalReference[3], const float authoredNodeLocal[3],
-    float out[3])
+    float gain, float out[3])
 {
     if (!headLocalReference || !authoredNodeLocal)
         return false;
@@ -371,7 +382,7 @@ inline bool Halo3ComputeHeadParentedPoint(
         return false;
     float delta[3];
     if (!Halo3ClampedHeadLocalDelta(currentHeadLocal, headLocalReference,
-                                    delta))
+                                    gain, delta))
         return false;
     const float cameraLocal[3] = {
         authoredNodeLocal[0] + delta[0],

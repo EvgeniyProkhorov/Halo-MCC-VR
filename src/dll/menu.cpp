@@ -827,6 +827,20 @@ namespace
             "with the vehicle and your hands while your head turns freely.\n"
             "OFF anchors them to Halo's seated camera - your character's own\n"
             "head - so looking around drags the gun with your face.");
+        changed |= ImGui::SliderFloat("Seat bounce", &g_config.vehicle_bounce,
+                                      0.0f, 1.0f, "%.2f");
+        ImGui::TextDisabled(
+            "How much of the seat's bounce reaches your view. 1 is the\n"
+            "engine's full travel (about 24 cm) and is a lot; 0 bolts your\n"
+            "view to the seat. Strength only - nothing is smoothed or\n"
+            "delayed at any setting.");
+        changed |= ImGui::Checkbox("Re-centre when I get in and out",
+                                   &g_config.vehicle_recenter_on_seat);
+        ImGui::TextDisabled(
+            "ON (default) re-centres your play space once you have settled\n"
+            "into a seat and again when you get out, so a step you took on\n"
+            "foot is not carried in (or back out) as a standing lean.\n"
+            "Position only - it never turns your view.");
         ImGui::Spacing();
         ImGui::Separator();
         ImGui::Text("Motion steering");

@@ -190,6 +190,15 @@ struct Config
     // riding the vehicle while your head turns freely; OFF restores the
     // head-anchored origin. Only applies inside a first-person vehicle seat.
     bool vehicle_hands_follow_body = true;
+    // How much of the seat's occupant bounce reaches the view, 0..1. 1 is the
+    // engine's full travel (about 24 cm) and reads as too much in the headset;
+    // 0 bolts the view to the seat. This is a strength control, not a filter -
+    // no smoothing is applied at any setting.
+    float vehicle_bounce = 0.35f;
+    // Re-neutralise the room-space origin on a settled seat entry AND exit, so
+    // physical movement made on foot or in the seat is not carried across the
+    // boundary as a standing offset. Position only: it never snaps your facing.
+    bool vehicle_recenter_on_seat = true;
 
     // Motion steering in look-steered ground driver seats: grab an invisible
     // wheel with both grips and turn it. 0 = the right stick steers.

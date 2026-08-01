@@ -5797,6 +5797,9 @@ namespace
     Halo3VehicleDebounce g_halo3VehicleFpDebounce;
     std::atomic<uint32_t> g_halo3VehicleFpStable{
         static_cast<uint32_t>(Halo3VehicleState::Unknown)};
+    // C23: how many settled seat entry/exit edges have asked for a play-space
+    // re-neutralisation. The sampler is log-free, so the worker reports it.
+    std::atomic<uint32_t> g_halo3SeatRecenters{0};
 
     void Halo3RestoreNativeSeatPatch()
     {
@@ -6404,7 +6407,8 @@ namespace
                         if (headRef.settle.Update(nowMs, currentHeadLocal) &&
                             Halo3ComputeHeadParentedPoint(
                                 liveNode, headWorld, headRef.settle.reference,
-                                authoredNodeLocal, headAnchor) &&
+                                authoredNodeLocal, g_config.vehicle_bounce,
+                                headAnchor) &&
                             Halo3AnchorWithinBounds(
                                 headAnchor, frameBoundsCenter,
                                 frameBoundsRadius, 2.0f))
@@ -6580,6 +6584,22 @@ namespace
                 (g_halo3VehicleFpDebounce.stable == Halo3VehicleState::Vehicle ||
                  previousStable == Halo3VehicleState::Vehicle))
             {
+                // C23: re-neutralise the room-space origin on BOTH settled
+                // edges. Whatever the player physically walked before boarding
+                // was otherwise carried into the seat as a standing lean, and
+                // whatever they leaned in the seat was carried back out on
+                // foot — the user had to reach for the L3+R3 chord after
+                // boarding a Banshee to get back into place. This is the
+                // position half of that chord only: it captures the neutral
+                // head position and never touches the yaw baseline, so it
+                // cannot snap the facing that the entry nose-align (in) or the
+                // hull follow (out) has already established.
+                if (g_config.vehicle_recenter_on_seat)
+                {
+                    g_needPosRecenter.store(true, std::memory_order_release);
+                    g_halo3SeatRecenters.fetch_add(
+                        1, std::memory_order_relaxed);
+                }
                 if (g_config.vehicle_view_follow)
                 {
                     // C10: a plain recenter takes its heading from the ENGINE
@@ -7267,6 +7287,17 @@ namespace
                 LOG("H3 first-person seat: restored the seat's own camera "
                     "flag");
             nativeSeatSerialLogged = nativeSeatSerial;
+        }
+
+        static uint32_t seatRecentersLogged = 0;
+        const uint32_t seatRecenters =
+            g_halo3SeatRecenters.load(std::memory_order_relaxed);
+        if (seatRecenters != seatRecentersLogged)
+        {
+            LOG("H3 vehicle: play space re-centred on a settled seat "
+                "entry/exit (%u total, position only, facing untouched)",
+                seatRecenters);
+            seatRecentersLogged = seatRecenters;
         }
         static bool fallbackLogged = false;
         const uint8_t binding =

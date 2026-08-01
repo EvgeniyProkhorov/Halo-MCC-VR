@@ -5170,7 +5170,7 @@ int main()
                 liveNode, headReference, latchHeadWorld);
             float latchCamera[3] = {};
             const bool latchCameraOk = Halo3ComputeHeadParentedPoint(
-                liveNode, latchHeadWorld, headReference, expectedNodeLocal,
+                liveNode, latchHeadWorld, headReference, expectedNodeLocal, 1.0f,
                 latchCamera);
             const bool latchExact =
                 std::fabs(latchCamera[0] - animatedAnchor[0]) < 1e-5f &&
@@ -5183,7 +5183,7 @@ int main()
                 liveNode, movedHeadLocal, movedHeadWorld);
             float movedCamera[3] = {};
             const bool movedCameraOk = Halo3ComputeHeadParentedPoint(
-                liveNode, movedHeadWorld, headReference, expectedNodeLocal,
+                liveNode, movedHeadWorld, headReference, expectedNodeLocal, 1.0f,
                 movedCamera);
             const bool headMotionFollowed =
                 std::fabs(movedCamera[0] - (-3.68f)) < 1e-5f &&
@@ -5209,7 +5209,7 @@ int main()
                     laterNode, movedHeadLocal, laterHeadWorld) &&
                 Halo3ComputeHeadParentedPoint(
                     laterNode, laterHeadWorld, headReference,
-                    expectedNodeLocal, laterCamera) &&
+                    expectedNodeLocal, 1.0f, laterCamera) &&
                 std::fabs(laterCamera[0] - 4.76f) < 1e-5f &&
                 std::fabs(laterCamera[1] - (-0.98f)) < 1e-5f &&
                 std::fabs(laterCamera[2] - 8.275f) < 1e-5f;
@@ -5253,7 +5253,7 @@ int main()
                 seatedHead[2]};
             const bool clampIdentityInside =
                 Halo3ClampedHeadLocalDelta(
-                    safeBounce, settle.reference, insideDelta) &&
+                    safeBounce, settle.reference, 1.0f, insideDelta) &&
                 std::fabs(insideDelta[0] - 0.079f) < 1e-6f &&
                 std::fabs(insideDelta[1]) < 1e-6f &&
                 std::fabs(insideDelta[2]) < 1e-6f;
@@ -5261,7 +5261,7 @@ int main()
             // length exactly kHalo3HeadMaximumLocalDelta.
             const bool clampSaturates =
                 Halo3ClampedHeadLocalDelta(
-                    farAnimation, settle.reference, outsideDelta) &&
+                    farAnimation, settle.reference, 1.0f, outsideDelta) &&
                 std::fabs(outsideDelta[0] -
                           kHalo3HeadMaximumLocalDelta * 0.6f) < 1e-6f &&
                 std::fabs(outsideDelta[1] +
@@ -5276,9 +5276,9 @@ int main()
             float justInsideDelta[3] = {};
             const bool clampContinuous =
                 Halo3ClampedHeadLocalDelta(
-                    atEdge, settle.reference, edgeDelta) &&
+                    atEdge, settle.reference, 1.0f, edgeDelta) &&
                 Halo3ClampedHeadLocalDelta(
-                    justInside, settle.reference, justInsideDelta) &&
+                    justInside, settle.reference, 1.0f, justInsideDelta) &&
                 std::fabs(edgeDelta[0] - kHalo3HeadMaximumLocalDelta) < 1e-6f &&
                 std::fabs(edgeDelta[0] - justInsideDelta[0]) < 1e-4f;
             // A non-finite sample must refuse rather than emit a partial or
@@ -5288,14 +5288,38 @@ int main()
             float brokenDelta[3] = {};
             const bool clampRefusesBroken =
                 !Halo3ClampedHeadLocalDelta(
-                    brokenHead, settle.reference, brokenDelta) &&
+                    brokenHead, settle.reference, 1.0f, brokenDelta) &&
                 !Halo3ClampedHeadLocalDelta(
-                    safeBounce, settle.reference, nullptr);
+                    safeBounce, settle.reference, 1.0f, nullptr);
+            // C23: gain is a plain strength scale on the clamped result. Half
+            // gain must be exactly half the travel, zero must bolt the view to
+            // the seat, and an out-of-range or non-finite gain must not be able
+            // to amplify the bounce past its full setting.
+            float halfDelta[3] = {}, zeroDelta[3] = {}, overDelta[3] = {};
+            float nanGainDelta[3] = {};
+            const bool gainScales =
+                Halo3ClampedHeadLocalDelta(
+                    safeBounce, settle.reference, 0.5f, halfDelta) &&
+                std::fabs(halfDelta[0] - 0.0395f) < 1e-6f &&
+                Halo3ClampedHeadLocalDelta(
+                    safeBounce, settle.reference, 0.0f, zeroDelta) &&
+                std::fabs(zeroDelta[0]) < 1e-9f &&
+                std::fabs(zeroDelta[1]) < 1e-9f &&
+                std::fabs(zeroDelta[2]) < 1e-9f;
+            const bool gainBounded =
+                Halo3ClampedHeadLocalDelta(
+                    farAnimation, settle.reference, 5.0f, overDelta) &&
+                std::fabs(overDelta[0] -
+                          kHalo3HeadMaximumLocalDelta * 0.6f) < 1e-6f &&
+                !Halo3ClampedHeadLocalDelta(
+                    safeBounce, settle.reference,
+                    std::numeric_limits<float>::quiet_NaN(), nanGainDelta);
             Check(clampIdentityInside && clampSaturates && clampContinuous &&
-                  clampRefusesBroken,
+                  clampRefusesBroken && gainScales && gainBounded,
                 "The occupant-head contribution is the identity inside its "
-                "limit, saturates exactly on it, is continuous across it, and "
-                "refuses a non-finite sample");
+                "limit, saturates exactly on it, is continuous across it, "
+                "scales linearly with the bounce strength without exceeding "
+                "full travel, and refuses a non-finite sample or gain");
             settle = {};
             const bool seatSwitchRestarts =
                 !settle.Update(2701, seatedHead) && !settle.valid &&
@@ -5385,7 +5409,7 @@ int main()
                     defaultInverse, badBasis, authored, rejected) &&
                 !Halo3ComputeHeadParentedPoint(
                     liveNode, nonfinitePoint, headReference,
-                    expectedNodeLocal, rejected) &&
+                    expectedNodeLocal, 1.0f, rejected) &&
                 rejected[0] == 91.0f && rejected[1] == 92.0f &&
                 rejected[2] == 93.0f;
 

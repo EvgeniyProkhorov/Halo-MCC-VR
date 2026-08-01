@@ -299,6 +299,10 @@ void ConfigLoad(const wchar_t* path)
             g_config.vehicle_hide_body = atoi(val) != 0;
         else if (!strcmp(key, "vehicle_hands_follow_body"))
             g_config.vehicle_hands_follow_body = atoi(val) != 0;
+        else if (!strcmp(key, "vehicle_bounce"))
+            g_config.vehicle_bounce = (float)atof(val);
+        else if (!strcmp(key, "vehicle_recenter_on_seat"))
+            g_config.vehicle_recenter_on_seat = atoi(val) != 0;
         else if (!strcmp(key, "vehicle_motion"))
             g_config.vehicle_motion = atoi(val) != 0;
         else if (!strcmp(key, "vehicle_wheel_max_deg"))
@@ -736,6 +740,19 @@ void ConfigSave()
     fprintf(f, "# (default %d)\n", d.vehicle_hands_follow_body ? 1 : 0);
     fprintf(f, "vehicle_hands_follow_body = %d\n\n",
             g_config.vehicle_hands_follow_body ? 1 : 0);
+    fprintf(f, "# How much of the seat's bounce reaches your view, 0 to 1.\n");
+    fprintf(f, "# 1 is the engine's full travel (about 24 cm) and reads as far\n");
+    fprintf(f, "# too much; 0 bolts your view to the seat. This is a strength\n");
+    fprintf(f, "# control, NOT smoothing - nothing is filtered at any setting.\n");
+    fprintf(f, "# (default %.2f, range 0-1)\n", d.vehicle_bounce);
+    fprintf(f, "vehicle_bounce = %.2f\n\n", g_config.vehicle_bounce);
+    fprintf(f, "# ON (default) re-centres your play space when you settle into\n");
+    fprintf(f, "# a seat and again when you get out, so a step you took on\n");
+    fprintf(f, "# foot is not carried into the vehicle (or back out) as a\n");
+    fprintf(f, "# standing lean. Position only - it never turns your view.\n");
+    fprintf(f, "# (default %d)\n", d.vehicle_recenter_on_seat ? 1 : 0);
+    fprintf(f, "vehicle_recenter_on_seat = %d\n\n",
+            g_config.vehicle_recenter_on_seat ? 1 : 0);
     fprintf(f, "# Motion steering. In a Warthog, Mongoose, Ghost, Prowler or\n");
     fprintf(f, "# Chopper, DOUBLE-CLICK both grips to take hold of an invisible\n");
     fprintf(f, "# steering wheel: hold your hands as if on a wheel and tilt it,\n");

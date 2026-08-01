@@ -1813,3 +1813,53 @@ the limit, exact saturation on it, agreement between just-inside and on-limit
 caller keeps the exact authored point.
 
 **Status: C22 candidate — NOT HEADSET ACCEPTED.**
+
+## C23 — bounce strength, and a play-space re-centre on both seat edges
+
+Two user-requested changes, taken together at their explicit request. They are
+independently observable: one has a slider and one has a log line.
+
+### 1. The bounce was measured in world units, and 0.08 wu is 24 cm
+
+`kHalo3HeadMaximumLocalDelta` is `0.08` **world units**, and the authoring kit
+fixes 1 wu = 3.048 m, so the occupant contribution was allowed to carry the view
+**24 cm**. Before C22 that rarely mattered, because the contribution spent most
+of any drive switched off (see the C22 table). C22 made it continuous and always
+on, so the user felt the full travel for the first time and reported it as
+nauseating — "smoothing is not the solution for this ... tone that down".
+
+`vehicle_bounce` (0..1, default **0.35**) scales the contribution after the
+clamp. It is a strength control, not a filter: no averaging, no delay, no
+history, so none of the rejected phase/lead/prediction lineage returns. Clamp
+then scale keeps both operations continuous, so no setting can reintroduce the
+C22 step. 1.0 is exactly the C22 build the user tested; 0 bolts the view to the
+seat, which is the C16 behavior; 0.35 caps the travel at about 8.5 cm.
+
+Tested as properties rather than as a value: half gain is exactly half travel,
+zero gain is exactly zero, an out-of-range gain cannot amplify past full travel,
+and a non-finite gain is refused so the caller keeps the authored point.
+
+### 2. Re-neutralise the room origin on entry AND exit
+
+The user had to reach for the L3+R3 chord after boarding a Banshee to get back
+into place. Position neutralisation previously happened only on the first valid
+anchor of a new concrete seat; nothing re-neutralised on the way out, so any
+physical movement made while seated stayed baked in as a standing lean once back
+on foot, and any step taken while walking up to the vehicle could be carried in.
+
+`vehicle_recenter_on_seat` (default ON) raises the existing position-only
+request on **both** settled debounce edges. This is deliberately the position
+half of the L3+R3 chord and never the yaw half, so it cannot snap the facing
+that the entry nose-align establishes on the way in, or that the hull follow has
+already given the player on the way out — the C10 reasoning for excluding a full
+recenter on exit is preserved exactly.
+
+Ordering is safe: on entry the C18 first-anchor capture may consume the request
+in the same frame, which performs the identical capture; on exit no seat is
+published, so `ApplyHeadLook` consumes it and captures at the settled moment.
+
+The sampler is log-free by contract, so it increments a counter and the 50 ms
+worker emits `H3 vehicle: play space re-centred on a settled seat entry/exit`
+with the running total.
+
+**Status: C23 candidate — NOT HEADSET ACCEPTED.**
