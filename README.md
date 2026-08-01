@@ -1,4 +1,4 @@
-https://discord.gg/rfq4z8tpNG -- Join for Help, tips, ive dev updates and more!
+https://discord.gg/rfq4z8tpNG -- Join for Help, tips, live dev updates and more!
 
 
 
