@@ -5231,6 +5231,11 @@ namespace
         float pos[3];
         float fwd[3];
         float up[3];
+        // C16: the UNSMOOTHED hull forward. The view-follow reads this, never
+        // the blended one: a blend that is bounded (or that stalls) can lose
+        // rotation permanently, and the follow INTEGRATES what it is given,
+        // so any loss is a drift the car never gets back.
+        float rawFwd[3];
         int32_t directType = -1;
         int32_t seatIndex = -1;
         int32_t nativeInVehicle = 0;
@@ -5273,8 +5278,6 @@ namespace
     Halo3PhaseLock g_halo3PhaseLock;
     std::atomic<uint32_t> g_halo3PhaseLockState{0};
     std::atomic<float> g_halo3PhaseLeadTicks{0.0f};
-    // C14: the photon-time prediction interval actually in use, milliseconds.
-    std::atomic<float> g_halo3LeadMs{0.0f};
     // C15: the published blend fraction. Above 1.0 the seat is extrapolated
     // past the newest simulation state; a value pinned AT 1.00 while driving
     // is the clamp defect that caused the boost/flight bounce.
@@ -5719,30 +5722,11 @@ namespace
                 // above both stay on the raw value — the gate because that is
                 // what the engine actually said, the counters because they are
                 // measuring the tick rate itself.
-                // C14: how far ahead these photons land. Auto asks the
-                // OpenXR runtime for the cadence it is driving us at (the
-                // user's log: appHz=120.000, periodNs=8333333); a pinned
-                // vehicle_smooth_hz overrides a runtime that misreports.
-                // Zero when the rate is unknown, which is exactly C13.
-                double leadSeconds = 0.0;
-                {
-                    const int pinned = g_config.vehicle_smooth_hz;
-                    const float hz = pinned > 0
-                        ? static_cast<float>(pinned)
-                        : VR_HeadsetRefreshHz();
-                    if (hz >= 30.0f && hz <= 1000.0f)
-                        leadSeconds = 1.0 / static_cast<double>(hz);
-                }
-                g_halo3LeadMs.store(static_cast<float>(leadSeconds * 1000.0),
-                                    std::memory_order_relaxed);
-                g_halo3BlendAlpha.store(g_halo3FrameInterp.lastAlpha,
-                                        std::memory_order_relaxed);
                 const Halo3Frame smooth = Halo3InterpolateFrame(
                     g_halo3FrameInterp, world, Halo3NowSeconds(),
                     g_config.vehicle_cam_smoothing,
                     &g_halo3PhaseLock,
-                    rawBoundsOk ? rawBounds : nullptr,
-                    leadSeconds);
+                    rawBoundsOk ? rawBounds : nullptr);
                 g_halo3SmoothingActive.store(
                     g_halo3FrameInterp.tickKnown ? 1u : 0u,
                     std::memory_order_relaxed);
@@ -5775,6 +5759,7 @@ namespace
                 memcpy(xf.pos, smooth.pos, sizeof(xf.pos));
                 memcpy(xf.fwd, smooth.fwd, sizeof(xf.fwd));
                 memcpy(xf.up, smooth.up, sizeof(xf.up));
+                memcpy(xf.rawFwd, world.fwd, sizeof(xf.rawFwd));
                 xf.directType = directType;
                 xf.seatIndex = seat;
                 xf.nativeInVehicle = static_cast<int32_t>(native);
@@ -5967,6 +5952,7 @@ namespace
     {
         float pos[3] = {0.0f, 0.0f, 0.0f};
         float fwd[3] = {0.0f, 0.0f, 0.0f};
+        float rawFwd[3] = {0.0f, 0.0f, 0.0f};
         float up[3] = {0.0f, 0.0f, 0.0f};
         int seatIndex = -1;
         uint32_t identity = static_cast<uint32_t>(Halo3VehicleId::Unknown);
@@ -5986,6 +5972,7 @@ namespace
             return false;
         memcpy(out.pos, xf.pos, sizeof(out.pos));
         memcpy(out.fwd, xf.fwd, sizeof(out.fwd));
+        memcpy(out.rawFwd, xf.rawFwd, sizeof(out.rawFwd));
         memcpy(out.up, xf.up, sizeof(out.up));
         out.seatIndex = xf.seatIndex;
         out.identity = xf.vehicleId;
@@ -6116,7 +6103,7 @@ namespace
                     const float x = hq[0], y = hq[1], z = hq[2], w = hq[3];
                     const float fx = -2.0f * (w * y + x * z);
                     const float fz = -(1.0f - 2.0f * (x * x + y * y));
-                    g_gameYawRef = atan2f(seat.fwd[1], seat.fwd[0]);
+                    g_gameYawRef = atan2f(seat.rawFwd[1], seat.rawFwd[0]);
                     g_headYawRef = atan2f(fx, -fz);
                     lastEntryAlignMs = nowMs;
                     LOG("H3 vehicle: seat entry aligned to the vehicle's nose "
@@ -6126,8 +6113,13 @@ namespace
             }
         }
 
+        // C16: fed the RAW hull forward, never the blended one. The follow
+        // INTEGRATES the heading step it is handed, so any rotation the blend
+        // fails to deliver — because it is bounded, or because the blend
+        // stalls — is lost for good and shows up as the car slowly rotating
+        // out from under the camera. The raw hull heading cannot lose any.
         const float delta =
-            Halo3SeatYawDelta(g_halo3SeatYaw, seat.fwd, active, weight);
+            Halo3SeatYawDelta(g_halo3SeatYaw, seat.rawFwd, active, weight);
         if (delta != 0.0f)
             g_gameYawRef = WrapPi(g_gameYawRef + delta);
         g_halo3SeatYawTotal.store(g_halo3SeatYaw.total,
@@ -6491,19 +6483,15 @@ namespace
             phaseState = 0;
         LOG("H3 seat motion: %u sampled frames, hull moved on %u (%.0f%%), "
             "tilted on %u (%.0f%%); largest raw step %.4f wu, largest raw tilt "
-            "%.2f deg; smoothing %s across a %.2f ms tick; predicting %.2f ms "
-            "ahead (%s), blend %.2f; witness %s, measured %+.2f ticks; view "
-            "follow %.2f, hull turned %.0f deg since entry, steering by %s",
+            "%.2f deg; seat %s across a %.2f ms tick, blend %.2f; witness %s; "
+            "view follow %.2f, hull turned %.0f deg since entry, steering by %s",
             frames, moved, moved * scale, tilted, tilted * scale,
             diag.maxPosStep.load(std::memory_order_relaxed),
             diag.maxTiltDeg.load(std::memory_order_relaxed),
-            g_halo3SmoothingActive.load(std::memory_order_relaxed) ? "ON"
-                                                                   : "off",
-            tickMs, g_halo3LeadMs.load(std::memory_order_relaxed),
-            g_config.vehicle_smooth_hz > 0 ? "pinned" : "auto",
+            g_config.vehicle_cam_smoothing ? "SMOOTHED" : "BOLTED to the hull",
+            tickMs,
             g_halo3BlendAlpha.load(std::memory_order_relaxed),
             kPhaseNames[phaseState],
-            g_halo3PhaseLeadTicks.load(std::memory_order_relaxed),
             g_config.vehicle_view_follow,
             g_halo3SeatYawTotal.load(std::memory_order_relaxed) * 57.2957795f,
             g_halo3SeatAuthorsSteering.load(std::memory_order_relaxed)

@@ -112,11 +112,6 @@ static void Clamp()
         std::clamp(g_config.vehicle_cam_up_m, -0.5f, 1.0f);
     g_config.vehicle_view_follow =
         std::clamp(g_config.vehicle_view_follow, 0.0f, 1.0f);
-    // 0 stays Auto; anything else is a real headset rate. The floor keeps a
-    // typo from asking for a multi-second prediction.
-    if (g_config.vehicle_smooth_hz != 0)
-        g_config.vehicle_smooth_hz =
-            std::clamp(g_config.vehicle_smooth_hz, 30, 1000);
     for (int i = 0; i < kVehicleTrimSlots; ++i)
     {
         g_config.vehicle_cam_forward_v[i] =
@@ -280,8 +275,6 @@ void ConfigLoad(const wchar_t* path)
             g_config.vehicle_view_follow = (float)atof(val);
         else if (!strcmp(key, "vehicle_cam_smoothing"))
             g_config.vehicle_cam_smoothing = atoi(val) != 0;
-        else if (!strcmp(key, "vehicle_smooth_hz"))
-            g_config.vehicle_smooth_hz = atoi(val);
         else if (!strcmp(key, "vehicle_motion"))
             g_config.vehicle_motion = atoi(val) != 0;
         else if (!strcmp(key, "vehicle_wheel_max_deg"))
@@ -689,25 +682,13 @@ void ConfigSave()
     fprintf(f, "# every control behaves exactly as it did before this feature.\n");
     fprintf(f, "# (default %.2f, range 0 to 1)\n", d.vehicle_view_follow);
     fprintf(f, "vehicle_view_follow = %.2f\n\n", g_config.vehicle_view_follow);
-    fprintf(f, "# Halo 3 moves vehicles exactly 60 times a second on every\n");
-    fprintf(f, "# machine (that is the engine's own clock, not your headset's)\n");
-    fprintf(f, "# and smooths the model in between. This does the same for your\n");
-    fprintf(f, "# seat, recomputed on EVERY headset frame at whatever rate your\n");
-    fprintf(f, "# headset runs - 72, 80, 90, 120, 144 - because both clocks are\n");
-    fprintf(f, "# measured live. There is no refresh rate to pick here. Off, the\n");
-    fprintf(f, "# vehicle appears to shake around you.\n");
+    fprintf(f, "# OFF bolts your seat rigidly to the car's own simulated\n");
+    fprintf(f, "# position, so you feel the suspension, the boost and the bank\n");
+    fprintf(f, "# exactly as the physics produce them. That is the default.\n");
+    fprintf(f, "# ON blends between the game's 60-per-second updates instead:\n");
+    fprintf(f, "# gentler, but it places you slightly behind the car.\n");
     fprintf(f, "# (default %d)\n", d.vehicle_cam_smoothing ? 1 : 0);
-    fprintf(f, "vehicle_cam_smoothing = %d\n", g_config.vehicle_cam_smoothing ? 1 : 0);
-    fprintf(f, "# Your headset displays each frame about one refresh AFTER the\n");
-    fprintf(f, "# mod builds it: 8.3 ms at 120 Hz, 13.9 ms at 72, 6.9 at 144.\n");
-    fprintf(f, "# OpenXR already predicts your HEAD that far ahead, so the seat\n");
-    fprintf(f, "# is predicted the same amount and stops trailing your head.\n");
-    fprintf(f, "# 0 = Auto, use the rate the OpenXR runtime reports (correct on\n");
-    fprintf(f, "# every headset that reports it properly). Set a number only if\n");
-    fprintf(f, "# your runtime misreports: 60 72 80 90 96 100 110 120 144 165\n");
-    fprintf(f, "# 240 are in the F1 list, any other value works too.\n");
-    fprintf(f, "# (default %d = Auto)\n", d.vehicle_smooth_hz);
-    fprintf(f, "vehicle_smooth_hz = %d\n\n", g_config.vehicle_smooth_hz);
+    fprintf(f, "vehicle_cam_smoothing = %d\n\n", g_config.vehicle_cam_smoothing ? 1 : 0);
     fprintf(f, "# Motion steering. In a Warthog, Mongoose, Ghost, Prowler or\n");
     fprintf(f, "# Chopper, DOUBLE-CLICK both grips to take hold of an invisible\n");
     fprintf(f, "# steering wheel: hold your hands as if on a wheel and tilt it,\n");

@@ -63,13 +63,6 @@ inline constexpr const char* kVehicleTrimNames[kVehicleTrimCount] = {
 // the mounted-turret gunner, which shares seat index 0 with the driver and so
 // needs a slot of its own. Halo 3 authors no vehicle with more than three
 // non-turret seats (kHalo3SeatPoints).
-// C14 headset rates offered for vehicle_smooth_hz. 0 = Auto (ask the OpenXR
-// runtime). The rest covers what current VR headsets actually run at; any
-// other integer may be hand-typed into the config and is used as given.
-inline constexpr int kVehicleSmoothHzCount = 12;
-inline constexpr int kVehicleSmoothHzList[kVehicleSmoothHzCount] = {
-    0, 60, 72, 80, 90, 96, 100, 110, 120, 144, 165, 240};
-
 inline constexpr int kVehicleSeatSlots = 4;
 inline constexpr int kVehicleGunnerSlot = 3;
 inline constexpr const char* kVehicleSeatNames[kVehicleSeatSlots] = {
@@ -172,13 +165,7 @@ struct Config
     // between; without this the seat camera steps against it and the vehicle
     // appears to shake. 0 = the raw stepped position.
     bool vehicle_cam_smoothing = true;
-    // C14: the headset rate the seat camera predicts ahead to. 0 = Auto, the
-    // rate the OpenXR runtime itself reports (the right answer on every
-    // headset it reports correctly). A pinned value is for a runtime that
-    // misreports: the seat is advanced by one period of THIS rate, matching
-    // the photon time the head pose is already predicted to. This is not the
-    // game's simulation rate, which is always 60 and is measured live.
-    int vehicle_smooth_hz = 0;
+
     // Motion steering in look-steered ground driver seats: grab an invisible
     // wheel with both grips and turn it. 0 = the right stick steers.
     bool vehicle_motion = true;

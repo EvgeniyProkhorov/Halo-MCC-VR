@@ -790,59 +790,13 @@ namespace
             "1 = you turn with the vehicle like a real driver. 0 = the view\n"
             "stays locked to the world and every control goes back to exactly\n"
             "what it was before this feature.");
-        changed |= ImGui::Checkbox("Smooth the vehicle's stepped motion",
+        changed |= ImGui::Checkbox("Smooth the car's stepped motion",
                                    &g_config.vehicle_cam_smoothing);
         ImGui::TextDisabled(
-            "Halo 3 moves vehicles 60 times a second (the game's own clock,\n"
-            "the same on every PC). This rebuilds your seat position on every\n"
-            "headset frame in between. OFF, the vehicle shakes around you.");
-        {
-            // C14: the rate the seat is predicted AHEAD to. Auto reads it
-            // from the OpenXR runtime; the list is for a runtime that
-            // misreports. Any other value can be hand-typed in the config.
-            const float autoHz = VR_HeadsetRefreshHz();
-            char autoLabel[64];
-            if (autoHz >= 1.0f)
-                snprintf(autoLabel, sizeof(autoLabel),
-                         "Auto - your headset (%.0f Hz)", autoHz);
-            else
-                snprintf(autoLabel, sizeof(autoLabel),
-                         "Auto - ask the headset");
-            char current[64];
-            if (g_config.vehicle_smooth_hz > 0)
-                snprintf(current, sizeof(current), "%d Hz",
-                         g_config.vehicle_smooth_hz);
-            else
-                snprintf(current, sizeof(current), "%s", autoLabel);
-            if (ImGui::BeginCombo("Predict ahead for", current))
-            {
-                for (int i = 0; i < kVehicleSmoothHzCount; ++i)
-                {
-                    const int hz = kVehicleSmoothHzList[i];
-                    char label[64];
-                    if (hz == 0)
-                        snprintf(label, sizeof(label), "%s", autoLabel);
-                    else
-                        snprintf(label, sizeof(label), "%d Hz", hz);
-                    const bool selected = g_config.vehicle_smooth_hz == hz;
-                    if (ImGui::Selectable(label, selected))
-                    {
-                        g_config.vehicle_smooth_hz = hz;
-                        changed = true;
-                    }
-                    if (selected)
-                        ImGui::SetItemDefaultFocus();
-                }
-                ImGui::EndCombo();
-            }
-            ImGui::TextDisabled(
-                "Your headset shows each frame about one refresh AFTER the\n"
-                "mod builds it - 8.3 ms at 120 Hz, 13.9 at 72. Your head is\n"
-                "already predicted that far ahead by OpenXR; this predicts\n"
-                "the vehicle the same amount, so the seat stops trailing your\n"
-                "head. Auto uses the rate your runtime reports - only pick a\n"
-                "number here if that rate is wrong.");
-        }
+            "OFF (default) bolts your seat to the car itself - you feel the\n"
+            "suspension, the boost and the bank exactly as the physics make\n"
+            "them. ON blends between the game's 60-per-second updates:\n"
+            "gentler, but it sits you slightly behind the car.");
         ImGui::Spacing();
         ImGui::Separator();
         ImGui::Text("Motion steering");

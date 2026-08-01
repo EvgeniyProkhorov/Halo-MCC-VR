@@ -3981,7 +3981,7 @@ int main()
         "cutscene_theater_distance_m",
         "turn_smooth", "turn_snap_deg", "turn_smooth_deg_s", "dpad_hand",
         "vehicle_first_person", "vehicle_cam_forward_m", "vehicle_cam_up_m",
-        "vehicle_view_follow", "vehicle_cam_smoothing", "vehicle_smooth_hz",
+        "vehicle_view_follow", "vehicle_cam_smoothing",
         "vehicle_motion", "vehicle_wheel_max_deg",
         "vehicle_wheel_deadzone_deg",
         "crosshair", "crosshair_distance_m", "crosshair_size_deg",
@@ -5195,315 +5195,105 @@ int main()
             const double tickLen = 1.0 / 60.0;
             const float stepWu = 0.1f;       // wu per tick = wu per 16.7 ms
 
-            // Drive one vehicle at a constant speed on a given headset, and
-            // report where the seat is placed relative to where the raw
-            // interpolation (no prediction) would have put it.
-            auto driveAhead = [&](double hz, double leadSeconds,
-                                  float perTickStep, double* outWorstJump) {
-                Halo3FrameInterp interp;
-                Halo3PhaseLock lock;
-                const double camDt = 1.0 / hz;
-                double t = 0.0, simTime = 0.0;
-                float simX = 0.0f;
-                Halo3Frame held = hullAt(simX);
-                const int parked = static_cast<int>(hz / 2);
-                const int frames = parked + static_cast<int>(hz * 20);
-                double sumAhead = 0.0;
-                int counted = 0;
-                double worstJump = 0.0;
-                float lastOut = 0.0f;
-                bool haveLast = false;
-                for (int i = 0; i < frames; ++i)
-                {
-                    while (simTime + tickLen <= t)
-                    {
-                        simTime += tickLen;
-                        if (i >= parked)
-                        {
-                            simX += perTickStep;
-                            held = hullAt(simX);
-                        }
-                    }
-                    const Halo3Frame out = Halo3InterpolateFrame(
-                        interp, held, t, true, &lock, nullptr, leadSeconds);
-                    if (haveLast)
-                    {
-                        const double jump = std::fabs(out.pos[0] - lastOut);
-                        if (i > parked + static_cast<int>(hz) && jump > worstJump)
-                            worstJump = jump;
-                    }
-                    lastOut = out.pos[0];
-                    haveLast = true;
-                    if (i > parked + static_cast<int>(hz * 10))
-                    {
-                        // Where an unpredicted blend sits: between the two
-                        // most recent sim states, by the elapsed fraction.
-                        const double rawAlpha = (t - simTime) / tickLen;
-                        const double rawX = simX - perTickStep +
-                            rawAlpha * perTickStep;
-                        sumAhead += out.pos[0] - rawX;
-                        ++counted;
-                    }
-                    t += camDt;
-                }
-                if (outWorstJump)
-                    *outWorstJump = worstJump;
-                return counted ? sumAhead / counted : 0.0;
-            };
 
-            // At every rate a current headset runs, the seat must lead the
-            // unpredicted position by exactly the distance the vehicle covers
-            // in ONE refresh period — 8.3 ms of travel at 120 Hz, 13.9 at 72.
-            // Measured as the DIFFERENCE between predicting and not, at the
-            // same rate. The camera and the 60 Hz simulation lock into a
-            // fixed ratio (exactly 2:1 at 120 Hz), so the absolute sub-tick
-            // alignment carries a constant offset that says nothing about the
-            // prediction; differencing cancels it and leaves only the lead.
-            const double kRates[] = {72.0, 80.0, 90.0, 120.0, 144.0};
-            bool everyRateLeads = true;
-            double worstRateError = 0.0;
-            for (double hz : kRates)
+            // C16: the seat is PARENTED to the car. With smoothing off — the
+            // default — every published frame is EXACTLY the simulation's own
+            // hull state, so the seat is rigidly bolted to the car and you
+            // feel its physics unaltered.
             {
-                const double lead = 1.0 / hz;
-                const double expected = stepWu * (lead / tickLen);
-                const double measured =
-                    driveAhead(hz, lead, stepWu, nullptr) -
-                    driveAhead(hz, 0.0, stepWu, nullptr);
-                const double err = std::fabs(measured - expected);
-                if (err > worstRateError)
-                    worstRateError = err;
-                if (err > 0.05 * expected)
-                    everyRateLeads = false;
-            }
-            Check(everyRateLeads,
-                "The seat is predicted ahead by exactly one display period of "
-                "vehicle travel at 72, 80, 90, 120 and 144 Hz - the headset's "
-                "own rate, not an assumed one");
-
-            // A faster headset predicts LESS far ahead (its frame is shown
-            // sooner), and the difference between two rates is real and in
-            // the right direction. This is what a wrong Hz would break.
-            const double at72 = driveAhead(72.0, 1.0 / 72.0, stepWu, nullptr) -
-                driveAhead(72.0, 0.0, stepWu, nullptr);
-            const double at144 =
-                driveAhead(144.0, 1.0 / 144.0, stepWu, nullptr) -
-                driveAhead(144.0, 0.0, stepWu, nullptr);
-            Check(at72 > at144 * 1.6 && at144 > 0.0,
-                "A 72 Hz headset is predicted roughly twice as far ahead as a "
-                "144 Hz one, because its frame is displayed twice as late");
-
-            // A pinned rate must behave exactly like the same rate arriving
-            // from the runtime — the F1 list is an override, not a second
-            // mechanism — and a WRONG pin must visibly mispredict, which is
-            // what makes Auto the right default.
-            const double pinnedRight =
-                driveAhead(120.0, 1.0 / 120.0, stepWu, nullptr);
-            const double pinnedWrong =
-                driveAhead(120.0, 1.0 / 72.0, stepWu, nullptr);
-            Check(std::fabs(pinnedWrong - pinnedRight) >
-                      0.4 * stepWu * ((1.0 / 120.0) / tickLen),
-                "Pinning the wrong headset rate really does mispredict, so "
-                "Auto - the runtime's own rate - is the correct default");
-
-            // Standstill and crawl: prediction must disengage, or millimetre
-            // physics jitter would be extrapolated into a bounce - the defect
-            // the user reported against the old manual knob.
-            double crawlJump = 0.0;
-            driveAhead(120.0, 1.0 / 120.0, 0.002f, &crawlJump);
-            Check(crawlJump < 0.004,
-                "At a crawl the prediction disengages instead of extrapolating "
-                "small physics steps into a bounce");
-
-            // The bounding-centre witness is now DIAGNOSTIC ONLY. Feeding it a
-            // perfectly render-interpolated centre must not move the camera by
-            // one bit compared with not feeding it at all.
-            {
-                Halo3FrameInterp a, b;
-                Halo3PhaseLock lockA, lockB;
-                const double camDt = 1.0 / 240.0;
-                const double lead = 1.0 / 120.0;
-                double t = 0.0, simTime = 0.0;
-                float simX = 0.0f;
-                Halo3Frame held = hullAt(simX);
-                float bounds[3] = {1.2f, 0.0f, 0.4f};
-                bool identical = true;
-                for (int i = 0; i < 3000; ++i)
-                {
-                    while (simTime + tickLen <= t)
-                    {
-                        simTime += tickLen;
-                        if (i >= 120)
-                        {
-                            simX += stepWu;
-                            held = hullAt(simX);
-                        }
-                    }
-                    const double alphaMcc = (t - simTime) / tickLen + 0.6;
-                    bounds[0] = static_cast<float>(
-                        simX - stepWu + alphaMcc * stepWu) + 1.2f;
-                    const Halo3Frame withWitness = Halo3InterpolateFrame(
-                        a, held, t, true, &lockA, bounds, lead);
-                    const Halo3Frame without = Halo3InterpolateFrame(
-                        b, held, t, true, &lockB, nullptr, lead);
-                    if (withWitness.pos[0] != without.pos[0])
-                        identical = false;
-                    t += camDt;
-                }
-                Check(identical && lockA.smoothEvaluated && lockA.smooth &&
-                          !lockB.smoothEvaluated,
-                    "The bounding-centre witness still measures and reports, "
-                    "but no longer steers the camera - a mechanism the log "
-                    "proved never armed on real hardware cannot drive the view");
-            }
-
-            // C15: the forward/back bounce, "most prominent during boosting
-            // and flying". The camera runs ~4 calls per tick and a tick is
-            // only noticed on the first call AFTER it lands, so the phase
-            // passes 1.0 near the end of every tick. Clamping the blend
-            // there froze the seat for those calls and let it jump when the
-            // tick arrived: a 60 Hz judder proportional to speed. At a
-            // constant speed every published frame must advance by the same
-            // amount, with NO frame standing still.
-            {
-                Halo3FrameInterp interp;
-                const double camDt = 1.0 / 251.0;   // the measured hook rate
-                const double boostStep = 0.30;      // wu/tick, boosting
+                Halo3FrameInterp rigid;
+                const double camDt = 1.0 / 251.0;
                 double t = 0.0, simTime = 0.0;
                 int ticks = 0;
                 Halo3Frame held = hullAt(0.0f);
+                bool exact = true;
+                for (int i = 0; i < 2000; ++i)
+                {
+                    while (simTime + tickLen <= t)
+                    {
+                        simTime += tickLen; ++ticks;
+                        held = hullAt(static_cast<float>(ticks * 0.30));
+                    }
+                    const Halo3Frame out =
+                        Halo3InterpolateFrame(rigid, held, t, false);
+                    if (out.pos[0] != held.pos[0])
+                        exact = false;
+                    t += camDt;
+                }
+                Check(exact && !rigid.valid,
+                    "With smoothing off the seat is bolted to the car: every "
+                    "published frame is exactly the simulation's own hull "
+                    "state, physics and all");
+            }
+
+            // With smoothing on, the blend must stay strictly BETWEEN the two
+            // most recent simulation states. Everything that used to live past
+            // the newest state was removed: a bounded blend that is held at a
+            // ceiling while the hull keeps turning loses that rotation for
+            // good, which is what let the car rotate out from under the
+            // camera ("i was able to drift the camera completely around").
+            {
+                Halo3FrameInterp interp;
+                const double camDt = 1.0 / 251.0;
+                const double boostStep = 0.30;
+                double t = 0.0, simTime = 0.0;
+                int ticks = 0;
+                Halo3Frame held = hullAt(0.0f);
+                bool bounded = true, ordered = true;
                 float last = 0.0f;
                 bool have = false;
-                double worstFast = 0.0, worstSlow = 1e9;
-                int seen = 0;
                 for (int i = 0; i < 4000; ++i)
                 {
                     while (simTime + tickLen <= t)
                     {
-                        simTime += tickLen;
-                        ++ticks;
+                        simTime += tickLen; ++ticks;
                         held = hullAt(static_cast<float>(ticks * boostStep));
                     }
-                    const Halo3Frame out = Halo3InterpolateFrame(
-                        interp, held, t, true, nullptr, nullptr, 0.0);
-                    if (have && i > 1200)
+                    const Halo3Frame out =
+                        Halo3InterpolateFrame(interp, held, t, true);
+                    if (i > 600)
                     {
-                        const double d = out.pos[0] - last;
-                        if (d > worstFast) worstFast = d;
-                        if (d < worstSlow) worstSlow = d;
-                        ++seen;
+                        // Never past the newest state, never behind the one
+                        // before it.
+                        const double newest = ticks * boostStep;
+                        if (out.pos[0] > newest + 1e-4 ||
+                            out.pos[0] < newest - boostStep - 1e-4)
+                            bounded = false;
+                        if (have && out.pos[0] < last - 1e-4f)
+                            ordered = false;
                     }
                     last = out.pos[0];
                     have = true;
                     t += camDt;
                 }
-                // MEASURED offline against both policies at the real 251
-                // calls/sec hook rate with the shipped 120 Hz prediction:
-                // clamped 0.923x..1.060x, continuous 0.970x..1.031x. The
-                // gate sits between the two.
-                const double even = boostStep * camDt / tickLen;
-                Check(seen > 2000 && worstSlow > even * 0.95 &&
-                          worstFast < even * 1.045,
-                    "At boost speed no published frame stalls or lurches at "
-                    "the tick boundary - the blend stays continuous instead "
-                    "of clamping at the newest state");
+                Check(bounded && ordered && interp.lastAlpha <= 1.0f,
+                    "Smoothed, the seat stays strictly between the two most "
+                    "recent simulation states and never runs backwards - "
+                    "nothing extrapolates past the car any more");
             }
 
-            // C15: the same defect under acceleration, which is where the
-            // user saw it worst. MEASURED: clamped 0.137x of a frame's
-            // travel of per-frame correction, continuous 0.034x - a 4x
-            // reduction. The gate sits between them.
+            // The view-follow integrates the heading step it is handed, so it
+            // must be fed the RAW hull heading. Driving a full circle must
+            // fold in exactly one full turn: any rotation the source fails to
+            // deliver is lost for good and reads as the car slowly rotating
+            // out from under the camera.
             {
-                Halo3FrameInterp interp;
-                const double camDt = 1.0 / 251.0;
-                const double lead = 1.0 / 120.0;
-                double t = 0.0, simTime = 0.0;
-                int ticks = 0;
-                double speed = 0.05;          // wu/tick, accelerating hard
-                double posWu = 0.0;
-                Halo3Frame held = hullAt(0.0f);
-                float last = 0.0f;
-                bool have = false;
-                double worstJerk = 0.0;
-                double prevDelta = -1.0;
-                for (int i = 0; i < 3000; ++i)
+                Halo3SeatYaw yaw;
+                float fwd[3] = {1.0f, 0.0f, 0.0f};
+                double total = 0.0;
+                const int steps = 720;
+                for (int i = 0; i <= steps; ++i)
                 {
-                    while (simTime + tickLen <= t)
-                    {
-                        simTime += tickLen;
-                        ++ticks;
-                        if (speed < 0.35) speed += 0.004;   // boost ramp
-                        posWu += speed;
-                        held = hullAt(static_cast<float>(posWu));
-                    }
-                    const Halo3Frame out = Halo3InterpolateFrame(
-                        interp, held, t, true, nullptr, nullptr, lead);
-                    if (have && i > 900)
-                    {
-                        const double d = out.pos[0] - last;
-                        if (prevDelta >= 0.0)
-                        {
-                            const double jerk = std::fabs(d - prevDelta);
-                            if (jerk > worstJerk) worstJerk = jerk;
-                        }
-                        prevDelta = d;
-                    }
-                    last = out.pos[0];
-                    have = true;
-                    t += camDt;
+                    const double a = 6.283185307 * i / steps;
+                    fwd[0] = static_cast<float>(std::cos(a));
+                    fwd[1] = static_cast<float>(std::sin(a));
+                    total += Halo3SeatYawDelta(yaw, fwd, true, 1.0f);
                 }
-                // Frame-to-frame change in the step size, against the even
-                // step at the final speed. A per-tick correction shows up
-                // here as a large spike.
-                const double even = 0.35 * camDt / tickLen;
-                Check(worstJerk < even * 0.07,
-                    "Accelerating under boost produces no per-tick correction "
-                    "spike at the tick boundary");
+                Check(std::fabs(total - 6.283185307) < 1e-3,
+                    "A full circle folds exactly one full turn into the view "
+                    "reference, so the car can never rotate out from under "
+                    "the camera");
             }
-
-            // A simulation hitch at speed must glide the prediction out over
-            // ~40 ms rather than snapping the camera back by the whole lead.
-            {
-                Halo3FrameInterp interp;
-                Halo3PhaseLock lock;
-                const double camDt = 1.0 / 120.0;
-                const double lead = 1.0 / 120.0;
-                double t = 0.0, simTime = 0.0;
-                float simX = 0.0f;
-                Halo3Frame held = hullAt(simX);
-                for (int i = 0; i < 600; ++i)
-                {
-                    while (simTime + tickLen <= t)
-                    {
-                        simTime += tickLen;
-                        simX += stepWu;
-                        held = hullAt(simX);
-                    }
-                    Halo3InterpolateFrame(interp, held, t, true, &lock,
-                                          nullptr, lead);
-                    t += camDt;
-                }
-                double worst = 0.0;
-                float last = 0.0f;
-                bool have = false;
-                for (int i = 0; i < 120; ++i)   // one second frozen
-                {
-                    const Halo3Frame out = Halo3InterpolateFrame(
-                        interp, held, t, true, &lock, nullptr, lead);
-                    if (have)
-                    {
-                        const double d = std::fabs(out.pos[0] - last);
-                        if (d > worst) worst = d;
-                    }
-                    last = out.pos[0];
-                    have = true;
-                    t += camDt;
-                }
-                Check(worst < 0.035,
-                    "A simulation hitch glides the prediction out instead of "
-                    "snapping the camera back by the whole lead in one frame");
-            }
-
-
             // The C11 guarantee: an evenly advancing hull must produce evenly
             // advancing frames even though each tick is noticed a different
             // amount late.
