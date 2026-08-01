@@ -161,6 +161,14 @@ struct Config
     bool cutscene_theater_flip_depth = false;
     float cutscene_theater_width_m = 6.0f;
     float cutscene_theater_distance_m = 4.0f;
+    // Black cine bars over the parts of the authored frame a monitor never
+    // shows. The cutscene is rasterized into the headset's render shape, which
+    // is taller than 16:9, so without them the theatre exposes scene above and
+    // below the intended shot. 0 disables the bars.
+    float cutscene_theater_matte_aspect = 16.0f / 9.0f;
+    // Slides the retained window up (positive) or down inside that frame, as a
+    // fraction of the frame height. The window never changes size.
+    float cutscene_theater_matte_offset = 0.0f;
 
     // F1 menu panel placement. The panel is its own composition quad, separate
     // from the virtual screen above. The defaults are the fixed constants the

@@ -383,8 +383,11 @@ namespace
         // x: source is sRGB; y: non-sRGB XR target needs perceptual output;
         // z: source already passed through the normal IQ output encoding.
         float color[4]{};
+        // x/y: first and last source V the cine bars leave showing; z: nonzero
+        // once those bars are active at all.
+        float matte[4]{};
     };
-    static_assert(sizeof(TheaterProjectionParams) == 80);
+    static_assert(sizeof(TheaterProjectionParams) == 96);
 
     // Official SMAA 1x shaders and immutable lookup tables. They are created on
     // first SMAA selection and remain tiny; the third eye-sized target is the
@@ -2068,6 +2071,7 @@ cbuffer TheaterProjectionParams : register(b0)
 {
     float4 clipPositions[4];
     float4 colorParams;
+    float4 matteParams;
 }
 struct VSOut { float4 pos : SV_Position; float2 uv : TEXCOORD0; };
 VSOut vs_main(uint id : SV_VertexID)
@@ -2086,6 +2090,11 @@ float enc(float c)
 }
 float4 ps_main(VSOut i) : SV_Target
 {
+    // Cine bars: the strips of the authored frame a monitor never shows are
+    // returned as opaque black before anything is sampled or converted.
+    if (matteParams.z > 0.5 &&
+        (i.uv.y < matteParams.x || i.uv.y > matteParams.y))
+        return float4(0.0, 0.0, 0.0, 1.0);
     float4 c = srcTex.SampleLevel(smp, i.uv, 0);
     if (colorParams.z < 0.5)
     {
@@ -2247,6 +2256,13 @@ float4 ps_main(VSOut i) : SV_Target
         params.color[1] = IsSrgb(static_cast<DXGI_FORMAT>(g_xrFormat))
             ? 0.0f : 1.0f;
         params.color[2] = sourceAlreadyXrEncoded ? 1.0f : 0.0f;
+        const CutsceneTheaterMatte matte = ComputeCutsceneTheaterMatte(
+            g_cutsceneTheaterAuthoredAspect,
+            g_config.cutscene_theater_matte_aspect,
+            g_config.cutscene_theater_matte_offset);
+        params.matte[0] = matte.vMin;
+        params.matte[1] = matte.vMax;
+        params.matte[2] = matte.active ? 1.0f : 0.0f;
         g_context->UpdateSubresource(
             g_theaterProjectionCb, 0, nullptr, &params, 0, 0);
 
@@ -6829,6 +6845,33 @@ float4 ps_scope_linearize(VSOut i):SV_Target { return paint(i.uv,true); }
                     if (theaterTransition.active)
                     {
                         LOG("cutscene theatre: entered room-fixed stereo presentation");
+                        // The authored aspect is the shape the title actually
+                        // rasterized this cutscene into, so report it beside
+                        // the cine bars it produced. A report can then say
+                        // which of the two is wrong without another build.
+                        const CutsceneTheaterMatte entryMatte =
+                            ComputeCutsceneTheaterMatte(
+                                g_cutsceneTheaterAuthoredAspect,
+                                g_config.cutscene_theater_matte_aspect,
+                                g_config.cutscene_theater_matte_offset);
+                        if (entryMatte.active)
+                        {
+                            LOG("cutscene theatre: authored frame %.3f:1, cine "
+                                "bars leave %.3f:1 showing (V %.3f..%.3f, "
+                                "%.1f%% hidden top, %.1f%% bottom)",
+                                g_cutsceneTheaterAuthoredAspect,
+                                g_config.cutscene_theater_matte_aspect,
+                                entryMatte.vMin, entryMatte.vMax,
+                                entryMatte.vMin * 100.0f,
+                                (1.0f - entryMatte.vMax) * 100.0f);
+                        }
+                        else
+                        {
+                            LOG("cutscene theatre: authored frame %.3f:1, no "
+                                "cine bars (requested %.3f:1)",
+                                g_cutsceneTheaterAuthoredAspect,
+                                g_config.cutscene_theater_matte_aspect);
+                        }
                     }
                     else
                     {
@@ -7341,6 +7384,39 @@ float4 ps_scope_linearize(VSOut i):SV_Target { return paint(i.uv,true); }
                                             CutsceneTheaterHeightFromAspect(
                                                 g_config.cutscene_theater_width_m,
                                                 g_cutsceneTheaterAuthoredAspect);
+                                        // This path has no shader of ours, so
+                                        // the cine bars become the sub-rect the
+                                        // quad samples. Same retained window,
+                                        // same picture scale.
+                                        const CutsceneTheaterMatte quadMatte =
+                                            ComputeCutsceneTheaterMatte(
+                                                g_cutsceneTheaterAuthoredAspect,
+                                                g_config.cutscene_theater_matte_aspect,
+                                                g_config.cutscene_theater_matte_offset);
+                                        if (quadMatte.active)
+                                        {
+                                            const int32_t top =
+                                                static_cast<int32_t>(
+                                                    quadMatte.vMin *
+                                                    static_cast<float>(g_stereoH));
+                                            int32_t height =
+                                                static_cast<int32_t>(
+                                                    (quadMatte.vMax - quadMatte.vMin) *
+                                                    static_cast<float>(g_stereoH));
+                                            if (height > 0 &&
+                                                top + height <=
+                                                    static_cast<int32_t>(g_stereoH))
+                                            {
+                                                theaterQuads[eye].subImage
+                                                    .imageRect.offset.y = top;
+                                                theaterQuads[eye].subImage
+                                                    .imageRect.extent.height = height;
+                                                theaterQuads[eye].size.height =
+                                                    CutsceneTheaterHeightFromAspect(
+                                                        g_config.cutscene_theater_width_m,
+                                                        g_config.cutscene_theater_matte_aspect);
+                                            }
+                                        }
                                         layers.push_back(
                                             reinterpret_cast<
                                                 XrCompositionLayerBaseHeader*>(

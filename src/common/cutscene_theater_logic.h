@@ -330,6 +330,50 @@ inline bool BuildCutsceneTheaterProjectionQuad(
     return true;
 }
 
+// The authored cinematic is rasterized into the headset's own render shape, so
+// its frame is taller than the 16:9 frame the same shot fills on a monitor:
+// both share the engine's horizontal tangent, and only the vertical one grows.
+// Everything in that extra height is scene the flat game never shows. The matte
+// is the black cine bar pair that hides it again, and it is a pure crop - the
+// retained picture keeps its exact size and scale, so this can never rescale,
+// stretch or letterbox a picture that is already at or wider than the target.
+struct CutsceneTheaterMatte
+{
+    bool active = false;
+    float vMin = 0.0f;
+    float vMax = 1.0f;
+};
+
+inline CutsceneTheaterMatte ComputeCutsceneTheaterMatte(
+    float sourceAspect, float targetAspect, float verticalOffset) noexcept
+{
+    CutsceneTheaterMatte result{};
+    if (!std::isfinite(sourceAspect) || !std::isfinite(targetAspect) ||
+        !std::isfinite(verticalOffset) ||
+        sourceAspect < 0.25f || sourceAspect > 4.0f ||
+        targetAspect < 0.25f || targetAspect > 4.0f ||
+        // Nothing to hide: the authored frame is already at or wider than the
+        // requested window. Never scale the picture down to manufacture bars.
+        sourceAspect >= targetAspect)
+    {
+        return result;
+    }
+    const float span = sourceAspect / targetAspect;
+    if (!std::isfinite(span) || span <= 0.0f || span >= 1.0f)
+        return result;
+
+    // Texture V grows downward, so a positive offset lifts the retained window.
+    const float clampedOffset = std::clamp(verticalOffset, -0.5f, 0.5f);
+    float vMin = 0.5f - clampedOffset - span * 0.5f;
+    // Slide, never shrink: an offset that would run off an edge stops there
+    // with the whole window still the requested size.
+    vMin = std::clamp(vMin, 0.0f, 1.0f - span);
+    result.active = true;
+    result.vMin = vMin;
+    result.vMax = vMin + span;
+    return result;
+}
+
 inline float CutsceneTheaterHeight(
     float widthMeters, uint32_t imageWidth, uint32_t imageHeight) noexcept
 {

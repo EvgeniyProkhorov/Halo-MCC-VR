@@ -657,7 +657,30 @@ namespace
             &g_config.cutscene_theater_distance_m, 0.3f, 20.0f, "%.1f");
         ImGui::TextDisabled(
             "Defaults: 6.0 m wide at 4.0 m away. Height follows the authored\n"
-            "cinematic projection; the picture is never forced to 16:9.");
+            "cinematic projection.");
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Text("Black cine bars");
+        bool matteOn = g_config.cutscene_theater_matte_aspect > 0.0f;
+        if (ImGui::Checkbox("Show cine bars", &matteOn))
+        {
+            g_config.cutscene_theater_matte_aspect = matteOn ? 16.0f / 9.0f : 0.0f;
+            changed = true;
+        }
+        if (matteOn)
+        {
+            changed |= ImGui::SliderFloat(
+                "Picture shape##theatre",
+                &g_config.cutscene_theater_matte_aspect, 1.0f, 3.0f, "%.2f:1");
+            changed |= ImGui::SliderFloat(
+                "Slide picture##theatre",
+                &g_config.cutscene_theater_matte_offset, -0.25f, 0.25f, "%.2f");
+        }
+        ImGui::TextDisabled(
+            "The cutscene is drawn into the headset's shape, which is taller than a TV,\n"
+            "so without bars you see scene above and below the intended shot.\n"
+            "1.78 is a TV picture, 2.39 a wide cinema crop. The picture is never\n"
+            "resized, only covered. Slide moves what stays showing up or down.");
         }
 
         if (g_activeCategory == Cat_Controls)

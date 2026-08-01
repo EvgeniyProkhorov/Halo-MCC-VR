@@ -2790,6 +2790,37 @@ int main()
                   CutsceneTheaterHeightFromAspect(6.0f, 0.0f) == 0.0f,
             "theatre quad height follows the authored cinematic projection aspect");
 
+        // Halo 3 rasterizes its cutscene into the headset render shape, which
+        // this machine's accepted run reports as 3262x2352 (1.387:1). Hiding
+        // everything outside the 16:9 slice a monitor shows retains 78% of that
+        // height, split evenly into two bars.
+        const CutsceneTheaterMatte headsetShapeMatte =
+            ComputeCutsceneTheaterMatte(3262.0f / 2352.0f, 16.0f / 9.0f, 0.0f);
+        Check(headsetShapeMatte.active &&
+                  std::fabs((headsetShapeMatte.vMax - headsetShapeMatte.vMin) -
+                            (3262.0f / 2352.0f) / (16.0f / 9.0f)) < 0.00001f &&
+                  std::fabs((headsetShapeMatte.vMin + headsetShapeMatte.vMax) -
+                            1.0f) < 0.00001f,
+            "cine bars keep the centred 16:9 slice of the taller authored frame");
+        const CutsceneTheaterMatte liftedMatte =
+            ComputeCutsceneTheaterMatte(1.387f, 16.0f / 9.0f, 0.05f);
+        Check(liftedMatte.active &&
+                  std::fabs((liftedMatte.vMax - liftedMatte.vMin) -
+                            (headsetShapeMatte.vMax -
+                             headsetShapeMatte.vMin)) < 0.001f &&
+                  liftedMatte.vMin < headsetShapeMatte.vMin,
+            "a positive matte offset lifts the retained window without resizing it");
+        const CutsceneTheaterMatte pinnedMatte =
+            ComputeCutsceneTheaterMatte(1.387f, 16.0f / 9.0f, 0.5f);
+        Check(pinnedMatte.active && pinnedMatte.vMin == 0.0f &&
+                  std::fabs(pinnedMatte.vMax - (1.387f / (16.0f / 9.0f))) <
+                      0.00001f,
+            "an offset past the edge stops there at the full window size");
+        Check(!ComputeCutsceneTheaterMatte(2.39f, 16.0f / 9.0f, 0.0f).active &&
+                  !ComputeCutsceneTheaterMatte(1.387f, 0.0f, 0.0f).active &&
+                  !ComputeCutsceneTheaterMatte(0.0f, 16.0f / 9.0f, 0.0f).active,
+            "cine bars never rescale a frame already at or wider than the target");
+
         CutsceneTheaterTransition transition;
         Check(!transition.Update(1000, true).active,
             "theatre entry starts by fading the immersive view");

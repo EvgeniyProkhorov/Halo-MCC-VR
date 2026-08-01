@@ -128,6 +128,18 @@ static void Clamp()
         g_config.cutscene_theater_width_m, 0.5f, 20.0f);
     g_config.cutscene_theater_distance_m = std::clamp(
         g_config.cutscene_theater_distance_m, 0.3f, 20.0f);
+    // 0 is the documented "no cine bars" value, so it must survive the clamp.
+    if (g_config.cutscene_theater_matte_aspect > 0.0f)
+    {
+        g_config.cutscene_theater_matte_aspect = std::clamp(
+            g_config.cutscene_theater_matte_aspect, 1.0f, 3.0f);
+    }
+    else
+    {
+        g_config.cutscene_theater_matte_aspect = 0.0f;
+    }
+    g_config.cutscene_theater_matte_offset = std::clamp(
+        g_config.cutscene_theater_matte_offset, -0.25f, 0.25f);
     g_config.menu_distance_m = std::clamp(g_config.menu_distance_m,
                                           kMenuDistanceMin, kMenuDistanceMax);
     g_config.menu_width_m = std::clamp(g_config.menu_width_m,
@@ -276,6 +288,10 @@ void ConfigLoad(const wchar_t* path)
             ParseFloatSetting(key, val, g_config.cutscene_theater_width_m);
         else if (!strcmp(key, "cutscene_theater_distance_m"))
             ParseFloatSetting(key, val, g_config.cutscene_theater_distance_m);
+        else if (!strcmp(key, "cutscene_theater_matte_aspect"))
+            ParseFloatSetting(key, val, g_config.cutscene_theater_matte_aspect);
+        else if (!strcmp(key, "cutscene_theater_matte_offset"))
+            ParseFloatSetting(key, val, g_config.cutscene_theater_matte_offset);
         else if (!strcmp(key, "menu_distance_m"))
             ParseFloatSetting(key, val, g_config.menu_distance_m);
         else if (!strcmp(key, "menu_width_m"))
@@ -594,13 +610,27 @@ void ConfigSave()
     fprintf(f, "cutscene_theater_flip_depth = %d\n\n",
              g_config.cutscene_theater_flip_depth ? 1 : 0);
     fprintf(f, "# Room-fixed theatre screen width and distance in meters. Its height\n");
-    fprintf(f, "# follows the authored cinematic projection; it is never forced to 16:9.\n");
+    fprintf(f, "# follows the authored cinematic projection.\n");
     fprintf(f, "# (defaults %.2f wide at %.2f away)\n",
              d.cutscene_theater_width_m, d.cutscene_theater_distance_m);
     fprintf(f, "cutscene_theater_width_m = %.2f\n",
              g_config.cutscene_theater_width_m);
     fprintf(f, "cutscene_theater_distance_m = %.2f\n\n",
              g_config.cutscene_theater_distance_m);
+    fprintf(f, "# Black cine bars on the theatre screen. The cutscene is drawn into the\n");
+    fprintf(f, "# headset's render shape, which is taller than a TV picture, so without\n");
+    fprintf(f, "# bars you see scene above and below the shot the game intends. This is\n");
+    fprintf(f, "# the shape left showing between the bars: 1.78 = 16:9 (a TV), 2.39 =\n");
+    fprintf(f, "# a wide cinema crop, 0 = no bars. The picture is never resized, only\n");
+    fprintf(f, "# covered. (default %.2f, range 1.0 to 3.0, or 0)\n",
+             d.cutscene_theater_matte_aspect);
+    fprintf(f, "cutscene_theater_matte_aspect = %.2f\n",
+             g_config.cutscene_theater_matte_aspect);
+    fprintf(f, "# Slides that window up (positive) or down inside the frame, as a\n");
+    fprintf(f, "# fraction of the picture height. (default %.2f, range -0.25 to 0.25)\n",
+             d.cutscene_theater_matte_offset);
+    fprintf(f, "cutscene_theater_matte_offset = %.2f\n\n",
+             g_config.cutscene_theater_matte_offset);
     fprintf(f, "# Where the F1 menu panel floats. You do not need to edit these by\n");
     fprintf(f, "# hand: grab the bar along the top of the panel with your right\n");
     fprintf(f, "# trigger to move it, and push the right stick up/down while holding\n");
