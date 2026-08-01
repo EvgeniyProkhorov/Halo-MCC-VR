@@ -13,6 +13,7 @@
 #include <windows.h>
 
 #include "config.h"
+#include "coop_probe_logic.h"
 #include "cutscene_theater_logic.h"
 #include "frame_pacing_logic.h"
 #include "halo3_theater_logic.h"
@@ -6259,6 +6260,83 @@ int main()
               Halo3ClassifyGameplayUpgrade(
                   Halo3VehicleState::Vehicle, -1) == 1,
             "Gameplay upgrades to Vehicle/Turret only on proven seated state");
+    }
+
+    // Co-op drop probe: the reduction that turns a per-frame ring into one line
+    // per second must age samples correctly, average and peak them per second,
+    // count the frames where the mod held MCC's render thread long enough to
+    // matter, and survive a GetTickCount64 wrap mid-capture.
+    {
+        constexpr size_t kBuckets = 8;
+        CoopProbeBucket buckets[kBuckets]{};
+
+        // Two seconds of frames. The older second is quiet; the second right
+        // before the dump has one 9 ms hold and one 5 ms hold.
+        const uint32_t dumpTick = 100000;
+        CoopProbeSample samples[6]{};
+        samples[0] = { dumpTick - 1500, 0.5f, 0.05f, 8.3f };
+        samples[1] = { dumpTick - 1200, 0.7f, 0.05f, 8.4f };
+        samples[2] = { dumpTick - 1100, 0.6f, 0.05f, 8.3f };
+        samples[3] = { dumpTick -  800, 9.0f, 0.10f, 20.0f };
+        samples[4] = { dumpTick -  400, 5.0f, 0.06f, 9.0f };
+        samples[5] = { dumpTick -  100, 1.0f, 0.04f, 8.3f };
+
+        const size_t populated =
+            CoopProbeSummarise(samples, 6, dumpTick, buckets, kBuckets);
+
+        // Buckets are indexed by age: [0] is the second before the dump.
+        const bool aged = populated == 2 &&
+            buckets[0].frames == 3 && buckets[1].frames == 3;
+        const bool peaks = buckets[0].holdMaxMs == 9.0f &&
+            buckets[1].holdMaxMs == 0.7f &&
+            buckets[0].intervalMaxMs == 20.0f;
+        const bool thresholds = buckets[0].holdOver4Ms == 2 &&
+            buckets[0].holdOver8Ms == 1 &&
+            buckets[1].holdOver4Ms == 0 && buckets[1].holdOver8Ms == 0;
+        // (9 + 5 + 1) / 3 == 5, and the quiet second averages (0.5+0.7+0.6)/3.
+        const bool averaged = buckets[0].holdAvgMs == 5.0f &&
+            buckets[1].holdAvgMs > 0.59f && buckets[1].holdAvgMs < 0.61f;
+
+        // Samples older than the bucket window are dropped, not misfiled.
+        CoopProbeSample stale[1]{};
+        stale[0] = { dumpTick - (uint32_t)(kBuckets * 1000 + 5), 3.0f, 0.0f, 8.3f };
+        const bool dropsStale =
+            CoopProbeSummarise(stale, 1, dumpTick, buckets, kBuckets) == 0;
+
+        // A capture spanning the uint32 tick wrap still ages correctly, because
+        // the subtraction is modular.
+        CoopProbeBucket wrapped[kBuckets]{};
+        const uint32_t afterWrap = 1500;
+        CoopProbeSample across[2]{};
+        // 1756 ms before the dump, i.e. the bucket before last, recorded 256 ms
+        // before the counter wrapped through zero.
+        across[0] = { 0xFFFFFF00u, 2.0f, 0.0f, 8.3f };
+        across[1] = { afterWrap - 100, 4.0f, 0.0f, 8.3f };
+        const size_t wrapPopulated =
+            CoopProbeSummarise(across, 2, afterWrap, wrapped, kBuckets);
+        const bool wrapSafe = wrapPopulated == 2 &&
+            wrapped[0].frames == 1 && wrapped[1].frames == 1;
+
+        // Degenerate inputs must not write anything.
+        const bool guards =
+            CoopProbeSummarise(nullptr, 4, dumpTick, buckets, kBuckets) == 0 &&
+            CoopProbeSummarise(samples, 6, dumpTick, buckets, 0) == 0;
+
+        Check(aged && peaks && thresholds && averaged && dropsStale &&
+              wrapSafe && guards,
+            "Co-op probe reduces per-frame holds into per-second buckets, keeps "
+            "peaks and over-threshold counts, and is tick-wrap safe");
+
+        // Only a real level teardown carries a run-up worth dumping; menu
+        // traffic into Loading does not.
+        Check(CoopProbeIsInLevelMode(RuntimeMode::Gameplay) &&
+              CoopProbeIsInLevelMode(RuntimeMode::Vehicle) &&
+              CoopProbeIsInLevelMode(RuntimeMode::Turret) &&
+              CoopProbeIsInLevelMode(RuntimeMode::Paused) &&
+              !CoopProbeIsInLevelMode(RuntimeMode::Shell) &&
+              !CoopProbeIsInLevelMode(RuntimeMode::Loading) &&
+              !CoopProbeIsInLevelMode(RuntimeMode::Unsupported),
+            "Co-op probe dumps only when a live level falls to Loading");
     }
 
     if (g_failures == 0)

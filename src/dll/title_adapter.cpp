@@ -6,7 +6,9 @@
 #include <cstring>
 #include <windows.h>
 
+#include "../common/coop_probe_logic.h"
 #include "../common/log.h"
+#include "d3d11_hook.h"
 #include "reach_adapter.h"
 
 namespace
@@ -184,9 +186,16 @@ void TitleAdapter_SetRuntimeMode(RuntimeMode mode)
 {
     const RuntimeMode previous =
         g_runtimeMode.exchange(mode, std::memory_order_acq_rel);
-    if (previous != mode)
-        LOG("Runtime mode: %s -> %s",
-            RuntimeModeName(previous), RuntimeModeName(mode));
+    if (previous == mode)
+        return;
+    LOG("Runtime mode: %s -> %s",
+        RuntimeModeName(previous), RuntimeModeName(mode));
+    // A level falling to Loading is exactly the co-op kick edge. Dump the
+    // run-up here, while it is still in the ring -- a kick gives no warning, so
+    // there is no later moment to ask for it. Ordinary menu traffic (Shell or
+    // Unsupported -> Loading) is not a teardown and is skipped.
+    if (mode == RuntimeMode::Loading && CoopProbeIsInLevelMode(previous))
+        CoopProbe_DumpRunUp(RuntimeModeName(previous));
 }
 
 uint32_t TitleAdapter_GetGeneration(GameTitle title)

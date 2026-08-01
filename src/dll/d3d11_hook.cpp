@@ -16,6 +16,7 @@
 #include "vr.h"
 #include "title_adapter.h"
 #include "../common/config.h"
+#include "../common/coop_probe_logic.h"
 #include "../common/log.h"
 #include "../common/runtime_types.h"
 
@@ -846,6 +847,111 @@ static void LogSwapchainConfigOnce(IDXGISwapChain* sc)
 // we only run the VR frame once per game frame.
 static thread_local int g_presentDepth = 0;
 
+// --- Co-op drop probe -------------------------------------------------------
+// Records, per frame, how long THIS MOD holds MCC's render thread inside
+// Present. See coop_probe_logic.h for why that thread matters to co-op. The
+// ring is fixed and written only from the game's render thread (Present has one
+// caller), so the hot path stays allocation-free and lock-free: fill the slot,
+// then publish the count with a release store.
+namespace
+{
+    // ~34 s at 120 Hz, ~57 s at 72 Hz -- long enough to hold the whole run-up to
+    // a kick at any headset rate we support.
+    constexpr size_t kCoopProbeSamples = 4096;
+    constexpr size_t kCoopProbeSeconds = 64;
+
+    CoopProbeSample g_coopSamples[kCoopProbeSamples]{};
+    std::atomic<uint64_t> g_coopWritten{ 0 };
+    int64_t g_coopPrevHookStartQpc = 0;
+
+    double CoopProbeQpcToMs()
+    {
+        static double s_toMs = [] {
+            LARGE_INTEGER f{};
+            QueryPerformanceFrequency(&f);
+            return f.QuadPart ? 1000.0 / static_cast<double>(f.QuadPart) : 0.0;
+        }();
+        return s_toMs;
+    }
+
+    void CoopProbeNoteFrame(int64_t hookStartQpc, int64_t presentStartQpc,
+                            int64_t presentEndQpc)
+    {
+        if (!g_config.coop_probe)
+            return;
+        const double toMs = CoopProbeQpcToMs();
+        if (toMs == 0.0)
+            return;
+
+        LARGE_INTEGER hookEnd{};
+        QueryPerformanceCounter(&hookEnd);
+
+        const double hookMs =
+            static_cast<double>(hookEnd.QuadPart - hookStartQpc) * toMs;
+        const double dxgiMs =
+            static_cast<double>(presentEndQpc - presentStartQpc) * toMs;
+        // What we ADD is the hook minus the game's own present. Clamp at zero:
+        // the two timestamps are taken at slightly different points and a
+        // negative "hold" would only ever be measurement noise.
+        const double holdMs = hookMs > dxgiMs ? hookMs - dxgiMs : 0.0;
+        const double intervalMs = g_coopPrevHookStartQpc
+            ? static_cast<double>(hookStartQpc - g_coopPrevHookStartQpc) * toMs
+            : 0.0;
+        g_coopPrevHookStartQpc = hookStartQpc;
+
+        const uint64_t written = g_coopWritten.load(std::memory_order_relaxed);
+        CoopProbeSample& slot = g_coopSamples[written % kCoopProbeSamples];
+        slot.tickMs = static_cast<uint32_t>(GetTickCount64());
+        slot.holdMs = static_cast<float>(holdMs);
+        slot.dxgiMs = static_cast<float>(dxgiMs);
+        slot.intervalMs = static_cast<float>(intervalMs);
+        g_coopWritten.store(written + 1, std::memory_order_release);
+    }
+}
+
+void CoopProbe_DumpRunUp(const char* reason)
+{
+    if (!g_config.coop_probe)
+        return;
+    const uint64_t written = g_coopWritten.load(std::memory_order_acquire);
+    if (!written)
+        return;
+
+    // Dump path only -- never the hot path -- so these statics cost nothing per
+    // frame and keep the probe allocation-free here too.
+    static CoopProbeSample s_ordered[kCoopProbeSamples];
+    static CoopProbeBucket s_buckets[kCoopProbeSeconds];
+
+    const size_t count = static_cast<size_t>(
+        written < kCoopProbeSamples ? written : kCoopProbeSamples);
+    const size_t first =
+        static_cast<size_t>((written - count) % kCoopProbeSamples);
+    for (size_t i = 0; i < count; ++i)
+        s_ordered[i] = g_coopSamples[(first + i) % kCoopProbeSamples];
+
+    const uint32_t nowTick = static_cast<uint32_t>(GetTickCount64());
+    const size_t bucketCount = CoopProbeSummarise(
+        s_ordered, count, nowTick, s_buckets, kCoopProbeSeconds);
+
+    LOG("COOPPROBE run-up to teardown from %s: %zu frames across %zu s. "
+        "'hold' is the time THIS MOD adds inside MCC's Present, on MCC's own "
+        "render thread -- the thread its co-op simulation is paced from. "
+        "Rising hold or interval before a kick implicates the mod; flat means "
+        "look elsewhere.",
+        reason ? reason : "?", count, bucketCount);
+    for (size_t age = bucketCount; age-- > 0;)
+    {
+        const CoopProbeBucket& b = s_buckets[age];
+        if (!b.frames)
+            continue;
+        LOG("COOPPROBE t-%02zus: frames=%u hold avg=%.3f max=%.3f over4ms=%u "
+            "over8ms=%u | dxgi avg=%.3f max=%.3f | interval avg=%.3f max=%.3f",
+            age, b.frames, b.holdAvgMs, b.holdMaxMs, b.holdOver4Ms,
+            b.holdOver8Ms, b.dxgiAvgMs, b.dxgiMaxMs, b.intervalAvgMs,
+            b.intervalMaxMs);
+    }
+}
+
 // The VR frame is submitted INSIDE the game's desktop present (below), so
 // whatever throttles that present throttles the headset with it. MCC's V-Sync
 // paces on the DESKTOP monitor's refresh, which has nothing to do with the
@@ -877,8 +983,10 @@ static HRESULT STDMETHODCALLTYPE PresentHook(IDXGISwapChain* sc, UINT syncInterv
 {
     const bool topLevel = (g_presentDepth++ == 0);
     const bool runVrFrame = topLevel && !(flags & DXGI_PRESENT_TEST);
+    LARGE_INTEGER hookStart{};
     if (runVrFrame)
     {
+        QueryPerformanceCounter(&hookStart);
         LogSwapchainConfigOnce(sc);
         VR_BeforePresent(sc);
     }
@@ -892,6 +1000,8 @@ static HRESULT STDMETHODCALLTYPE PresentHook(IDXGISwapChain* sc, UINT syncInterv
     {
         QueryPerformanceCounter(&presentEnd);
         VR_AfterPresent(sc, presentStart.QuadPart, presentEnd.QuadPart, hr);
+        CoopProbeNoteFrame(hookStart.QuadPart, presentStart.QuadPart,
+                           presentEnd.QuadPart);
     }
     g_presentDepth--;
     return hr;
@@ -902,8 +1012,10 @@ static HRESULT STDMETHODCALLTYPE Present1Hook(IDXGISwapChain1* sc, UINT syncInte
 {
     const bool topLevel = (g_presentDepth++ == 0);
     const bool runVrFrame = topLevel && !(flags & DXGI_PRESENT_TEST);
+    LARGE_INTEGER hookStart{};
     if (runVrFrame)
     {
+        QueryPerformanceCounter(&hookStart);
         LogSwapchainConfigOnce(sc);
         VR_BeforePresent(sc);
     }
@@ -917,6 +1029,8 @@ static HRESULT STDMETHODCALLTYPE Present1Hook(IDXGISwapChain1* sc, UINT syncInte
     {
         QueryPerformanceCounter(&presentEnd);
         VR_AfterPresent(sc, presentStart.QuadPart, presentEnd.QuadPart, hr);
+        CoopProbeNoteFrame(hookStart.QuadPart, presentStart.QuadPart,
+                           presentEnd.QuadPart);
     }
     g_presentDepth--;
     return hr;

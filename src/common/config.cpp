@@ -445,6 +445,8 @@ void ConfigLoad(const wchar_t* path)
             g_config.fit_desktop_window = atoi(val) != 0;
         else if (!strcmp(key, "desktop_present_unlocked"))
             g_config.desktop_present_unlocked = atoi(val) != 0;
+        else if (!strcmp(key, "coop_probe"))
+            g_config.coop_probe = atoi(val) != 0;
         else if (!strcmp(key, "draw_distance"))
             g_config.draw_distance = (float)atof(val);
         else if (!strcmp(key, "upscale_filter"))
@@ -955,6 +957,16 @@ void ConfigSave()
     fprintf(f, "# (default %d)\n", d.desktop_present_unlocked ? 1 : 0);
     fprintf(f, "desktop_present_unlocked = %d\n\n",
             g_config.desktop_present_unlocked ? 1 : 0);
+    fprintf(f, "# Co-op kick probe (diagnostic, safe to leave on). Campaign co-op\n");
+    fprintf(f, "# has been dropping BOTH players to the menu. The VR frame is\n");
+    fprintf(f, "# submitted inside MCC's own present, on the same thread MCC paces\n");
+    fprintf(f, "# its co-op simulation from, so this measures how long the mod holds\n");
+    fprintf(f, "# that thread and writes a one-line-per-second summary to\n");
+    fprintf(f, "# halo3xr.log (search COOPPROBE) every time a level is torn down.\n");
+    fprintf(f, "# It changes nothing you can see or feel -- it only measures. Leave\n");
+    fprintf(f, "# it on if you are helping test the co-op drop. 1 = on, 0 = off.\n");
+    fprintf(f, "# (default %d)\n", d.coop_probe ? 1 : 0);
+    fprintf(f, "coop_probe = %d\n\n", g_config.coop_probe ? 1 : 0);
     fprintf(f, "# Draw distance: how far the game renders the whole scene, as a\n");
     fprintf(f, "# fraction of stock. Applies live to all three games (Halo 3, ODST,\n");
     fprintf(f, "# Reach). 1.00 = full stock draw distance. Lower brings the far plane\n");

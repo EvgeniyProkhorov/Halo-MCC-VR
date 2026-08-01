@@ -25,3 +25,11 @@ bool D3D_FitActive();
 // thread -- never see it, so they still downscale the full frame into the real,
 // smaller window instead of clipping it to a corner.
 void D3D_SetForcedClientLie(bool on);
+
+// --- Co-op drop probe (config.coop_probe) -----------------------------------
+// The VR frame is submitted inside MCC's own Present, on MCC's render thread --
+// the thread MCC paces its synchronised campaign co-op simulation from. This
+// records how long the mod holds that thread each frame and dumps the run-up
+// when a level is torn down, so a real co-op kick leaves measurements behind
+// instead of a theory. `reason` names the mode we fell out of.
+void CoopProbe_DumpRunUp(const char* reason);
