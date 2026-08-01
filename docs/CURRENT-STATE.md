@@ -5,7 +5,10 @@ pointer. Detailed pre-cleanup experiments remain available in Git history; they
 are evidence, not instructions.
 
 > **Start here: "PUBLIC RELEASE: MCC VR Alpha 0.3.1 - 2026-07-30" below is the
-> current accepted state.** Everything dated earlier is history.
+> current published state, and "ACCEPTED DEVELOPMENT BASELINE: Halo 3
+> first-person vehicles - 2026-08-01" immediately below it is the current
+> development baseline that the next hotfix/feature update builds on.**
+> Everything dated earlier is history.
 > Several older sections describe Reach features as impossible, mandatory, or
 > not yet built that have since been built and headset-confirmed - in
 > particular the authored crosshair, which older text calls unimplementable in
@@ -55,6 +58,92 @@ live, headset-tuned `halomccvr.cfg` and users are told to replace their old one
 (no config migration exists); and this exact published ZIP is the tested
 artifact - do not rebuild and republish without repeating headset verification,
 since the DLL embeds its compile timestamp and a rebuild is never byte-identical.
+
+## ACCEPTED DEVELOPMENT BASELINE: Halo 3 first-person vehicles - 2026-08-01
+
+**This is the current development baseline for the next hotfix/feature update.**
+It is on `feature/halo3-vehicles`, descends from the 0.3.1 line, and is not yet
+published. It does not replace the 0.3.1 archive above.
+
+| Identity | Value |
+| --- | --- |
+| Baseline source | `efe8bdba28c349a0a96a1ccd6d4acf7eda75f0d1` (branch `feature/halo3-vehicles`) |
+| Build | Release x64, preset `release`, ODST ON, Reach ON, ReachRender ON |
+| Candidate package | `out/candidates/efe8bdb-reach-fp-parity-20260801-130145401Z` |
+| `halo3xr.dll` SHA-256 | `0E9DB6DA57CB9D7C61D55BE07998E2161DF6CEC7A8B511C9D81BC60CE2537F9E` |
+| `halo3xr_launcher.exe` SHA-256 | `778C212491020CE53D564D18D364A5CCBA4A8115037131D8E576B58FFE497D38` |
+| `halomccvr.cfg` SHA-256 | `D0F12A32716385739051B5DF45AF634FB5AE9B3C1B2EC1DA33F0219DD48392E5` |
+| Installed editions | Steam and Microsoft Store; DLL, launcher and config hashes verified independently in both `Halo_MCC_VR` folders |
+| Accepted runtime | Microsoft Store (Game Pass) edition, SteamVR/OpenXR 2.17.6, Quest 3 (`'SteamVR/OpenXR : oculus'`, vendor `0x28DE`) at 120 Hz |
+| Headset result | Accepted. First-person vehicles, hidden character model, passenger floating hands/gun, and the seat re-centre all confirmed good in-headset. |
+| Preserved evidence | `out/test-runs/d62e3ac-halo3-fp-vehicles-gamepass-pass-20260801-072357` |
+| Preserved log SHA-256 | `407976C30036ED8AC62CDE99D1B24FC346C091ACB75FB6B2389B9E240788326F` |
+
+**What the headset run proves.** The preserved log is the accepted Game Pass
+session on `d62e3ac` (C23). It records the vehicle evidence chain resolving
+uniquely, `H3 first-person seat: Active` on seat entry, the nose-align, the
+play-space re-centre firing on a settled edge, and - the decisive C22 counter -
+`head-parented` holding at **100%** of sampled frames with `anchor fallback 0%`
+across every ten-second window after entry. Before C22 that percentage toggled
+between 0% and 42% window to window, and each toggle was the camera step the
+user reported as the vehicle "resetting". Continuity, not a smoothing filter, is
+what removed it.
+
+**Scope of the acceptance versus the exact baseline bytes.** The accepted
+headset run is `d62e3ac`. The baseline commit `efe8bdb` (C24) sits one commit
+later and changes **only** built-in defaults and the shipped configuration - no
+runtime behavior differs between them. `efe8bdb`'s exact bytes are installed and
+hash-verified in both editions but have not themselves been run yet, so any
+future report against this baseline should confirm the log's first line names
+`efe8bdba28c349a0a96a1ccd6d4acf7eda75f0d1`.
+
+**The five accepted behaviors, in order.**
+
+- **C20 `8547b7d` - hide the character model in a first-person seat.** Halo 3
+  seat flag bit 4 (third-person camera) is re-read from the loaded tag on every
+  camera evaluation and never latched at entry, so clearing it at runtime takes
+  effect immediately and restores completely. Clearing it makes the occupied
+  seat report first person, and Halo then stops drawing the player's own model.
+  The camera anchor is not touched. Third-person driving is unaffected because
+  the patch applies only while `vehicle_first_person` and `vehicle_hide_body`
+  are both on and only to the seat actually occupied.
+- **C21 `8fdd238` - arms ride the seat, not the occupant's head.** Under a
+  cleared bit 4 the engine camera source *is* the occupant's `head` marker, so
+  the controller hand origin was inheriting head animation. The origin now
+  selects the seat body anchor. It is deliberately not lowered to a literal
+  chest point: controller displacement is measured from the room-space head
+  reference captured at that seat, so lowering the origin would drop the hands
+  rather than re-parent them.
+- **C22 `7649997` - saturate the head contribution instead of dropping it.**
+  The old code gated the head-parented contribution on a magnitude limit, so
+  crossing the limit switched the contribution off entirely and stepped the
+  camera. It now clamps to the same limit and stays continuous.
+- **C23 `d62e3ac` - bounce strength, and a play-space re-centre on both seat
+  edges.** `kHalo3HeadMaximumLocalDelta = 0.08` is **world units**, i.e. 24 cm
+  of camera travel, which only became continuously felt once C22 stopped
+  gating it; `vehicle_bounce` scales it (shipped at `0.35`). The user
+  explicitly rejected smoothing as the remedy, so this is a plain strength
+  scale - no filter, no averaging, no added latency. Separately, nothing
+  re-neutralised play-space position on exit, so a settled seat entry or exit
+  now requests a **position-only** re-centre. The yaw half is deliberately never
+  requested: it would destroy the entry nose-align on the way in and the
+  hull-follow heading on the way out.
+- **C24 `efe8bdb` - ship the maintainer's tuned configuration as the default.**
+  `vehicle_view_follow` now compiles to `false`, and the six headset-tuned seat
+  placements are compiled into `kConfigShippedSeatTrims` and applied by
+  `Config::Config()`.
+
+**Maintenance hazard, knowingly accepted.** The vehicle tuning now exists in two
+places: the shipped `halomccvr.cfg` and `kConfigShippedSeatTrims` in
+`src/common/config.h`. It is duplicated on purpose - `src/common/config.cpp`
+performs no migration, so a user who keeps an older config silently falls back
+to compiled defaults, which is exactly the `fit_desktop_window` trap recorded
+under 0.3.0. **A future retune must update both**, or the compiled fallback goes
+stale. Only the axes the maintainer actually moved are baked in; every untouched
+axis still follows the universal trim.
+
+Full per-candidate disassembly, RVA tables and seat-layout evidence are in
+`docs/HALO3-VEHICLE-EVIDENCE.md`.
 
 ## Development milestones folded into 0.3.1
 
