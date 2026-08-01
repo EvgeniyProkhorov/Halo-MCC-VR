@@ -691,6 +691,22 @@ namespace
             "The game draws subtitles after it hands us the two eye images, so they\n"
             "reach your monitor but not your headset. This puts the text back on the\n"
             "screen where the game placed it. MCC's own subtitle setting must be on.");
+        if (g_config.cutscene_theater_subtitles)
+        {
+            changed |= ImGui::SliderFloat(
+                "Search height##theatre",
+                &g_config.cutscene_theater_subtitle_band, 0.05f, 1.0f, "%.2f");
+            ImGui::TextDisabled(
+                "How much of the bottom of the game's frame is searched for the text.\n"
+                "Raise it if no subtitles appear: text drawn higher is never found.");
+            changed |= ImGui::Checkbox(
+                "Diagnostic: show the strip unfiltered",
+                &g_config.cutscene_theater_subtitle_debug);
+            ImGui::TextDisabled(
+                "Paints the captured strip straight onto the screen with no text\n"
+                "picking at all, so you can see exactly what the mod is reading.\n"
+                "Turn it off for normal play.");
+        }
         }
 
         if (g_activeCategory == Cat_Controls)

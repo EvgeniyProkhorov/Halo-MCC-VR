@@ -173,6 +173,12 @@ struct Config
     // are interface text drawn after both eye captures, so they reach the
     // monitor and never the headset without this.
     bool cutscene_theater_subtitles = true;
+    // How much of the bottom of the title's finished frame is searched for that
+    // text, as a fraction of its height. Text drawn above this is not found.
+    float cutscene_theater_subtitle_band = 0.30f;
+    // Diagnostic: paint that strip onto the theatre screen exactly as captured,
+    // with no glyph selection at all, to show what the mod is actually reading.
+    bool cutscene_theater_subtitle_debug = false;
 
     // F1 menu panel placement. The panel is its own composition quad, separate
     // from the virtual screen above. The defaults are the fixed constants the

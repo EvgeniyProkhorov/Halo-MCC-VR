@@ -380,7 +380,6 @@ namespace
     // that backbuffer while theatre is active and let the projection shader put
     // the text back on the room-fixed screen at the position the title chose.
     // Every failure here leaves the existing stereo theatre exactly as it was.
-    inline constexpr float kTheaterSubtitleBandFraction = 0.30f;
     ID3D11Texture2D* g_theaterSubtitleBand = nullptr;
     ID3D11ShaderResourceView* g_theaterSubtitleBandSrv = nullptr;
     D3D11_TEXTURE2D_DESC g_theaterSubtitleBandDesc{};
@@ -399,8 +398,10 @@ namespace
         // once those bars are active at all; w: first V covered by the subtitle
         // band, or negative when no band was captured.
         float matte[4]{};
+        // x: paint the captured band unfiltered instead of selecting glyphs.
+        float band[4]{};
     };
-    static_assert(sizeof(TheaterProjectionParams) == 96);
+    static_assert(sizeof(TheaterProjectionParams) == 112);
 
     // Official SMAA 1x shaders and immutable lookup tables. They are created on
     // first SMAA selection and remain tiny; the third eye-sized target is the
@@ -2065,9 +2066,10 @@ float4 ps_rcas(VSOut i) : SV_Target
             // keeps its stereo image and this feature stays off.
             backbufferDesc.SampleDesc.Count != 1)
             return false;
+        const float bandFraction = std::clamp(
+            g_config.cutscene_theater_subtitle_band, 0.05f, 1.0f);
         const UINT bandHeight = static_cast<UINT>(
-            static_cast<float>(backbufferDesc.Height) *
-            kTheaterSubtitleBandFraction);
+            static_cast<float>(backbufferDesc.Height) * bandFraction);
         if (!bandHeight || bandHeight > backbufferDesc.Height)
             return false;
         if (g_theaterSubtitleBandDesc.Width != backbufferDesc.Width ||
@@ -2103,10 +2105,12 @@ float4 ps_rcas(VSOut i) : SV_Target
             }
             g_theaterSubtitleBandDesc = desc;
             LOG("cutscene theatre: subtitle band armed (%ux%u from the bottom "
-                "%.0f%% of the %ux%u backbuffer)",
-                desc.Width, desc.Height,
-                kTheaterSubtitleBandFraction * 100.0f,
-                backbufferDesc.Width, backbufferDesc.Height);
+                "%.0f%% of the %ux%u backbuffer)%s",
+                desc.Width, desc.Height, bandFraction * 100.0f,
+                backbufferDesc.Width, backbufferDesc.Height,
+                g_config.cutscene_theater_subtitle_debug
+                    ? "; DIAGNOSTIC view on - the strip is painted unfiltered"
+                    : "");
         }
         D3D11_BOX box{};
         box.left = 0;
@@ -2117,7 +2121,7 @@ float4 ps_rcas(VSOut i) : SV_Target
         box.back = 1;
         g_context->CopySubresourceRegion(
             g_theaterSubtitleBand, 0, 0, 0, 0, backbuffer, 0, &box);
-        g_theaterSubtitleBandStartV = 1.0f - kTheaterSubtitleBandFraction;
+        g_theaterSubtitleBandStartV = 1.0f - bandFraction;
         return true;
     }
 
@@ -2167,6 +2171,7 @@ cbuffer TheaterProjectionParams : register(b0)
     float4 clipPositions[4];
     float4 colorParams;
     float4 matteParams;
+    float4 bandParams;
 }
 struct VSOut { float4 pos : SV_Position; float2 uv : TEXCOORD0; };
 VSOut vs_main(uint id : SV_VertexID)
@@ -2214,6 +2219,10 @@ float4 ps_main(VSOut i) : SV_Target
         float2 bandUv = float2(
             i.uv.x, (i.uv.y - matteParams.w) / max(1.0 - matteParams.w, 0.0001));
         float3 b = recode(bandTex.SampleLevel(smp, bandUv, 0).rgb);
+        // Diagnostic: show the captured strip exactly as it arrived, so a
+        // headset report can say whether the text is in it at all, and where.
+        if (bandParams.x > 0.5)
+            return float4(b, 1.0);
         float bandLuma = luma(b);
         float chroma = max(max(b.r, b.g), b.b) - min(min(b.r, b.g), b.b);
         float key = saturate((bandLuma - 0.72) / 0.28) *
@@ -2384,6 +2393,8 @@ float4 ps_main(VSOut i) : SV_Target
         const bool bandReady = g_theaterSubtitleBandSrv &&
             g_theaterSubtitleBandStartV >= 0.0f;
         params.matte[3] = bandReady ? g_theaterSubtitleBandStartV : -1.0f;
+        params.band[0] = bandReady && g_config.cutscene_theater_subtitle_debug
+            ? 1.0f : 0.0f;
         g_context->UpdateSubresource(
             g_theaterProjectionCb, 0, nullptr, &params, 0, 0);
 

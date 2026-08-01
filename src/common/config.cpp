@@ -140,6 +140,8 @@ static void Clamp()
     }
     g_config.cutscene_theater_matte_offset = std::clamp(
         g_config.cutscene_theater_matte_offset, -0.25f, 0.25f);
+    g_config.cutscene_theater_subtitle_band = std::clamp(
+        g_config.cutscene_theater_subtitle_band, 0.05f, 1.0f);
     g_config.menu_distance_m = std::clamp(g_config.menu_distance_m,
                                           kMenuDistanceMin, kMenuDistanceMax);
     g_config.menu_width_m = std::clamp(g_config.menu_width_m,
@@ -294,6 +296,10 @@ void ConfigLoad(const wchar_t* path)
             ParseFloatSetting(key, val, g_config.cutscene_theater_matte_offset);
         else if (!strcmp(key, "cutscene_theater_subtitles"))
             g_config.cutscene_theater_subtitles = atoi(val) != 0;
+        else if (!strcmp(key, "cutscene_theater_subtitle_band"))
+            ParseFloatSetting(key, val, g_config.cutscene_theater_subtitle_band);
+        else if (!strcmp(key, "cutscene_theater_subtitle_debug"))
+            g_config.cutscene_theater_subtitle_debug = atoi(val) != 0;
         else if (!strcmp(key, "menu_distance_m"))
             ParseFloatSetting(key, val, g_config.menu_distance_m);
         else if (!strcmp(key, "menu_width_m"))
@@ -640,6 +646,19 @@ void ConfigSave()
              d.cutscene_theater_subtitles ? 1 : 0);
     fprintf(f, "cutscene_theater_subtitles = %d\n\n",
              g_config.cutscene_theater_subtitles ? 1 : 0);
+    fprintf(f, "# How much of the bottom of the game's frame is searched for that\n");
+    fprintf(f, "# text, as a fraction of its height. Text drawn higher than this is\n");
+    fprintf(f, "# never found, so raise it if subtitles do not appear.\n");
+    fprintf(f, "# (default %.2f, range 0.05 to 1.0)\n",
+             d.cutscene_theater_subtitle_band);
+    fprintf(f, "cutscene_theater_subtitle_band = %.2f\n\n",
+             g_config.cutscene_theater_subtitle_band);
+    fprintf(f, "# Diagnostic. Paints that strip onto the theatre screen exactly as it\n");
+    fprintf(f, "# was captured, with no text selection at all, so you can see what the\n");
+    fprintf(f, "# mod is reading. Leave off for normal play. (default %d)\n",
+             d.cutscene_theater_subtitle_debug ? 1 : 0);
+    fprintf(f, "cutscene_theater_subtitle_debug = %d\n\n",
+             g_config.cutscene_theater_subtitle_debug ? 1 : 0);
     fprintf(f, "# Where the F1 menu panel floats. You do not need to edit these by\n");
     fprintf(f, "# hand: grab the bar along the top of the panel with your right\n");
     fprintf(f, "# trigger to move it, and push the right stick up/down while holding\n");
