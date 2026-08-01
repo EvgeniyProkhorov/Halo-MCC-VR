@@ -260,6 +260,20 @@ struct Halo3FrameInterp
     bool tickKnown = false;
     float correction = 0.0f;    // last phase nudge, diagnostic only
     float lastStepLen = 0.0f;   // |cur - prev| position step, wu
+    // Glides 1 -> 0 when simulation ticks stop arriving, so the moment the
+    // sim stalls the camera stops extrapolating over ~40 ms instead of
+    // snapping back to the newest state.
+    float live = 0.0f;
+    // C15: the photon-time lead actually in effect, glided. This lives on the
+    // interpolator, NOT on the diagnostic lock — until C15 it sat inside the
+    // `if (lock)` branch, so passing no lock silently disabled the whole
+    // prediction. The game always passes one, so it worked in the headset,
+    // but it made the prediction depend on an unrelated diagnostic object
+    // and it made every offline measurement of the prediction read zero.
+    float leadApplied = 0.0f;
+    // Last published blend fraction. Diagnostic: >1 means the seat is being
+    // extrapolated past the newest simulation state.
+    float lastAlpha = 0.0f;
 };
 
 // ---- C12: measured display-phase lock ------------------------------------
@@ -405,6 +419,8 @@ inline Halo3Frame Halo3InterpolateFrame(Halo3FrameInterp& state,
         state.tickKnown = false;
         state.correction = 0.0f;
         state.lastStepLen = 0.0f;
+        state.live = 0.0f;
+        state.leadApplied = 0.0f;
         if (lock)
             *lock = Halo3PhaseLock{};
         return raw;
@@ -619,17 +635,38 @@ inline Halo3Frame Halo3InterpolateFrame(Halo3FrameInterp& state,
             }
         }
     }
-    double alpha = state.phase < 1.0 ? state.phase : 1.0;
-    if (lock)
+    // C15 — the forward/back bounce, "most prominent during boosting and
+    // flying" (user, 2026-08-01).
+    //
+    // The camera hook runs about four times per 60 Hz simulation tick, and a
+    // tick is only NOTICED on the first call after it lands. So on the last
+    // call or two of every tick the free-running phase has already passed
+    // 1.0. Clamping the blend there (`phase < 1 ? phase : 1`, C10 through
+    // C14) FROZE the seat for those calls while MCC kept gliding the mesh,
+    // then let it jump when the tick was finally seen: a 60 Hz forward/back
+    // judder whose size is a fraction of a tick's travel, so it is invisible
+    // when parked and violent under boost. The blend must stay continuous
+    // through the tick boundary instead — the newest state is not a wall.
+    double alpha = state.phase;
+    // Extrapolation authority. It is 1 while ticks keep arriving and glides
+    // away when the simulation stalls, so a stall stops the extrapolation
+    // smoothly rather than snapping the seat back to the newest state.
     {
-        // The measured lead engages only at a driving pace: below walking
-        // speed a phase error is invisible, while extrapolating erratic
+        const float liveTarget = ticksLive ? 1.0f : 0.0f;
+        double glide = step > 0.0 && step < 0.25
+            ? step / kHalo3PhaseApplySeconds
+            : 1.0;
+        if (glide > 1.0) glide = 1.0;
+        state.live += static_cast<float>((liveTarget - state.live) * glide);
+    }
+    {
+        // The lead engages only at a driving pace: below walking speed a
+        // phase error is invisible, while extrapolating erratic
         // sub-centimetre physics steps is exactly the bouncing the manual
         // knob produced. The APPLIED value glides toward its target a step
         // per call rather than switching, so a simulation hitch, a stop or
         // an engage can never move the camera by the whole lead in one
-        // headset frame (the ticksLive gate used to be a step function
-        // worth up to 0.75 of a tick's travel).
+        // headset frame.
         float target = 0.0f;
         if (ticksLive && state.tick > 0.0 && leadSeconds > 0.0)
         {
@@ -652,13 +689,36 @@ inline Halo3Frame Halo3InterpolateFrame(Halo3FrameInterp& state,
             ? step / kHalo3PhaseApplySeconds
             : 1.0;
         if (glide > 1.0) glide = 1.0;
-        lock->leadApplied += static_cast<float>(
-            (target - lock->leadApplied) * glide);
-        alpha += static_cast<double>(lock->leadApplied);
+        state.leadApplied += static_cast<float>(
+            (target - state.leadApplied) * glide);
+        alpha += static_cast<double>(state.leadApplied);
+        if (lock)
+            lock->leadApplied = state.leadApplied;   // diagnostic mirror
     }
     if (alpha < -0.25) alpha = -0.25;
     if (alpha > kHalo3PhaseAlphaMax) alpha = kHalo3PhaseAlphaMax;
-    return Halo3LerpFrame(state.prev, state.cur, static_cast<float>(alpha));
+    state.lastAlpha = static_cast<float>(alpha);
+    // Between the two known states, the plain blend IS the answer.
+    if (alpha <= 1.0)
+        return Halo3LerpFrame(state.prev, state.cur, static_cast<float>(alpha));
+    // Past the newest state, fade the extrapolation out with `live` so a
+    // stalled simulation parks on that state instead of sailing on.
+    double over = (alpha - 1.0) * static_cast<double>(state.live);
+    if (over <= 0.0)
+        return state.cur;
+    // Continue along the last tick's motion. An acceleration-aware
+    // (second-difference) prediction was built and MEASURED against this one
+    // on a straight boost and on a hard banking turn: it was worth 0% and
+    // 2.5% respectively, which does not justify the extra state or the risk
+    // of a collision spike bending the camera, so it was dropped.
+    Halo3Frame next = state.cur;
+    for (int i = 0; i < 3; ++i)
+    {
+        next.pos[i] = state.cur.pos[i] + (state.cur.pos[i] - state.prev.pos[i]);
+        next.fwd[i] = state.cur.fwd[i] + (state.cur.fwd[i] - state.prev.fwd[i]);
+        next.up[i] = state.cur.up[i] + (state.cur.up[i] - state.prev.up[i]);
+    }
+    return Halo3LerpFrame(state.cur, next, static_cast<float>(over));
 }
 
 inline Halo3Frame Halo3ComposeFrame(const Halo3Frame& parent,

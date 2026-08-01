@@ -5275,6 +5275,10 @@ namespace
     std::atomic<float> g_halo3PhaseLeadTicks{0.0f};
     // C14: the photon-time prediction interval actually in use, milliseconds.
     std::atomic<float> g_halo3LeadMs{0.0f};
+    // C15: the published blend fraction. Above 1.0 the seat is extrapolated
+    // past the newest simulation state; a value pinned AT 1.00 while driving
+    // is the clamp defect that caused the boost/flight bounce.
+    std::atomic<float> g_halo3BlendAlpha{0.0f};
     // Stamped on a settled seat ENTRY; consumed once by the follow, which
     // rebases "straight ahead" onto the vehicle's nose. Zero means nothing
     // pending, and a request that finds no live seat within two seconds
@@ -5731,6 +5735,8 @@ namespace
                 }
                 g_halo3LeadMs.store(static_cast<float>(leadSeconds * 1000.0),
                                     std::memory_order_relaxed);
+                g_halo3BlendAlpha.store(g_halo3FrameInterp.lastAlpha,
+                                        std::memory_order_relaxed);
                 const Halo3Frame smooth = Halo3InterpolateFrame(
                     g_halo3FrameInterp, world, Halo3NowSeconds(),
                     g_config.vehicle_cam_smoothing,
@@ -6486,8 +6492,8 @@ namespace
         LOG("H3 seat motion: %u sampled frames, hull moved on %u (%.0f%%), "
             "tilted on %u (%.0f%%); largest raw step %.4f wu, largest raw tilt "
             "%.2f deg; smoothing %s across a %.2f ms tick; predicting %.2f ms "
-            "ahead (%s); witness %s, measured %+.2f ticks; view follow %.2f, "
-            "hull turned %.0f deg since entry, steering by %s",
+            "ahead (%s), blend %.2f; witness %s, measured %+.2f ticks; view "
+            "follow %.2f, hull turned %.0f deg since entry, steering by %s",
             frames, moved, moved * scale, tilted, tilted * scale,
             diag.maxPosStep.load(std::memory_order_relaxed),
             diag.maxTiltDeg.load(std::memory_order_relaxed),
@@ -6495,6 +6501,7 @@ namespace
                                                                    : "off",
             tickMs, g_halo3LeadMs.load(std::memory_order_relaxed),
             g_config.vehicle_smooth_hz > 0 ? "pinned" : "auto",
+            g_halo3BlendAlpha.load(std::memory_order_relaxed),
             kPhaseNames[phaseState],
             g_halo3PhaseLeadTicks.load(std::memory_order_relaxed),
             g_config.vehicle_view_follow,

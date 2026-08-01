@@ -1214,3 +1214,56 @@ alignment says nothing about the lead. Measured at 120 Hz: 0.049997 wu against
 0.050000 expected. Also pinned: 72 Hz predicts ~2x as far as 144; a WRONG pin
 visibly mispredicts (which is why Auto is the default); a crawl never
 extrapolates; a hitch glides. VERIFIED to fail with the lead disabled.
+
+## C15 — the forward/back bounce: the blend was hitting a wall at the newest state
+
+"the car is trying to keep up with the camera but it keeps bouncing forward
+and back, most prominent during boosting and flying" (user, 2026-08-01).
+
+`Halo3InterpolateFrame` published `alpha = phase < 1 ? phase : 1`. The camera
+hook runs ~251 calls/sec against a 60 Hz simulation, and C14 adds a half-tick
+photon lead, so the blend fraction genuinely wants to sit past 1.0 for **52%
+of frames while driving** (measured: alpha ranges 0.525 to 1.522 at boost
+speed). Clamping there pinned the seat AT the newest simulation state for
+those frames while MCC kept gliding the mesh, then let it catch up in a lump
+— a 60 Hz forward/back judder whose size scales with speed, i.e. invisible
+when parked and worst under boost and in flight. Exactly the report.
+
+### Measured, three ways, before changing the default
+
+An offline probe against the real hook rate (251/sec), the real tick
+(16.7 ms) and the shipped 120 Hz prediction:
+
+| policy | frame-step spread, constant boost | per-frame correction, accelerating | per-frame correction, hard banking turn |
+| --- | --- | --- | --- |
+| clamped (C10-C14, shipped) | 0.923x - 1.060x | 0.137x | 0.206x |
+| continuous (C15) | 0.970x - 1.031x | **0.034x** | **0.162x** |
+| continuous + curved extrapolation | 0.970x - 1.031x | 0.034x | 0.158x |
+
+Removing the clamp is the whole win: a 4x reduction in per-frame correction
+under acceleration and 21% on a banking turn. An acceleration-aware
+(second-difference) extrapolation was built and measured too — worth 0% on a
+straight boost and 2.5% on the turn, which does not justify the extra state
+or the risk of a collision spike bending the camera, so it was **dropped**.
+
+Past the newest state the extrapolation is faded by a `live` factor that
+glides to zero over ~40 ms when simulation ticks stop, so a stall parks the
+seat on the newest state instead of sailing on, and does so smoothly rather
+than snapping (the C12 review's finding, preserved).
+
+### Two methodology failures worth remembering
+
+1. **A silent no-op patch produced a false null result.** The first A/B said
+   the clamp made no difference; the "before" header had not actually been
+   patched (a `str.replace` that matched nothing). Every generated variant is
+   now asserted to have changed before it is compiled. The false null nearly
+   led to abandoning the correct fix.
+2. **The prediction was wired through the diagnostic object.** `leadApplied`
+   lived on `Halo3PhaseLock`, inside `if (lock)`, so any caller that passed
+   no lock silently got no prediction at all. The game always passes one, so
+   it worked in the headset — but every offline measurement of the prediction
+   read zero until this was found. It now lives on the interpolator, with the
+   lock keeping only a mirror for logging.
+
+The 10-second log line now carries `blend N.NN`. Above 1.00 the seat is being
+extrapolated; pinned exactly at 1.00 while driving is this defect returning.
