@@ -390,13 +390,11 @@ struct Config
     // ON by default -- the headset must never inherit the desktop's refresh.
     bool desktop_present_unlocked = true;
 
-    // Diagnostic: measure how long the mod holds MCC's render thread inside
-    // Present and log the run-up whenever a level is torn down. This is the
-    // evidence for the co-op kick investigation (both players dropped to the
-    // menu). Costs two QueryPerformanceCounter reads per frame and writes into
-    // a fixed ring -- no allocation, nothing rendered, nothing changed. ON while
-    // that investigation is open; strip it before a release.
-    bool coop_probe = true;
+    // Dormant diagnostic: measure how long the mod holds MCC's render thread
+    // inside Present and log the run-up whenever a level is torn down. Keep the
+    // config surface and evidence implementation for targeted future runs; the
+    // production Present path is compile-time disabled in d3d11_hook.cpp.
+    bool coop_probe = false;
 
     // Image quality (mod-owned, applied live when each eye is expanded into the
     // headset — universal to every title, no restart). These replace/augment the

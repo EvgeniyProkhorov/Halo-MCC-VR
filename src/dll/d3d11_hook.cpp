@@ -853,6 +853,9 @@ static thread_local int g_presentDepth = 0;
 // ring is fixed and written only from the game's render thread (Present has one
 // caller), so the hot path stays allocation-free and lock-free: fill the slot,
 // then publish the count with a release store.
+// The investigation is complete; preserve the probe for a targeted future run
+// while compiling it out of the normal Present path.
+constexpr bool kEnableCoopPresentProbe = false;
 namespace
 {
     // ~34 s at 120 Hz, ~57 s at 72 Hz -- long enough to hold the whole run-up to
@@ -877,6 +880,8 @@ namespace
     void CoopProbeNoteFrame(int64_t hookStartQpc, int64_t presentStartQpc,
                             int64_t presentEndQpc)
     {
+        if constexpr (!kEnableCoopPresentProbe)
+            return;
         if (!g_config.coop_probe)
             return;
         const double toMs = CoopProbeQpcToMs();
@@ -911,6 +916,8 @@ namespace
 
 void CoopProbe_DumpRunUp(const char* reason)
 {
+    if constexpr (!kEnableCoopPresentProbe)
+        return;
     if (!g_config.coop_probe)
         return;
     const uint64_t written = g_coopWritten.load(std::memory_order_acquire);
@@ -986,7 +993,8 @@ static HRESULT STDMETHODCALLTYPE PresentHook(IDXGISwapChain* sc, UINT syncInterv
     LARGE_INTEGER hookStart{};
     if (runVrFrame)
     {
-        QueryPerformanceCounter(&hookStart);
+        if constexpr (kEnableCoopPresentProbe)
+            QueryPerformanceCounter(&hookStart);
         LogSwapchainConfigOnce(sc);
         VR_BeforePresent(sc);
     }
@@ -1000,8 +1008,9 @@ static HRESULT STDMETHODCALLTYPE PresentHook(IDXGISwapChain* sc, UINT syncInterv
     {
         QueryPerformanceCounter(&presentEnd);
         VR_AfterPresent(sc, presentStart.QuadPart, presentEnd.QuadPart, hr);
-        CoopProbeNoteFrame(hookStart.QuadPart, presentStart.QuadPart,
-                           presentEnd.QuadPart);
+        if constexpr (kEnableCoopPresentProbe)
+            CoopProbeNoteFrame(hookStart.QuadPart, presentStart.QuadPart,
+                               presentEnd.QuadPart);
     }
     g_presentDepth--;
     return hr;
@@ -1015,7 +1024,8 @@ static HRESULT STDMETHODCALLTYPE Present1Hook(IDXGISwapChain1* sc, UINT syncInte
     LARGE_INTEGER hookStart{};
     if (runVrFrame)
     {
-        QueryPerformanceCounter(&hookStart);
+        if constexpr (kEnableCoopPresentProbe)
+            QueryPerformanceCounter(&hookStart);
         LogSwapchainConfigOnce(sc);
         VR_BeforePresent(sc);
     }
@@ -1029,8 +1039,9 @@ static HRESULT STDMETHODCALLTYPE Present1Hook(IDXGISwapChain1* sc, UINT syncInte
     {
         QueryPerformanceCounter(&presentEnd);
         VR_AfterPresent(sc, presentStart.QuadPart, presentEnd.QuadPart, hr);
-        CoopProbeNoteFrame(hookStart.QuadPart, presentStart.QuadPart,
-                           presentEnd.QuadPart);
+        if constexpr (kEnableCoopPresentProbe)
+            CoopProbeNoteFrame(hookStart.QuadPart, presentStart.QuadPart,
+                               presentEnd.QuadPart);
     }
     g_presentDepth--;
     return hr;

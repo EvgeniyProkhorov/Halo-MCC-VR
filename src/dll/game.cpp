@@ -51,6 +51,11 @@
 
 namespace
 {
+    // Dormant discovery instrumentation retained for future reverse-engineering
+    // work. Shipping candidates keep it compiled out: several of these probes
+    // ran in camera/render hot paths and dominated otherwise useful logs.
+    constexpr bool kEnableRetiredHalo3Diagnostics = false;
+
     constexpr uint32_t kHalo3RuntimeCapabilities =
         TitleCapability_Stereo |
         TitleCapability_ControllerAim |
@@ -945,12 +950,15 @@ namespace
             // the one-shot below). Both FP pairs + the engine's own constant
             // upload, so recorded FP draws executing later in this eye window
             // bind this eye's camera.
-            static std::atomic<bool> loggedIdentity{false};
-            if (!loggedIdentity.exchange(true))
+            if constexpr (kEnableRetiredHalo3Diagnostics)
+            {
+                static std::atomic<bool> loggedIdentity{false};
+                if (!loggedIdentity.exchange(true))
                 LOG("P0: in-window driver view=%p vs eye window view=%p (delta=0x%llX)",
                     view, eyeView,
                     (unsigned long long)((char*)view > eyeView ? (char*)view - eyeView
                                                                : eyeView - (char*)view));
+            }
             char* base = static_cast<char*>(view);
             // The FP driver runs ~3x per eye; after the first stamp of a given
             // eye the pairs already hold this eye's camera. Skip the re-stamp +
@@ -966,7 +974,8 @@ namespace
                 memcmp(base + 0x6C8 + 0x1E8, g_eyeDerivedBlock, sizeof(g_eyeDerivedBlock)) != 0;
             if (needStamp)
             {
-                stamps.fetch_add(1);
+                if constexpr (kEnableRetiredHalo3Diagnostics)
+                    stamps.fetch_add(1);
                 memcpy(base + 0x158, g_eyeCompactCamera, sizeof(g_eyeCompactCamera));
                 memcpy(base + 0x1E8, g_eyeDerivedBlock, sizeof(g_eyeDerivedBlock));
                 memcpy(base + 0x6C8 + 0x08, g_eyeCompactCamera, sizeof(g_eyeCompactCamera));
@@ -974,10 +983,11 @@ namespace
                 if (g_fpCameraUpload)
                     g_fpCameraUpload(base + 0x6C8 + 0x08, base + 0x6C8 + 0x1E8);
             }
-            else
+            else if constexpr (kEnableRetiredHalo3Diagnostics)
             {
                 skips.fetch_add(1);
             }
+            if constexpr (kEnableRetiredHalo3Diagnostics)
             {
                 static std::atomic<DWORD> lastLog{GetTickCount()};
                 const DWORD now=GetTickCount(); DWORD last=lastLog.load();
@@ -2988,6 +2998,8 @@ namespace
         // SWITCH dumps its chain + skeleton, and a missing left wrist is
         // called out loudly. Rate-limited (dual-wield could alternate
         // skeletons per frame). Log-only — behavior unchanged.
+        if constexpr (kEnableRetiredHalo3Diagnostics)
+        {
         uint64_t skelKey=(uint64_t)count;
         for(int i=0;i<count && i<64;++i)
             skelKey=skelKey*31+*reinterpret_cast<const uint32_t*>(records+i*0x20);
@@ -3026,6 +3038,7 @@ namespace
             }
             line[pos]=0;
             LOG("M3 VRIK: skeleton[%d..%d]: %s",from,count-1,line);
+        }
         }
 
         // The CE probe proved the interpolated render packet is the first safe
@@ -3652,7 +3665,7 @@ namespace
         // Slot-1 failures never touch the primary arm diagnostics.
         const bool dual=(context.slot==1);
         const int perfEyeBucket = explicitTargets ? -1 : FramePerfEyeBucket();
-        if (perfEyeBucket >= 0)
+        if (kEnableRetiredHalo3Diagnostics && perfEyeBucket >= 0)
             g_perfFpPaletteRequests[perfEyeBucket].fetch_add(
                 1, std::memory_order_relaxed);
         const BoneMatrix* const unmodified=unmodifiedOverride
@@ -3701,7 +3714,7 @@ namespace
                 }
                 if (reused)
                 {
-                    if (perfEyeBucket >= 0)
+                    if (kEnableRetiredHalo3Diagnostics && perfEyeBucket >= 0)
                         g_perfFpPaletteCacheHits[perfEyeBucket].fetch_add(
                             1, std::memory_order_relaxed);
                     replacement = g_fpPaletteScratch;
@@ -3734,12 +3747,12 @@ namespace
                 cache.root = root;
                 memcpy(cache.original, unmodified, paletteBytes);
                 memcpy(cache.solved, solved, paletteBytes);
-                if (perfEyeBucket >= 0)
+                if (kEnableRetiredHalo3Diagnostics && perfEyeBucket >= 0)
                     g_perfFpPaletteCacheStores[perfEyeBucket].fetch_add(
                         1, std::memory_order_relaxed);
                 return;
             }
-            if (perfEyeBucket >= 0)
+            if (kEnableRetiredHalo3Diagnostics && perfEyeBucket >= 0)
                 g_perfFpPaletteCacheFull[perfEyeBucket].fetch_add(
                     1, std::memory_order_relaxed);
         };
@@ -4127,7 +4140,8 @@ namespace
                     // eye's. dRoot large is expected (eye offset). Any nonzero
                     // dCenterRoot / dWrist / dLens / dDesired names the leaking
                     // per-eye input behind the left-arm split. Rate-limited.
-                    if (probeLeftValid && !explicitTargets)
+                    if (kEnableRetiredHalo3Diagnostics && probeLeftValid &&
+                        !explicitTargets)
                     {
                         static ArmProbe eyeProbe[2]{};
                         static BoneMatrix eyeRoot[2]{}, eyeCenterRoot[2]{};
@@ -4226,7 +4240,7 @@ namespace
                             (long long)__popcnt64(context.wristDescendants));
                     // Full-solve cache misses. Exact duplicate palettes inside
                     // this stereo pair return above without repeating arm IK.
-                    if (!explicitTargets)
+                    if (kEnableRetiredHalo3Diagnostics && !explicitTargets)
                     {
                         static std::atomic<uint32_t> solves{0};
                         static std::atomic<DWORD> lastLog{GetTickCount()};
@@ -6143,7 +6157,7 @@ namespace
             Halo3DisableVehicleProbe("sampler fault");
             return;
         }
-        if (parentWindowValid)
+        if (kEnableRetiredHalo3Diagnostics && parentWindowValid)
         {
             Halo3ParentCapture& pcap = g_halo3ParentCapture;
             pcap.seq.fetch_add(1, std::memory_order_acq_rel);   // -> odd
@@ -6440,6 +6454,8 @@ namespace
                 // anchor tracks but the deliberately horizon-stable view does
                 // not — posChanged tracks the frame count and the tilt step is
                 // what is large. One drive answers it.
+                if constexpr (kEnableRetiredHalo3Diagnostics)
+                {
                 Halo3MotionDiag& diag = g_halo3MotionDiag;
                 const uint32_t seen =
                     diag.frames.load(std::memory_order_relaxed);
@@ -6488,6 +6504,7 @@ namespace
                 diag.frames.store(seen + 1, std::memory_order_relaxed);
                 memcpy(diag.lastPos, meshFrame.pos, sizeof(diag.lastPos));
                 memcpy(diag.lastUp, meshFrame.up, sizeof(diag.lastUp));
+                }
 
                 // C18 already consumes Halo's render-interpolated node bank.
                 // Feeding it through C10-C15 would double-filter it and
@@ -6538,6 +6555,8 @@ namespace
                 g_halo3PhaseLock = Halo3PhaseLock{};
                 g_halo3PhaseLockState.store(0, std::memory_order_relaxed);
                 g_halo3SmoothingActive.store(0, std::memory_order_relaxed);
+                if constexpr (kEnableRetiredHalo3Diagnostics)
+                {
                 g_halo3MotionDiag.frames.store(0, std::memory_order_relaxed);
                 g_halo3MotionDiag.posChanged.store(
                     0, std::memory_order_relaxed);
@@ -6551,6 +6570,7 @@ namespace
                     0, std::memory_order_relaxed);
                 g_halo3MotionDiag.anchorFallback.store(
                     0, std::memory_order_relaxed);
+                }
                 g_halo3SeatNodeCache = {};
                 g_halo3HeadReference = {};
             }
@@ -6623,6 +6643,8 @@ namespace
         }
 
         // Publish probe fields for the worker only when something changed.
+        if constexpr (kEnableRetiredHalo3Diagnostics)
+        {
         const uint64_t key =
             (static_cast<uint64_t>(static_cast<uint32_t>(unit)) << 32) ^
             (static_cast<uint64_t>(static_cast<uint16_t>(seat)) << 16) ^
@@ -6654,6 +6676,7 @@ namespace
         probe.mountedTurret.store(mountedTurret ? 1u : 0u,
                                   std::memory_order_relaxed);
         probe.seq.fetch_add(1, std::memory_order_release);   // -> even
+        }
     }
 
     // Captured from ObserverCameraEffectHook (slot 0 only): a bounded float
@@ -7605,6 +7628,8 @@ namespace
         // Low-frequency timing proof paired with vr.cpp's HMD sample-rate log.
         // The hook normally runs multiple times per presented frame, and every
         // call below reads the latest once-per-OpenXR-frame predicted pose.
+        if constexpr (kEnableRetiredHalo3Diagnostics)
+        {
         static uint64_t cameraRateStartMs = 0;
         static unsigned cameraTransforms = 0;
         ++cameraTransforms;
@@ -7616,6 +7641,7 @@ namespace
                 cameraTransforms * 1000.0 / (cameraNowMs - cameraRateStartMs));
             cameraTransforms = 0;
             cameraRateStartMs = cameraNowMs;
+        }
         }
         ChudProbe();
         ApplyMotionBlurSetting();
@@ -7646,7 +7672,7 @@ namespace
                 const bool zoomed = factor>1.15f;
                 g_zoomFactor.store(zoomed?factor:1.0f);
                 static bool wasZoomed=false;
-                if (zoomed!=wasZoomed)
+                if (kEnableRetiredHalo3Diagnostics && zoomed!=wasZoomed)
                 {
                     wasZoomed=zoomed;
                     g_perfZoomLogWrites.fetch_add(1, std::memory_order_relaxed);
@@ -7657,6 +7683,8 @@ namespace
             // Camera buffers are heap-allocated and move on level changes;
             // log every new one so external tools (camscan aimwrite) can
             // always read the current address from the log.
+            if constexpr (kEnableRetiredHalo3Diagnostics)
+            {
             static void* seenSrc[16]{};
             static unsigned seenSrcCount = 0;
             bool newSrc = true;
@@ -7675,6 +7703,7 @@ namespace
                     reinterpret_cast<const char*>(src) + kSrcProjY);
                 LOG("M2 camera copy %u: dst=%p src=%p pos=(%.2f,%.2f,%.2f) proj=(%.6f,%.6f)",
                     trace, dst, src, pos[0], pos[1], pos[2], projX, projY);
+            }
             }
         }
         if (src)
@@ -7863,6 +7892,7 @@ namespace
         // before that eye renders again. Each eye then always samples its own
         // previous frame. Three texture copies per frame instead of a third
         // world render, so this runs at the full two-render rate.
+        if constexpr (kEnableRetiredHalo3Diagnostics)
         {
             static std::atomic<unsigned> viewRenders{0};
             static std::atomic<DWORD> lastLog{GetTickCount()};
@@ -21190,17 +21220,23 @@ namespace
             LogOdstRenderSkipIfNew();      // emit why a frame stayed flat 2D
             LogOdstFpLayoutSelfCheckIfNew(); // emit FP weapon-layout self-check
             LogOdstNativeHudRouteOnce();    // bounded in-place CHUD route result
-            LogHalo3VehicleProbeIfNew();   // H3 vehicle probe transitions
-            LogHalo3ObserverIfDriving();   // H3 observer focus-field analysis
-            LogHalo3ParentXformIfDriving(); // H3 vehicle-transform measurement
-            LogHalo3SeatMotionIfDriving(); // H3 seat-motion vibration diagnostic
+            if constexpr (kEnableRetiredHalo3Diagnostics)
+            {
+                LogHalo3VehicleProbeIfNew();   // H3 vehicle probe transitions
+                LogHalo3ObserverIfDriving();   // H3 observer focus-field analysis
+                LogHalo3ParentXformIfDriving(); // H3 vehicle-transform measurement
+                LogHalo3SeatMotionIfDriving(); // H3 seat-motion vibration diagnostic
+            }
             VR_FramePacingWorkerPoll();
             Sleep(50);
 #else
-            LogHalo3VehicleProbeIfNew();   // H3 vehicle probe transitions
-            LogHalo3ObserverIfDriving();   // H3 observer focus-field analysis
-            LogHalo3ParentXformIfDriving(); // H3 vehicle-transform measurement
-            LogHalo3SeatMotionIfDriving(); // H3 seat-motion vibration diagnostic
+            if constexpr (kEnableRetiredHalo3Diagnostics)
+            {
+                LogHalo3VehicleProbeIfNew();   // H3 vehicle probe transitions
+                LogHalo3ObserverIfDriving();   // H3 observer focus-field analysis
+                LogHalo3ParentXformIfDriving(); // H3 vehicle-transform measurement
+                LogHalo3SeatMotionIfDriving(); // H3 seat-motion vibration diagnostic
+            }
             VR_FramePacingWorkerPoll();
             Sleep(50);
 #endif

@@ -23,6 +23,7 @@
 
 namespace
 {
+    constexpr bool kEnableRetiredInputDiagnostics = false;
 
     using XInputGetStateFn = DWORD(WINAPI*)(DWORD, XINPUT_STATE*);
     using XInputGetCapsFn = DWORD(WINAPI*)(DWORD, DWORD, XINPUT_CAPABILITIES*);
@@ -347,12 +348,18 @@ namespace
         // exists: hold the connection above and skip the merge when gated off.
         if (!Game_AllowsSharedControllerInput())
         {
-            if (ownVirtualSlot)
-                g_diagGateIdle.fetch_add(1);
+            if constexpr (kEnableRetiredInputDiagnostics)
+            {
+                if (ownVirtualSlot)
+                    g_diagGateIdle.fetch_add(1);
+            }
             return r;
         }
-        g_diagReads.fetch_add(1);
-        DiagTick();
+        if constexpr (kEnableRetiredInputDiagnostics)
+        {
+            g_diagReads.fetch_add(1);
+            DiagTick();
+        }
         VrPadState pad;
         VR_GetPadState(pad);
         if (!pad.valid)
@@ -365,12 +372,14 @@ namespace
             }
             return r;
         }
-        g_diagPadValid.fetch_add(1);
+        if constexpr (kEnableRetiredInputDiagnostics)
+            g_diagPadValid.fetch_add(1);
         // Keep the packet number monotonically rising so MCC notices changes.
         static std::atomic<DWORD> seq{1};
         state->dwPacketNumber += seq.fetch_add(1);
         MergeVrPad(state);
-        g_diagMerged.fetch_add(1);
+        if constexpr (kEnableRetiredInputDiagnostics)
+            g_diagMerged.fetch_add(1);
         return r;
     }
 
