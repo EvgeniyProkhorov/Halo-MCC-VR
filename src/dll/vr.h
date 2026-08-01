@@ -162,7 +162,10 @@ bool VR_GetLeftControllerPose(float outQuat[4], float outPos[3]);
 // weapon reticle is redirected into the controller-ray quad texture instead
 // of being drawn at the center of either VR eye.
 bool VR_BeginAuthoredReticleCapture();
-bool VR_ShouldCaptureOdstAuthoredReticle();
+// False on frames where the title already holds valid released crosshair art
+// and its sample cadence says this frame does not need a fresh offscreen draw.
+// The caller hides the flat widget instead; the held quad keeps showing.
+bool VR_ShouldCaptureAuthoredReticleThisFrame();
 // Reach-only hide entry: same lazy resource creation, but it never refuses
 // because crosshair=0. Reach has no visibility predicate and its CHUD alpha
 // write is inert, so this redirect is the only way its native crosshair can

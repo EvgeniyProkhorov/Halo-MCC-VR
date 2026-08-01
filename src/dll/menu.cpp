@@ -934,6 +934,26 @@ namespace
                                           0.3f, 20.0f, "%.1f");
             changed |= ImGui::SliderFloat("Crosshair distance (m)", &g_config.crosshair_distance_m,
                                           2.0f, 50.0f, "%.0f");
+            // Halo 3's crosshair kicks on fire and turns red/green on a target.
+            // Reading it back costs render time, so the rate is the player's
+            // call: drag it live and keep whatever still feels smooth.
+            bool crosshairAnimates = g_config.crosshair_animation_frames != 0;
+            if (ImGui::Checkbox("Animate the crosshair (Halo 3)", &crosshairAnimates))
+            {
+                g_config.crosshair_animation_frames = crosshairAnimates ? 6 : 0;
+                changed = true;
+            }
+            if (crosshairAnimates)
+            {
+                ImGui::Indent();
+                changed |= ImGui::SliderInt(
+                    "Refresh every N frames", &g_config.crosshair_animation_frames,
+                    6, 60, "%d");
+                ImGui::TextDisabled("Lower = smoother shooting animation and faster\n"
+                                    "red/green target colors. Higher = cheaper.\n"
+                                    "Turn it off if you feel any frame-rate cost.");
+                ImGui::Unindent();
+            }
             ImGui::TextDisabled("Uses the equipped weapon's authored crosshair and target colors.");
         }
         ImGui::TextDisabled("Crosshair smoothing is visual only; bullets keep the current controller ray.\n"

@@ -253,6 +253,15 @@ struct Config
     float crosshair_distance_m = 41.0f; // how far along the aim ray it floats
     float crosshair_size_deg = 10.10f;  // apparent (angular) size
 
+    // How often the VR crosshair re-reads the game's own animated crosshair
+    // art, in displayed frames. Halo 3's authored crosshair kicks when the
+    // weapon fires and turns red on a hostile / green on a friendly, so a
+    // crosshair that is read once and held looks frozen. Lower = more
+    // responsive, higher = cheaper. 0 holds one image and never animates,
+    // which is the cheapest setting. Halo 3 only; ODST and Reach keep their
+    // own proven cadence. Live in the F1 menu.
+    int crosshair_animation_frames = 6;
+
     // Crosshair color (0-1 per channel). Default approximates Halo 3's own
     // light CHUD blue. File-only: there is no F1 widget for these.
     float reticle_r = 0.62f;

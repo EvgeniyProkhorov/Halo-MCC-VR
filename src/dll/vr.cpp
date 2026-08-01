@@ -7183,14 +7183,27 @@ float4 ps_scope_linearize(VSOut i):SV_Target { return paint(i.uv,true); }
                             ? Game_GetAuthoredCrosshairColorState() : 0;
                         const GameTitle reticleTitle =
                             TitleAdapter_GetActiveTitle();
+                        const bool halo3AnimatesReticle =
+                            reticleTitle == GameTitle::Halo3 &&
+                            ResolveAuthoredAnimationGapFrames(
+                                g_config.crosshair_animation_frames) != 0;
                         const AuthoredReticleRefreshPolicy refreshPolicy =
-                            reticleTitle == GameTitle::HaloReach
+                            reticleTitle == GameTitle::HaloReach ||
+                            halo3AnimatesReticle
                                 ? AuthoredReticleRefreshPolicy::BoundedAnimation
                                 : reticleTitle == GameTitle::Halo3ODST
                                     ? AuthoredReticleRefreshPolicy::IdentityImmediate
                                     : AuthoredReticleRefreshPolicy::IdentityAndColorState;
-                        // Halo 3 publishes after an identity settles, then only
-                        // on a discrete authored blue/green/red state edge.
+                        // Halo 3's authored crosshair animates - it kicks on
+                        // fire and turns red/green on a target - and none of
+                        // that changes WHICH widgets drew, so the identity key
+                        // froze one snapshot. It now publishes on the same
+                        // bounded cadence as Reach, and the capture that feeds
+                        // it is throttled to exactly the frames that publish,
+                        // so the animation is paid for out of the offscreen
+                        // widget draw the title was already doing every frame.
+                        // crosshair_animation_frames = 0 restores the held
+                        // identity/colour-edge behavior.
                         // ODST's proven identity key also folds its native
                         // alternate-path state, so it publishes only when that
                         // key changes and has no steady blocking upload. Reach
@@ -7238,7 +7251,10 @@ float4 ps_scope_linearize(VSOut i):SV_Target { return paint(i.uv,true); }
                                     "reticle is showing its procedural art "
                                     "this frame instead of the game's widget");
                         }
-                        if (reachTitle)
+                        // Halo 3 reports the same counters as Reach: a headset
+                        // report about the animated crosshair is only
+                        // actionable next to the rate it actually published at.
+                        if (reachTitle || reticleTitle == GameTitle::Halo3)
                         {
                             if (authoredArtAlreadyPublished)
                                 ++s_uploadsSkipped;
@@ -7246,8 +7262,9 @@ float4 ps_scope_linearize(VSOut i):SV_Target { return paint(i.uv,true); }
                             if (nowMs - s_lastUploadLogMs >= 2000)
                             {
                                 s_lastUploadLogMs = nowMs;
-                                LOG("Reach reticle upload: %llu uploaded, %llu "
+                                LOG("%s reticle upload: %llu uploaded, %llu "
                                     "skipped in the last window (key %llX)",
+                                    reachTitle ? "Reach" : "Halo 3",
                                     static_cast<unsigned long long>(
                                         s_uploadsDone),
                                     static_cast<unsigned long long>(
@@ -9156,27 +9173,47 @@ static bool BeginAuthoredReticleCaptureInternal(
     return true;
 }
 
-bool VR_ShouldCaptureOdstAuthoredReticle()
+bool VR_ShouldCaptureAuthoredReticleThisFrame()
 {
-    if (TitleAdapter_GetActiveTitle() != GameTitle::Halo3ODST ||
-        !g_reticleContainsAuthored)
+    // Until valid art is held there is nothing to fall back on, so never skip.
+    if (!g_reticleContainsAuthored)
         return true;
 
-    // ODST's captured quad remains valid after release. Sample its native
-    // CHUD only often enough to discover a weapon/state change; on all other
-    // frames the title predicate hides the flat widget without redirecting a
-    // render target or drawing any authored crosshair pixels. Re-admit every
-    // class-2 piece during the selected frame so compound reticles stay whole.
+    // ODST's captured quad is static between weapon and state changes, so it
+    // samples only often enough to notice one. Halo 3's authored crosshair
+    // animates, so it samples at the cadence the user asked for - which is
+    // also the cadence at which the art can be published, so a faster sample
+    // would only spend capture work the publish floor discards.
     constexpr uint64_t kOdstCaptureSampleGapFrames = 30;
+    uint64_t gapFrames = 0;
+    switch (TitleAdapter_GetActiveTitle())
+    {
+    case GameTitle::Halo3:
+        gapFrames = ResolveAuthoredAnimationGapFrames(
+            g_config.crosshair_animation_frames);
+        // Holding one image still needs a slow re-sample so a weapon swap is
+        // eventually noticed; it just never animates between those.
+        if (gapFrames == 0)
+            gapFrames = kOdstCaptureSampleGapFrames;
+        break;
+    case GameTitle::Halo3ODST:
+        gapFrames = kOdstCaptureSampleGapFrames;
+        break;
+    default:
+        return true;
+    }
+
+    // On a skipped frame the title predicate hides the flat widget without
+    // redirecting a render target or drawing any authored crosshair pixels.
     static std::atomic<uint64_t> lastSampleSerial{0};
     const uint64_t serial = g_preparedFrame.serial;
     uint64_t last = lastSampleSerial.load(std::memory_order_relaxed);
     for (;;)
     {
+        if (!ShouldSampleAuthoredCapture(gapFrames, last, serial))
+            return false;
         if (serial == last)
             return true;
-        if (serial > last && serial - last < kOdstCaptureSampleGapFrames)
-            return false;
         if (lastSampleSerial.compare_exchange_weak(
                 last, serial, std::memory_order_relaxed,
                 std::memory_order_relaxed))

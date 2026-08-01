@@ -770,8 +770,7 @@ namespace
             const int captureEye = g_config.right_eye_first ? 1 : 0;
             if (eye < 0 || eye == captureEye)
             {
-                if (TitleAdapter_GetActiveTitle() == GameTitle::Halo3ODST &&
-                    !VR_ShouldCaptureOdstAuthoredReticle())
+                if (!VR_ShouldCaptureAuthoredReticleThisFrame())
                     return false;
                 if (g_insideHudDrawWidget && VR_BeginAuthoredReticleCapture())
                 {

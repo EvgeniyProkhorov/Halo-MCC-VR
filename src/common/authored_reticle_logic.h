@@ -43,6 +43,11 @@ enum class AuthoredReticleRefreshPolicy : uint8_t
     BoundedAnimation,
 };
 
+// Floor on how often the blocking OpenXR acquire/wait/copy/release may run.
+// Measured at ~4-5 ms of the render window, which is the whole margin between
+// a 120 Hz budget (8.33 ms) and missing it, so it must never run every frame.
+inline constexpr uint64_t kMinimumUploadGapFrames = 6;
+
 struct AuthoredReticleRefreshState
 {
     uint64_t ownerEpoch = 0;
@@ -76,7 +81,6 @@ inline bool ShouldUploadAuthoredReticle(
     if (!capturedThisFrame || !uploadAdmitted || capturedKey == 0)
         return false;
 
-    constexpr uint64_t kMinimumUploadGapFrames = 6;
     if (state.lastUploadFrame != 0 && frameSerial >= state.lastUploadFrame &&
         frameSerial - state.lastUploadFrame < kMinimumUploadGapFrames)
         return false;
@@ -128,4 +132,54 @@ inline bool AuthoredReticleLayerHasContent(
     bool authoredArtHeld)
 {
     return !titleCapturesAuthoredArt || authoredArtHeld;
+}
+
+// Offscreen CHUD capture cadence.
+//
+// Capturing is not free: every class-2 widget piece redirects the render
+// target, saves and restores viewport/scissor/RTV state on the immediate
+// context, and draws itself into the private reticle texture. A title that
+// already holds valid released art only has to re-sample the game's widget
+// often enough to see it change - between samples the compositor keeps
+// showing the last released image at no cost. This is the mechanism ODST
+// already ships (`60f3929`); the gap is the only per-title difference.
+//
+// Every widget drawn during a selected frame must be admitted, so a compound
+// reticle is captured whole rather than in pieces from different frames.
+inline bool ShouldSampleAuthoredCapture(
+    uint64_t gapFrames, uint64_t lastSampleSerial, uint64_t frameSerial)
+{
+    if (gapFrames == 0 || lastSampleSerial == 0)
+        return true;
+    if (frameSerial == lastSampleSerial)
+        return true;
+    // A serial restart (title change, session restart) re-samples immediately
+    // rather than waiting out a gap measured against a stale frame number.
+    if (frameSerial < lastSampleSerial)
+        return true;
+    return frameSerial - lastSampleSerial >= gapFrames;
+}
+
+// Halo 3's authored crosshair animates - it kicks when the weapon fires and
+// turns red on a hostile / green on a friendly target - and none of that
+// changes which widgets drew, so an identity-keyed publish freezes one
+// snapshot. Publishing on a bounded cadence is what makes it live again, and
+// the same cadence throttles the capture that feeds it, so the animation is
+// paid for out of work the title was already doing every frame.
+//
+// 0 disables the animation entirely and holds one captured image, which is
+// the cheapest possible behavior. Anything else is clamped to at least
+// `kMinimumUploadGapFrames`, because a shorter gap cannot produce extra
+// publishes anyway - it would only spend capture work that the upload floor
+// then throws away.
+inline uint64_t ResolveAuthoredAnimationGapFrames(int configuredFrames)
+{
+    constexpr int kMaximumAnimationGapFrames = 60;
+    if (configuredFrames <= 0)
+        return 0;
+    if (configuredFrames < static_cast<int>(kMinimumUploadGapFrames))
+        return kMinimumUploadGapFrames;
+    if (configuredFrames > kMaximumAnimationGapFrames)
+        return static_cast<uint64_t>(kMaximumAnimationGapFrames);
+    return static_cast<uint64_t>(configuredFrames);
 }

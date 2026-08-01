@@ -237,7 +237,9 @@ The user confirmed that this frees the shotgun left arm. The removed synthetic p
   steady frames: after valid art is held, it samples one complete native CHUD
   frame every 30 OpenXR frames, immediately publishes a changed identity, and
   keeps submitting the prior valid quad between samples. Halo 3 and Reach retain
-  their existing capture cadence.
+  their existing capture cadence. (Superseded for Halo 3 on 2026-08-01: it now
+  samples on its own publish cadence - see the animated-crosshair section
+  below. ODST and Reach are unchanged.)
 - The procedural reticle and the authored art share one swapchain. For a title
   that captures, the procedural reticle is fully transparent, so repainting it
   ERASES the captured widget. Once the swapchain holds authored art it must be
@@ -279,6 +281,40 @@ The user confirmed that this frees the shotgun left arm. The removed synthetic p
   changes produce edges. A settled Halo 3 widget uploads once, then only on a
   changed nonzero colour class with a six-frame minimum gap. There is no
   recurring Halo 3 upload and VR scope state is not a trigger.
+## Halo 3 animated CHUD crosshair (2026-08-01, headset-pending)
+
+- User report against baseline `efe8bdb` (DLL `0E9DB6DA...C2537F9E`): Halo 3's
+  crosshair still shows no shooting animation and no red/green target state.
+  The colour-ordering edge above is therefore not sufficient on its own; this
+  is a negative result for `06e76a2`'s trigger, not for its measurement.
+- The mechanism was already recorded on 2026-07-27: the art key describes
+  WHICH widgets drew, not how they look. A crosshair that kicks, tints or
+  fades leaves the key unchanged, so an identity-keyed publish holds one
+  snapshot forever. `716a635` fixed exactly this for all three titles on a
+  bounded cadence and was headset-accepted with "I tested all three halos,
+  and their crosshairs are working good. The performance is good." Halo 3 was
+  moved off that cadence on 2026-07-30 by a performance pass, not by a headset
+  failure of the animation itself.
+- The 2026-07-30 pass did establish one hard constraint: with zero steady
+  uploads the Halo 3 render window is 6-7 ms against an 8.33 ms budget at
+  120 Hz, and a per-frame ~4-5 ms upload does not fit. A bounded 1-in-6
+  cadence alone was reported as a performance loss.
+- The 2026-08-01 candidate therefore pays for the publish out of work Halo 3
+  was already doing. `60f3929` proved the offscreen capture is itself a
+  per-frame cost worth removing (it throttled ODST's to 1-in-30 and shipped in
+  0.3.1); Halo 3 still redirected the render target and re-drew every class-2
+  widget on every frame while publishing almost none of it. Halo 3 now samples
+  the native CHUD only on the frames it publishes, so the per-frame capture
+  cost is removed from five frames in six and the upload is added to the
+  sixth. Whether that trade is net-neutral in the render window is a headset
+  measurement, not a claim: the `Halo 3 reticle upload:` counters now report
+  the achieved publish rate the same way Reach's already do.
+- `crosshair_animation_frames` is the player-facing control (F1, live).
+  0 holds one image and reverts to the identity/colour-edge policy with a slow
+  1-in-30 sample, which is strictly cheaper than the 2026-07-30 behavior.
+  6 to 60 selects the publish cadence; the sample gap and the publish floor are
+  the same number by construction, so a sampled frame always publishes.
+
 - Apparent-size parity remains headset-pending: all three titles use the same
   `crosshair_size_deg` and distance-controlled outer quad. Halo 3 and the
   2026-07-30 ODST candidate use 4x internal authored-art occupancy; Reach

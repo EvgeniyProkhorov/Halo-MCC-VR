@@ -165,6 +165,11 @@ static void Clamp()
         std::clamp(g_config.vehicle_wheel_deadzone_deg, 0.0f, 30.0f);
     g_config.crosshair_distance_m = std::clamp(g_config.crosshair_distance_m, 2.0f, 50.0f);
     g_config.crosshair_size_deg = std::clamp(g_config.crosshair_size_deg, 0.3f, 20.0f);
+    // 0 stays 0 (hold one image); every other value is clamped into the range
+    // the publish floor can actually honour.
+    if (g_config.crosshair_animation_frames != 0)
+        g_config.crosshair_animation_frames =
+            std::clamp(g_config.crosshair_animation_frames, 6, 60);
     g_config.reticle_r = std::clamp(g_config.reticle_r, 0.0f, 1.0f);
     g_config.reticle_g = std::clamp(g_config.reticle_g, 0.0f, 1.0f);
     g_config.reticle_b = std::clamp(g_config.reticle_b, 0.0f, 1.0f);
@@ -346,6 +351,8 @@ void ConfigLoad(const wchar_t* path)
             g_config.crosshair_distance_m = (float)atof(val);
         else if (!strcmp(key, "crosshair_size_deg"))
             g_config.crosshair_size_deg = (float)atof(val);
+        else if (!strcmp(key, "crosshair_animation_frames"))
+            g_config.crosshair_animation_frames = atoi(val);
         else if (!strcmp(key, "reticle_r"))
             g_config.reticle_r = (float)atof(val);
         else if (!strcmp(key, "reticle_g"))
@@ -654,6 +661,14 @@ void ConfigSave()
     fprintf(f, "# Apparent size of the crosshair, in degrees.\n");
     fprintf(f, "# (default %.2f, range 0.3 to 20)\n", d.crosshair_size_deg);
     fprintf(f, "crosshair_size_deg = %.2f\n\n", g_config.crosshair_size_deg);
+    fprintf(f, "# How often the VR crosshair re-reads the game's own crosshair art,\n");
+    fprintf(f, "# in frames. This is what makes Halo 3's crosshair animate: the kick\n");
+    fprintf(f, "# when you shoot, and the red/green target colors. Lower is more\n");
+    fprintf(f, "# responsive, higher is cheaper. 0 freezes it and costs the least.\n");
+    fprintf(f, "# Halo 3 only. (default %d, 0 or 6 to 60)\n",
+             d.crosshair_animation_frames);
+    fprintf(f, "crosshair_animation_frames = %d\n\n",
+             g_config.crosshair_animation_frames);
     fprintf(f, "# Crosshair color, 0-1 per channel. Not in the F1 menu; this file only.\n");
     fprintf(f, "# (defaults %.3f / %.3f / %.3f = light blue, range 0 to 1)\n",
              d.reticle_r, d.reticle_g, d.reticle_b);

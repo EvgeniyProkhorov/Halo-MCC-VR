@@ -145,6 +145,55 @@ axis still follows the universal trim.
 Full per-candidate disassembly, RVA tables and seat-layout evidence are in
 `docs/HALO3-VEHICLE-EVIDENCE.md`.
 
+## HEADSET-PENDING: Halo 3 animated CHUD crosshair - 2026-08-01
+
+Built on the accepted `efe8bdb` baseline above; it does not advance the
+pointer. The user reported against `efe8bdb` that Halo 3's crosshair shows no
+shooting animation and no red/green target state.
+
+**What was already known.** The 2026-07-27 entry "The crosshair blackout: one
+defect behind three symptoms" records the mechanism exactly: the art key
+describes WHICH widgets drew, not how they look, so animation frames, red/green
+tints and fades all leave it unchanged and the publish is skipped. `716a635`
+fixed this for all three titles on a bounded cadence and was accepted with "I
+tested all three halos, and their crosshairs are working good. The performance
+is good." Halo 3 was moved off that cadence on 2026-07-30 by a performance pass
+(`ec3c981` -> `f205ce9` -> `06e76a2`), not by any headset failure of the
+animation. The colour-ordering edge `06e76a2` added in its place is now
+reported as still frozen in the headset.
+
+**The constraint that pass established, which this candidate must respect.**
+With zero steady uploads the Halo 3 render window is 6-7 ms against an 8.33 ms
+budget at 120 Hz, and the publish is a blocking OpenXR acquire/wait/copy/release
+measured at ~4-5 ms. Simply restoring the bounded cadence was reported as a
+performance loss, so restoring the animation on its own is not enough.
+
+**The change.** The publish is paid for out of work Halo 3 was already doing
+every frame. `60f3929` proved the offscreen capture is itself a real per-frame
+cost - it redirects the render target and re-draws every class-2 widget piece,
+saving and restoring immediate-context state each time - and throttled ODST's
+to one sample in thirty; that shipped in 0.3.1. Halo 3 was still paying that
+cost on every frame while publishing almost none of it. Halo 3 now samples the
+native CHUD only on the frames it publishes: the capture cost is removed from
+five frames in six, and the upload is added to the sixth. The sample gap and
+the publish floor are the same number by construction, so a sampled frame
+always publishes and no capture work is spent and discarded.
+
+**Deliberately not claimed.** Whether that trade is net-neutral or better in
+the render window is a headset measurement, not a prediction. Two things make
+the session decisive rather than a guess:
+
+- `crosshair_animation_frames` is live in the F1 menu (Crosshair category).
+  0 turns the animation off and holds one image - strictly cheaper than the
+  current shipped behavior, because the slow sample replaces a per-frame one.
+  6 (default) is the fastest publish the floor allows, 60 the slowest.
+- The log now reports `Halo 3 reticle upload: N uploaded, M skipped ...` every
+  two seconds, exactly as Reach's already does, so a report comes with the
+  achieved publish rate beside the felt frame rate.
+
+ODST and Reach are untouched: ODST keeps its 1-in-30 sample and identity
+policy, Reach keeps its bounded animation cadence.
+
 ## Development milestones folded into 0.3.1
 
 The two results below were headset-accepted ahead of the 0.3.1 release above

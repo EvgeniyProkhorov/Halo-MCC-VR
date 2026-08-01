@@ -228,6 +228,55 @@ int main()
               "reticle owner reset");
     }
     {
+        // Offscreen capture cadence. The first sample and every widget within
+        // an already-sampled frame are always admitted, so a compound reticle
+        // is never captured in pieces from different frames.
+        Check(ShouldSampleAuthoredCapture(6, 0, 100), "first capture sampled");
+        Check(ShouldSampleAuthoredCapture(6, 100, 100), "same frame re-admitted");
+        Check(!ShouldSampleAuthoredCapture(6, 100, 101), "capture held inside gap");
+        Check(!ShouldSampleAuthoredCapture(6, 100, 105), "capture held to the gap");
+        Check(ShouldSampleAuthoredCapture(6, 100, 106), "capture sampled at the gap");
+        Check(ShouldSampleAuthoredCapture(30, 100, 130), "slow cadence sampled");
+        Check(!ShouldSampleAuthoredCapture(30, 100, 129), "slow cadence held");
+        Check(ShouldSampleAuthoredCapture(6, 500, 10), "serial restart re-samples");
+        Check(ShouldSampleAuthoredCapture(0, 100, 101), "gap 0 never throttles");
+
+        // The capture gap and the publish floor are deliberately the same
+        // number: a sampled frame must always be allowed to publish, or the
+        // capture work is spent and thrown away.
+        Check(ResolveAuthoredAnimationGapFrames(6) == kMinimumUploadGapFrames &&
+                  ResolveAuthoredAnimationGapFrames(1) == kMinimumUploadGapFrames &&
+                  ResolveAuthoredAnimationGapFrames(12) == 12 &&
+                  ResolveAuthoredAnimationGapFrames(600) == 60 &&
+                  ResolveAuthoredAnimationGapFrames(0) == 0 &&
+                  ResolveAuthoredAnimationGapFrames(-4) == 0,
+              "authored animation cadence clamp");
+
+        // A Halo 3 sample publishes on the frame it was captured on, every
+        // time, so the animation cadence the player sets is the cadence they
+        // get. This is the property the frozen-snapshot bug violated.
+        AuthoredReticleRefreshState animated{};
+        uint64_t lastSample = 0;
+        int published = 0;
+        const uint64_t gap = ResolveAuthoredAnimationGapFrames(6);
+        for (uint64_t serial = 1; serial <= 120; ++serial)
+        {
+            if (!ShouldSampleAuthoredCapture(gap, lastSample, serial))
+                continue;
+            lastSample = serial;
+            // The identity key is deliberately constant: an animating Halo 3
+            // crosshair does not change which widgets drew.
+            if (ShouldUploadAuthoredReticle(
+                    AuthoredReticleRefreshPolicy::BoundedAnimation,
+                    true, true, 0xABCD, 0, serial, 1, animated))
+            {
+                MarkAuthoredReticleUploaded(animated, 0xABCD, 0, serial);
+                ++published;
+            }
+        }
+        Check(published == 20, "every animated sample publishes");
+    }
+    {
         constexpr std::array<uint8_t, 6> repeatedPattern{
             0xAA, 0xBB, 0xCC, 0xAA, 0xBB, 0xCC
         };
