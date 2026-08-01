@@ -779,8 +779,8 @@ namespace
             "Sit in a seat and these sliders adjust that seat alone —\n"
             "a vehicle's driver, passengers and gunner each remember their\n"
             "own. On foot they set the shared base every unadjusted seat\n"
-            "follows. The base position is the game's own per-seat camera\n"
-            "pivot, so each seat already starts where its authors placed it.");
+            "follows. The base is your Blender-authored point for that seat;\n"
+            "vehicle and occupant motion are parented around that baseline.");
         ImGui::Spacing();
         ImGui::Separator();
         ImGui::Text("Turning with the vehicle");
@@ -790,13 +790,12 @@ namespace
             "1 = you turn with the vehicle like a real driver. 0 = the view\n"
             "stays locked to the world and every control goes back to exactly\n"
             "what it was before this feature.");
-        changed |= ImGui::Checkbox("Smooth the car's stepped motion",
+        changed |= ImGui::Checkbox("Match the rendered vehicle motion",
                                    &g_config.vehicle_cam_smoothing);
         ImGui::TextDisabled(
-            "OFF (default) bolts your seat to the car itself - you feel the\n"
-            "suspension, the boost and the bank exactly as the physics make\n"
-            "them. ON blends between the game's 60-per-second updates:\n"
-            "gentler, but it sits you slightly behind the car.");
+            "ON (default) uses the exact seat/attachment node Halo renders\n"
+            "and adds occupant bounce relative to the settled seat pose. It\n"
+            "does not filter or shift your authored point. OFF is raw-node A/B.");
         ImGui::Spacing();
         ImGui::Separator();
         ImGui::Text("Motion steering");

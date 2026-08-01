@@ -143,7 +143,7 @@ struct Config
     // actually shoots. Drawn as a compositor quad layer, so it costs no game
     // First-person vehicles (currently Halo 3; other titles ignore these
     // until they publish a vehicle state). The camera sits at the engine's
-    // own per-seat pivot instead of the third-person chase position; head
+    // Blender-authored point instead of the third-person chase position; head
     // look and leaning stay fully live. 0 restores the stock chase view.
     bool vehicle_first_person = true;
     float vehicle_cam_forward_m = 0.10f; // + = toward the windshield
@@ -161,9 +161,9 @@ struct Config
     // with the vehicle like a real driver; 0 = the world-locked view Alpha
     // 0.3.1 shipped, which also leaves every control exactly as it was.
     float vehicle_view_follow = 1.0f;
-    // The game moves vehicles 60 times a second and smooths the model in
-    // between; without this the seat camera steps against it and the vehicle
-    // appears to shake. 0 = the raw stepped position.
+    // Use the same interpolated seat/attachment node the visible vehicle uses,
+    // plus occupant-head motion relative to the settled pose in that seat.
+    // 0 = raw node matrices as a diagnostic A/B.
     bool vehicle_cam_smoothing = true;
 
     // Motion steering in look-steered ground driver seats: grab an invisible

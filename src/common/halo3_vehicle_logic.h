@@ -167,6 +167,274 @@ struct Halo3Frame
     float up[3];
 };
 
+// Halo's real_matrix4x3 layout. The scale precedes four triplets, so this must
+// stay byte-identical to the engine value returned for an interpolated model
+// node and to the default inverse matrix stored on that node's mode record.
+struct Halo3Matrix4x3
+{
+    float scale;
+    float forward[3];
+    float left[3];
+    float up[3];
+    float position[3];
+};
+static_assert(sizeof(Halo3Matrix4x3) == 0x34);
+
+inline int Halo3MatrixCountFromByteSize(uint16_t byteSize,
+                                        int maximumCount = 256)
+{
+    if (!byteSize || maximumCount <= 0 ||
+        byteSize % sizeof(Halo3Matrix4x3) != 0)
+        return 0;
+    const int count = byteSize / static_cast<int>(sizeof(Halo3Matrix4x3));
+    return count <= maximumCount ? count : 0;
+}
+
+inline bool Halo3MatrixValid(const Halo3Matrix4x3& m)
+{
+    // Vehicle render nodes use a positive, finite uniform scale. Reject a
+    // singular or implausibly large value before either transform can divide
+    // by it or amplify a corrupt point into the world.
+    if (!std::isfinite(m.scale) || m.scale <= 1.0e-5f || m.scale > 1.0e3f)
+        return false;
+    for (int i = 0; i < 3; ++i)
+    {
+        if (!std::isfinite(m.forward[i]) || !std::isfinite(m.left[i]) ||
+            !std::isfinite(m.up[i]) || !std::isfinite(m.position[i]))
+            return false;
+    }
+
+    const auto dot = [](const float a[3], const float b[3]) {
+        return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+    };
+    const float ff = dot(m.forward, m.forward);
+    const float ll = dot(m.left, m.left);
+    const float uu = dot(m.up, m.up);
+    if (std::fabs(ff - 1.0f) > 0.05f ||
+        std::fabs(ll - 1.0f) > 0.05f ||
+        std::fabs(uu - 1.0f) > 0.05f ||
+        std::fabs(dot(m.forward, m.left)) > 0.10f ||
+        std::fabs(dot(m.forward, m.up)) > 0.10f ||
+        std::fabs(dot(m.left, m.up)) > 0.10f)
+        return false;
+
+    // Halo's authored axes are (forward, left, up), with left = up x forward.
+    const float expectedLeft[3] = {
+        m.up[1] * m.forward[2] - m.up[2] * m.forward[1],
+        m.up[2] * m.forward[0] - m.up[0] * m.forward[2],
+        m.up[0] * m.forward[1] - m.up[1] * m.forward[0]};
+    return dot(expectedLeft, m.left) >= 0.90f;
+}
+
+inline bool Halo3MatrixTransformPoint(const Halo3Matrix4x3& m,
+                                      const float point[3], float out[3])
+{
+    if (!point || !out || !Halo3MatrixValid(m) ||
+        !std::isfinite(point[0]) || !std::isfinite(point[1]) ||
+        !std::isfinite(point[2]))
+        return false;
+    float transformed[3];
+    for (int i = 0; i < 3; ++i)
+    {
+        transformed[i] = m.position[i] + m.scale *
+            (m.forward[i] * point[0] + m.left[i] * point[1] +
+             m.up[i] * point[2]);
+        if (!std::isfinite(transformed[i]))
+            return false;
+    }
+    for (int i = 0; i < 3; ++i)
+        out[i] = transformed[i];
+    return true;
+}
+
+inline bool Halo3MatrixInverseTransformPoint(const Halo3Matrix4x3& m,
+                                             const float point[3],
+                                             float out[3])
+{
+    if (!point || !out || !Halo3MatrixValid(m) ||
+        !std::isfinite(point[0]) || !std::isfinite(point[1]) ||
+        !std::isfinite(point[2]))
+        return false;
+    const float relative[3] = {
+        point[0] - m.position[0], point[1] - m.position[1],
+        point[2] - m.position[2]};
+    const float inverseScale = 1.0f / m.scale;
+    float transformed[3] = {
+        inverseScale * (relative[0] * m.forward[0] +
+                        relative[1] * m.forward[1] +
+                        relative[2] * m.forward[2]),
+        inverseScale * (relative[0] * m.left[0] +
+                        relative[1] * m.left[1] +
+                        relative[2] * m.left[2]),
+        inverseScale * (relative[0] * m.up[0] +
+                        relative[1] * m.up[1] +
+                        relative[2] * m.up[2])};
+    if (!std::isfinite(transformed[0]) || !std::isfinite(transformed[1]) ||
+        !std::isfinite(transformed[2]))
+        return false;
+    for (int i = 0; i < 3; ++i)
+        out[i] = transformed[i];
+    return true;
+}
+
+// The Blender points are in tag space. A mode node's stored default inverse
+// maps that point into node-local space; applying the live interpolated node
+// then preserves the authored placement at rest and inherits every rendered
+// translation and rotation thereafter.
+inline bool Halo3ComputeNodeAnchoredPoint(
+    const Halo3Matrix4x3& defaultInverse, const Halo3Matrix4x3& liveNode,
+    const float authored[3], float out[3])
+{
+    float nodeLocal[3];
+    return Halo3MatrixTransformPoint(defaultInverse, authored, nodeLocal) &&
+        Halo3MatrixTransformPoint(liveNode, nodeLocal, out);
+}
+
+// Keep the animated occupant head translation relative to the settled pose.
+// At the latch pose this emits the authored node-local point
+// exactly; later head-local movement is added around that point while the live
+// node remains the sole parent for vehicle/mesh motion.
+inline bool Halo3ComputeHeadParentedPoint(
+    const Halo3Matrix4x3& liveSeatNode, const float headWorld[3],
+    const float headLocalReference[3], const float authoredNodeLocal[3],
+    float out[3])
+{
+    if (!headLocalReference || !authoredNodeLocal)
+        return false;
+    for (int i = 0; i < 3; ++i)
+        if (!std::isfinite(headLocalReference[i]) ||
+            !std::isfinite(authoredNodeLocal[i]))
+            return false;
+    float currentHeadLocal[3];
+    if (!Halo3MatrixInverseTransformPoint(
+            liveSeatNode, headWorld, currentHeadLocal))
+        return false;
+    const float cameraLocal[3] = {
+        authoredNodeLocal[0] + currentHeadLocal[0] - headLocalReference[0],
+        authoredNodeLocal[1] + currentHeadLocal[1] - headLocalReference[1],
+        authoredNodeLocal[2] + currentHeadLocal[2] - headLocalReference[2]};
+    return Halo3MatrixTransformPoint(liveSeatNode, cameraLocal, out);
+}
+
+// Entry/seat-switch animation can move the occupant's head by metres relative
+// to the destination seat before it reaches its final pose. Never freeze that
+// transient as the zero point. The exact authored node anchor remains active
+// until one concrete seat identity has existed long enough AND the head has
+// remained inside a small node-local sphere for a continuous quiet window.
+inline constexpr uint64_t kHalo3HeadSettleMinimumAgeMs = 1500;
+inline constexpr uint64_t kHalo3HeadSettleQuietMs = 500;
+inline constexpr float kHalo3HeadSettleRadius = 0.015f;
+inline constexpr float kHalo3HeadMaximumLocalDelta = 0.08f;
+
+struct Halo3HeadSettleLatch
+{
+    uint64_t observedSinceMs = 0;
+    uint64_t quietSinceMs = 0;
+    bool observing = false;
+    bool valid = false;
+    float quietOrigin[3] = {0.0f, 0.0f, 0.0f};
+    float reference[3] = {0.0f, 0.0f, 0.0f};
+
+    bool Update(uint64_t nowMs, const float currentLocal[3])
+    {
+        if (!currentLocal || !std::isfinite(currentLocal[0]) ||
+            !std::isfinite(currentLocal[1]) ||
+            !std::isfinite(currentLocal[2]))
+            return false;
+        if (valid)
+            return true;
+
+        if (!observing || nowMs < observedSinceMs || nowMs < quietSinceMs)
+        {
+            observing = true;
+            observedSinceMs = nowMs;
+            quietSinceMs = nowMs;
+            for (int i = 0; i < 3; ++i)
+                quietOrigin[i] = currentLocal[i];
+            return false;
+        }
+
+        const float dx = currentLocal[0] - quietOrigin[0];
+        const float dy = currentLocal[1] - quietOrigin[1];
+        const float dz = currentLocal[2] - quietOrigin[2];
+        const float distanceSquared = dx * dx + dy * dy + dz * dz;
+        if (!std::isfinite(distanceSquared))
+            return false;
+        if (distanceSquared >
+            kHalo3HeadSettleRadius * kHalo3HeadSettleRadius)
+        {
+            quietSinceMs = nowMs;
+            for (int i = 0; i < 3; ++i)
+                quietOrigin[i] = currentLocal[i];
+            return false;
+        }
+
+        if (nowMs - observedSinceMs < kHalo3HeadSettleMinimumAgeMs ||
+            nowMs - quietSinceMs < kHalo3HeadSettleQuietMs)
+            return false;
+
+        for (int i = 0; i < 3; ++i)
+            reference[i] = currentLocal[i];
+        valid = true;
+        return true;
+    }
+};
+
+inline bool Halo3HeadLocalDeltaWithinLimit(const float currentLocal[3],
+                                           const float reference[3])
+{
+    if (!currentLocal || !reference)
+        return false;
+    float distanceSquared = 0.0f;
+    for (int i = 0; i < 3; ++i)
+    {
+        if (!std::isfinite(currentLocal[i]) || !std::isfinite(reference[i]))
+            return false;
+        const float delta = currentLocal[i] - reference[i];
+        distanceSquared += delta * delta;
+    }
+    return std::isfinite(distanceSquared) &&
+        distanceSquared <=
+            kHalo3HeadMaximumLocalDelta * kHalo3HeadMaximumLocalDelta;
+}
+
+// Position-only OpenXR neutralization is independent of yaw follow. Remember
+// the concrete authored seat that received it so a frame-level node/sample
+// miss cannot yank the player's leaning origin, while a real seat/vehicle
+// switch always gets a fresh exact baseline.
+struct Halo3SeatPositionKey
+{
+    uint32_t generation = 0;
+    int parentHandle = -1;
+    int seatIndex = -1;
+    uint32_t vehicleId = 0xFFFFFFFFu;
+    bool mounted = false;
+    bool valid = false;
+
+    constexpr bool Matches(uint32_t candidateGeneration,
+                           int candidateParentHandle, int candidateSeatIndex,
+                           uint32_t candidateVehicleId,
+                           bool candidateMounted) const
+    {
+        return valid && generation == candidateGeneration &&
+            parentHandle == candidateParentHandle &&
+            seatIndex == candidateSeatIndex &&
+            vehicleId == candidateVehicleId && mounted == candidateMounted;
+    }
+
+    constexpr void Set(uint32_t candidateGeneration,
+                       int candidateParentHandle, int candidateSeatIndex,
+                       uint32_t candidateVehicleId, bool candidateMounted)
+    {
+        generation = candidateGeneration;
+        parentHandle = candidateParentHandle;
+        seatIndex = candidateSeatIndex;
+        vehicleId = candidateVehicleId;
+        mounted = candidateMounted;
+        valid = true;
+    }
+};
+
 inline void Halo3FrameLeft(const Halo3Frame& f, float out[3])
 {
     out[0] = f.up[1] * f.fwd[2] - f.up[2] * f.fwd[1];
@@ -1085,16 +1353,15 @@ inline Halo3VehicleId Halo3ResolveVehicleId(const Halo3DefinitionFields& def)
     }
 }
 
-// User-authored first-person seat points (Blender kit, model-space world
-// units, relative to the DIRECT parent object's origin and basis).
+// User-authored first-person seat points (Blender kit, vehicle/carrier tag
+// space in world units).
 // Keyed by RESOLVED VEHICLE IDENTITY, not physics type, so a mongoose can
 // never wear the warthog's eye point. `carrierFrame` marks the mounted-turret
 // gunner seats: those points are authored in the CARRIER's frame (and
 // `vehicle` is then the CARRIER's identity), because an attached child stores
-// its transform relative to the parent's ATTACHMENT NODE, which left C7's
-// carrier-origin composition ~0.42 wu (1.3 m) low. Authoring in carrier space
-// sidesteps the node matrix entirely; nothing is lost, as a mounted turret's
-// object frame is mount-fixed and does not follow gun aim.
+// its transform relative to the parent's ATTACHMENT NODE. C18 maps every point
+// through the selected node's stored default inverse and live rendered matrix;
+// mounted points select the carrier plus the gun child's attachment node.
 //
 // Values are the user's own Blender placements (kit v3, every vehicle at the
 // world origin, metres / 3.048), read back 2026-07-31 with the parse guard

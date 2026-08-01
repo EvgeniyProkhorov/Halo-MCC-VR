@@ -2,6 +2,7 @@
 #include <tlhelp32.h>
 #include <array>
 #include <atomic>
+#include <cfloat>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -4902,7 +4903,7 @@ namespace
 
     // First-person vehicle camera helpers, defined with the vehicle probe
     // module below (they run on this same engine camera thread).
-    bool Halo3ComputeAuthoredAnchor(float out[3], int* outTrimSlot = nullptr);
+    bool Halo3ComputeAuthoredAnchor(float out[3]);
     bool Halo3ComputeNativeParentedAnchor(const float nativeWorld[3],
                                           float out[3],
                                           int* outTrimSlot = nullptr);
@@ -5032,25 +5033,15 @@ namespace
         }
 
         // C17 native-seat ownership was headset-rejected: it shifted every
-        // authored placement and did not cure the vehicle/eye mismatch. Restore
-        // the C5-C16 authored anchor as one explicit rollback candidate. The
-        // dormant C17 transaction remains below for evidence and later study.
+        // authored placement and did not cure the vehicle/eye mismatch. C18
+        // supplies the exact Blender point already parented through Halo's live
+        // rendered node; consuming that world point directly is essential.
         if (!cinematic && Halo3VehicleFpActive())
         {
             float anchor[3];
-            int anchorTrimSlot = -1;
-            if (Halo3ComputeAuthoredAnchor(anchor, &anchorTrimSlot))
+            if (Halo3ComputeAuthoredAnchor(anchor))
             {
-                // C13: each SEAT may carry its own trim; anything without one
-                // follows the universal pair (config.h accessors).
-                const float trimScale = g_worldScale.load();
-                const float trimFwd =
-                    ConfigSeatCamForward(g_config, anchorTrimSlot) * trimScale;
-                const float trimUp =
-                    ConfigSeatCamUp(g_config, anchorTrimSlot) * trimScale;
-                pos[0] = anchor[0] + cgy * trimFwd;
-                pos[1] = anchor[1] + sgy * trimFwd;
-                pos[2] = anchor[2] + trimUp;
+                memcpy(pos, anchor, sizeof(anchor));
             }
         }
 
@@ -5143,14 +5134,13 @@ namespace
         ApplyVrTurn(pad);
     }
 
-    // ---- Halo 3 vehicle probe (log-only) -----------------------------------
+    // ---- Halo 3 vehicle state and rendered-node camera parent ---------------
     // Detection identities are byte-proven in docs/HALO3-VEHICLE-EVIDENCE.md
-    // and bound at install time by unique signatures. This candidate observes
-    // only: it publishes a generation-keyed snapshot plus seqlock captures so
-    // the first-person seat camera and motion controls that follow are built
-    // on measured runtime behavior. Nothing consumes these values yet; a
-    // resolve failure or runtime fault disables only this probe, loudly, and
-    // never touches the camera core.
+    // and bound at install time by unique signatures. The camera-thread sampler
+    // publishes the concrete seat plus the exact rendered-node-authored anchor
+    // consumed by first-person placement, yaw follow, and controls. A resolve
+    // failure or runtime fault fails that feature open, loudly, and never
+    // touches the camera core.
     enum class Halo3VehicleBindingState : uint8_t
     {
         NotInstalled = 0,
@@ -5160,11 +5150,45 @@ namespace
     using Halo3PlayerUnitGetterFn = int(__fastcall*)(int outputUser);
     using Halo3UnitInVehicleFn = unsigned char(__fastcall*)(int unitHandle);
     using Halo3VehicleTypeFn = int(__fastcall*)(unsigned short defIndex);
+    // Read-only render-node accessors used by Halo's own native camera-marker
+    // path. The first returns the same interpolated 0x34-byte node bank the
+    // visible-object renderer consumes; the second resolves an interpolated
+    // marker (arg6=true) and is used only for the occupant's animated head.
+    using Halo3InterpolatedNodesFn = unsigned char(__fastcall*)(
+        int objectHandle, Halo3Matrix4x3** outMatrices, int* outCount);
+    struct Halo3ObjectMarker
+    {
+        int16_t nodeIndex;
+        uint16_t pad;
+        Halo3Matrix4x3 nodeMatrix;
+        Halo3Matrix4x3 matrix;
+        float radius;
+    };
+    static_assert(sizeof(Halo3ObjectMarker) == 0x70);
+    static_assert(offsetof(Halo3ObjectMarker, nodeMatrix) == 0x04);
+    static_assert(offsetof(Halo3ObjectMarker, matrix) == 0x38);
+    static_assert(offsetof(Halo3ObjectMarker, matrix) +
+                      offsetof(Halo3Matrix4x3, position) == 0x60);
+    using Halo3MarkersInternalFn = int16_t(__fastcall*)(
+        int objectHandle, int markerSid, Halo3ObjectMarker* outMarkers,
+        int maximumMarkerCount, bool localOnly, bool interpolateNodes);
     std::atomic<uint8_t> g_halo3VehicleBinding{
         static_cast<uint8_t>(Halo3VehicleBindingState::NotInstalled)};
     Halo3PlayerUnitGetterFn g_halo3PlayerUnitGetter = nullptr;
     Halo3UnitInVehicleFn g_halo3UnitInVehicle = nullptr;
     Halo3VehicleTypeFn g_halo3VehicleTypeAccessor = nullptr;
+    Halo3InterpolatedNodesFn g_halo3InterpolatedNodes = nullptr;
+    Halo3MarkersInternalFn g_halo3MarkersInternal = nullptr;
+    enum class Halo3NodeBindingState : uint8_t
+    {
+        NotInstalled = 0,
+        Installed,
+        StockFallback,
+    };
+    std::atomic<uint8_t> g_halo3NodeBinding{
+        static_cast<uint8_t>(Halo3NodeBindingState::NotInstalled)};
+    std::atomic<uint8_t> g_halo3HeadBinding{
+        static_cast<uint8_t>(Halo3NodeBindingState::NotInstalled)};
     // C7 identity probe: the tag-instance-table and tag-data-base globals,
     // decoded from rip-relative displacements inside the MATCHED type
     // accessor body (E4 instruction layout) — never from absolute RVAs.
@@ -5228,13 +5252,20 @@ namespace
         float pos[3];
         float fwd[3];
         float up[3];
-        // C16: the UNSMOOTHED hull forward. The view-follow reads this, never
-        // the blended one: a blend that is bounded (or that stalls) can lose
-        // rotation permanently, and the follow INTEGRATES what it is given,
-        // so any loss is a drift the car never gets back.
+        // C18: the live rendered seat/attachment-node forward. The view-follow
+        // reads this, never a synthetic blend: the follow integrates what it is
+        // given, so any rotation lost by a predictor becomes permanent drift.
         float rawFwd[3];
+        // Exact world-space placement after default-node -> live-node
+        // parenting. Kept separate from the node origin because the user's
+        // Blender points are tag/model-space coordinates.
+        float anchor[3];
+        uint32_t anchorValid = 0;
+        uint32_t nodeInterpolated = 0;
+        uint32_t headParented = 0;
         int32_t directType = -1;
         int32_t seatIndex = -1;
+        int32_t parentHandle = -1;
         int32_t nativeInVehicle = 0;
         // C8: the identity the authored point is keyed on — the seated
         // parent's, or the CARRIER's when the player is a mounted-turret
@@ -5245,6 +5276,36 @@ namespace
         int32_t mountedTurret = 0;
     };
     Halo3VehicleTransform g_halo3VehicleTransform;
+
+    struct Halo3SeatNodeCache
+    {
+        uint32_t generation = 0;
+        int objectHandle = -1;
+        uint32_t definitionIndex = 0xFFFFFFFFu;
+        int nodeIndex = -1;
+        int seatIndex = -1;
+        uint32_t vehicleId =
+            static_cast<uint32_t>(Halo3VehicleId::Unknown);
+        bool mounted = false;
+        bool resolved = false;
+        bool valid = false;
+        Halo3Matrix4x3 defaultInverse{};
+    };
+    Halo3SeatNodeCache g_halo3SeatNodeCache;
+
+    struct Halo3HeadReference
+    {
+        uint32_t generation = 0;
+        int unitHandle = -1;
+        int parentHandle = -1;
+        int nodeObjectHandle = -1;
+        int seatIndex = -1;
+        int nodeIndex = -1;
+        bool interpolateNodes = false;
+        bool nodeInterpolated = false;
+        Halo3HeadSettleLatch settle{};
+    };
+    Halo3HeadReference g_halo3HeadReference;
 
     enum class Halo3NativeSeatState : uint32_t
     {
@@ -5288,6 +5349,10 @@ namespace
         std::atomic<uint32_t> frames{0};
         std::atomic<uint32_t> posChanged{0};
         std::atomic<uint32_t> tiltChanged{0};
+        std::atomic<uint32_t> interpolatedNode{0};
+        std::atomic<uint32_t> rawNode{0};
+        std::atomic<uint32_t> headParented{0};
+        std::atomic<uint32_t> anchorFallback{0};
         std::atomic<float> maxPosStep{0.0f};   // world units
         std::atomic<float> maxTiltDeg{0.0f};
         float lastPos[3] = {0.0f, 0.0f, 0.0f};
@@ -5389,6 +5454,316 @@ namespace
         slot.generation = generation;
         slot.id = Halo3ResolveVehicleId(fields);
         return slot.id;
+    }
+
+    // C18 live-node camera facts, retail-consumer and official H3EK verified.
+    // An attached object's +0x14 byte is its node on the parent. The raw node
+    // bank is a signed relative offset at +0x138; +0x136 is its byte size,
+    // which the retail provider divides by the 0x34-byte matrix stride.
+    // The renderer and native marker camera both prefer the read-only
+    // interpolated bank accessor, then fall back to this same raw bank.
+    inline constexpr uintptr_t kHalo3ObjectParentNodeOffset = 0x14;
+    inline constexpr uintptr_t kHalo3ObjectNodeByteSizeOffset = 0x136;
+    inline constexpr uintptr_t kHalo3ObjectNodeMatricesOffset = 0x138;
+    inline constexpr int kHalo3MaximumRenderNodes = 256;
+    inline constexpr int kHalo3HeadMarkerSid = 0x9F;
+
+    // Current MCC loaded-tag layout, independently consumed by retail's
+    // marker resolver: vehi -> hlmt -> mode -> node inverse matrix.
+    inline constexpr uintptr_t kHalo3VehicleModelDatumOffset = 0x40;
+    inline constexpr uintptr_t kHalo3ModelRenderModelDatumOffset = 0x0C;
+    inline constexpr uintptr_t kHalo3RenderModelNodesBlockOffset = 0x30;
+    inline constexpr size_t kHalo3RenderModelNodeStride = 0x60;
+    inline constexpr uintptr_t kHalo3RenderModelNodeInverseOffset = 0x28;
+
+    unsigned char* Halo3LoadedTagDefinition(uint32_t datum)
+    {
+        void** instSlot = g_halo3TagInstanceTable;
+        void** baseSlot = g_halo3TagDataBase;
+        auto* instances = instSlot
+            ? static_cast<unsigned char*>(*instSlot) : nullptr;
+        auto* tagBase = baseSlot
+            ? static_cast<unsigned char*>(*baseSlot) : nullptr;
+        const uint32_t index = datum & 0xFFFFu;
+        if (!instances || !tagBase || index == 0xFFFFu)
+            return nullptr;
+        const uint32_t address = *reinterpret_cast<const uint32_t*>(
+            instances + static_cast<size_t>(index) * 8 + 4);
+        return address
+            ? tagBase + static_cast<size_t>(address) * 4 : nullptr;
+    }
+
+    // Cache the selected node's default inverse once per concrete vehicle/seat,
+    // then map the Blender point plus live vehicle-local trims through it. The
+    // render-model tag stores that inverse directly at node+0x28, so no
+    // quaternion convention or guessed parent recursion is involved.
+    bool Halo3ResolveAuthoredNodeLocal(
+        uint32_t generation, int nodeObjectHandle,
+        uint32_t nodeDefinitionIndex, int nodeIndex, Halo3VehicleId vehicleId,
+        int seatIndex, bool mounted, float trimForward, float trimUp,
+        float outNodeLocal[3])
+    {
+        Halo3SeatNodeCache& cache = g_halo3SeatNodeCache;
+        const Halo3SeatPoint* point =
+            Halo3FindSeatPoint(vehicleId, seatIndex, mounted);
+        const auto emitAdjustedPoint = [&]() {
+            if (!point || !cache.valid)
+                return false;
+            const float authored[3] = {
+                point->x + trimForward, point->y, point->z + trimUp};
+            return Halo3MatrixTransformPoint(
+                cache.defaultInverse, authored, outNodeLocal);
+        };
+        const bool same = cache.generation == generation &&
+            cache.objectHandle == nodeObjectHandle &&
+            cache.definitionIndex == nodeDefinitionIndex &&
+            cache.nodeIndex == nodeIndex && cache.seatIndex == seatIndex &&
+            cache.vehicleId == static_cast<uint32_t>(vehicleId) &&
+            cache.mounted == mounted;
+        if (same && cache.resolved)
+            return emitAdjustedPoint();
+
+        cache = {};
+        cache.generation = generation;
+        cache.objectHandle = nodeObjectHandle;
+        cache.definitionIndex = nodeDefinitionIndex;
+        cache.nodeIndex = nodeIndex;
+        cache.seatIndex = seatIndex;
+        cache.vehicleId = static_cast<uint32_t>(vehicleId);
+        cache.mounted = mounted;
+        cache.resolved = true;
+
+        if (!point || nodeDefinitionIndex > 0xFFFFu || nodeIndex < 0 ||
+            nodeIndex >= kHalo3MaximumRenderNodes)
+            return false;
+
+        Halo3Matrix4x3 defaultInverse{};
+        bool readOk = false;
+        __try
+        {
+            unsigned char* objectDef =
+                Halo3LoadedTagDefinition(nodeDefinitionIndex);
+            const uint32_t modelDatum = objectDef
+                ? *reinterpret_cast<const uint32_t*>(
+                      objectDef + kHalo3VehicleModelDatumOffset)
+                : 0xFFFFFFFFu;
+            unsigned char* modelDef = Halo3LoadedTagDefinition(modelDatum);
+            const uint32_t renderModelDatum = modelDef
+                ? *reinterpret_cast<const uint32_t*>(
+                      modelDef + kHalo3ModelRenderModelDatumOffset)
+                : 0xFFFFFFFFu;
+            unsigned char* renderDef =
+                Halo3LoadedTagDefinition(renderModelDatum);
+            const int32_t nodeCount = renderDef
+                ? *reinterpret_cast<const int32_t*>(
+                      renderDef + kHalo3RenderModelNodesBlockOffset)
+                : 0;
+            const uint32_t nodeAddress = renderDef
+                ? *reinterpret_cast<const uint32_t*>(
+                      renderDef + kHalo3RenderModelNodesBlockOffset + 4)
+                : 0;
+            void** baseSlot = g_halo3TagDataBase;
+            auto* tagBase = baseSlot
+                ? static_cast<unsigned char*>(*baseSlot) : nullptr;
+            if (renderDef && tagBase && nodeCount > 0 &&
+                nodeCount <= kHalo3MaximumRenderNodes &&
+                nodeIndex < nodeCount && nodeAddress)
+            {
+                const unsigned char* node = tagBase +
+                    static_cast<size_t>(nodeAddress) * 4 +
+                    static_cast<size_t>(nodeIndex) *
+                        kHalo3RenderModelNodeStride;
+                memcpy(&defaultInverse,
+                       node + kHalo3RenderModelNodeInverseOffset,
+                       sizeof(defaultInverse));
+                readOk = true;
+            }
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            readOk = false;
+        }
+        cache.defaultInverse = defaultInverse;
+        cache.valid = readOk && Halo3MatrixValid(cache.defaultInverse);
+        return emitAdjustedPoint();
+    }
+
+    // Copy one live world-space node matrix. ON follows Halo's exact
+    // render-interpolated node bank; a false accessor result takes the same raw
+    // fallback the visible renderer takes. OFF intentionally selects raw as an
+    // A/B. A signature/fault failure disables only this camera-parent feature.
+    bool Halo3ReadLiveNodeMatrix(int objectHandle, unsigned char* objectData,
+                                 int nodeIndex, Halo3Matrix4x3& out,
+                                 bool& outInterpolated)
+    {
+        outInterpolated = false;
+        if (!objectData || nodeIndex < 0 ||
+            nodeIndex >= kHalo3MaximumRenderNodes)
+            return false;
+
+        bool accessorReturned = false;
+        bool accessorFaulted = false;
+        if (g_config.vehicle_cam_smoothing)
+        {
+            if (g_halo3NodeBinding.load(std::memory_order_acquire) !=
+                    static_cast<uint8_t>(Halo3NodeBindingState::Installed) ||
+                !g_halo3InterpolatedNodes)
+                return false;
+            __try
+            {
+                Halo3Matrix4x3* matrices = nullptr;
+                int count = 0;
+                accessorReturned = g_halo3InterpolatedNodes(
+                    objectHandle, &matrices, &count) != 0;
+                if (accessorReturned)
+                {
+                    if (!matrices || count <= 0 ||
+                        count > kHalo3MaximumRenderNodes || nodeIndex >= count)
+                        return false;
+                    out = matrices[nodeIndex];
+                    outInterpolated = true;
+                }
+            }
+            __except (EXCEPTION_EXECUTE_HANDLER)
+            {
+                accessorFaulted = true;
+            }
+            if (accessorFaulted)
+            {
+                g_halo3NodeBinding.store(
+                    static_cast<uint8_t>(Halo3NodeBindingState::StockFallback),
+                    std::memory_order_release);
+                return false;
+            }
+        }
+
+        if (!accessorReturned)
+        {
+            bool rawOk = false;
+            __try
+            {
+                const int nodeByteSize = *reinterpret_cast<const int16_t*>(
+                    objectData + kHalo3ObjectNodeByteSizeOffset);
+                const int nodeCount = nodeByteSize > 0
+                    ? Halo3MatrixCountFromByteSize(
+                          static_cast<uint16_t>(nodeByteSize),
+                          kHalo3MaximumRenderNodes)
+                    : 0;
+                const int matrixOffset = *reinterpret_cast<const int16_t*>(
+                    objectData + kHalo3ObjectNodeMatricesOffset);
+                if (nodeCount > 0 && nodeIndex < nodeCount &&
+                    matrixOffset != 0)
+                {
+                    memcpy(&out, objectData + matrixOffset +
+                        static_cast<size_t>(nodeIndex) * sizeof(out),
+                        sizeof(out));
+                    rawOk = true;
+                }
+            }
+            __except (EXCEPTION_EXECUTE_HANDLER)
+            {
+                rawOk = false;
+            }
+            if (!rawOk)
+                return false;
+        }
+        return Halo3MatrixValid(out);
+    }
+
+    bool Halo3ReadPhaseMatchedHead(int unitHandle, bool interpolateNodes,
+                                   float outHeadWorld[3])
+    {
+        if (g_halo3HeadBinding.load(std::memory_order_acquire) !=
+                static_cast<uint8_t>(Halo3NodeBindingState::Installed) ||
+            !g_halo3MarkersInternal)
+            return false;
+        Halo3ObjectMarker marker{};
+        bool faulted = false;
+        int count = 0;
+        __try
+        {
+            count = g_halo3MarkersInternal(
+                unitHandle, kHalo3HeadMarkerSid, &marker, 1, false,
+                interpolateNodes);
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            faulted = true;
+        }
+        if (faulted)
+        {
+            g_halo3HeadBinding.store(
+                static_cast<uint8_t>(Halo3NodeBindingState::StockFallback),
+                std::memory_order_release);
+            return false;
+        }
+        if (count <= 0 || !Halo3MatrixValid(marker.matrix))
+            return false;
+
+        // The internal resolver is allowed to fall back to the raw unit bank
+        // even when interpolateNodes=true. A preflight cannot prove which bank
+        // it ultimately used. Recompose the returned marker-local matrix with
+        // the provider's unit node and require its final translation to match
+        // the resolver output. If it does not, omit head bounce for this frame;
+        // the exact vehicle-node-authored anchor remains valid.
+        if (interpolateNodes)
+        {
+            if (g_halo3NodeBinding.load(std::memory_order_acquire) !=
+                    static_cast<uint8_t>(Halo3NodeBindingState::Installed) ||
+                !g_halo3InterpolatedNodes || marker.nodeIndex < 0)
+                return false;
+
+            Halo3Matrix4x3 unitNode{};
+            bool providerReturned = false;
+            bool providerFaulted = false;
+            __try
+            {
+                Halo3Matrix4x3* matrices = nullptr;
+                int matrixCount = 0;
+                providerReturned = g_halo3InterpolatedNodes(
+                    unitHandle, &matrices, &matrixCount) != 0;
+                if (providerReturned)
+                {
+                    if (!matrices || matrixCount <= 0 ||
+                        matrixCount > kHalo3MaximumRenderNodes ||
+                        marker.nodeIndex >= matrixCount)
+                        return false;
+                    memcpy(&unitNode, &matrices[marker.nodeIndex],
+                           sizeof(unitNode));
+                }
+            }
+            __except (EXCEPTION_EXECUTE_HANDLER)
+            {
+                providerFaulted = true;
+            }
+            if (providerFaulted)
+            {
+                // This second provider call is only a provenance witness for
+                // optional head bounce. Its failure must not disarm the live
+                // vehicle-node anchor that already succeeded this frame.
+                g_halo3HeadBinding.store(
+                    static_cast<uint8_t>(Halo3NodeBindingState::StockFallback),
+                    std::memory_order_release);
+                return false;
+            }
+            float predicted[3] = {};
+            if (!providerReturned || !Halo3MatrixValid(marker.nodeMatrix) ||
+                !Halo3MatrixTransformPoint(
+                    unitNode, marker.nodeMatrix.position, predicted))
+                return false;
+            for (int i = 0; i < 3; ++i)
+            {
+                const float magnitude = fmaxf(
+                    1.0f, fmaxf(fabsf(predicted[i]),
+                                fabsf(marker.matrix.position[i])));
+                if (fabsf(predicted[i] - marker.matrix.position[i]) >
+                    8.0f * FLT_EPSILON * magnitude)
+                    return false;
+            }
+        }
+        memcpy(outHeadWorld, marker.matrix.position,
+               sizeof(marker.matrix.position));
+        return true;
     }
 
     // C3 first-person camera state, all owned by the engine camera thread
@@ -5541,6 +5916,19 @@ namespace
     {
         Halo3RestoreNativeSeatPatch();
         g_halo3VehicleSnapshot.store(0, std::memory_order_release);
+        Halo3VehicleTransform& xf = g_halo3VehicleTransform;
+        xf.seq.fetch_add(1, std::memory_order_acq_rel);
+        xf.anchorValid = 0;
+        xf.nodeInterpolated = 0;
+        xf.headParented = 0;
+        xf.valid.store(0, std::memory_order_relaxed);
+        xf.seq.fetch_add(1, std::memory_order_release);
+        g_halo3SeatNodeCache = {};
+        g_halo3HeadReference = {};
+        g_halo3VehicleFpDebounce = {};
+        g_halo3VehicleFpStable.store(
+            static_cast<uint32_t>(Halo3VehicleState::Unknown),
+            std::memory_order_release);
         g_halo3VehicleFaults.fetch_add(1, std::memory_order_relaxed);
         g_halo3VehicleBinding.store(
             static_cast<uint8_t>(Halo3VehicleBindingState::StockFallback),
@@ -5579,12 +5967,16 @@ namespace
         unsigned native = 0;
         float parentWindow[kHalo3ParentCaptureFloats];
         bool parentWindowValid = false;
+        unsigned char* parentObjectData = nullptr;
+        int unitParentNode = -1;
         // C7: an attached direct parent (mounted turret child) stores its
         // +0x50 frame parent-relative, so the sampler also captures the
         // carrier (grandparent) window to compose a world frame.
         int parentOfParent = -1;
         float grandWindow[kHalo3ParentCaptureFloats];
         bool grandWindowValid = false;
+        unsigned char* grandObjectData = nullptr;
+        int directParentNode = -1;
         bool chainTooDeep = false;
         uint32_t defIndex = 0xFFFFFFFFu;
         // C8: the carrier's own definition, so a mounted-turret gunner can be
@@ -5624,6 +6016,8 @@ namespace
                         data + kHalo3UnitSeatWordOffset);
                     if (seat != -1)
                     {
+                        unitParentNode = *reinterpret_cast<const int8_t*>(
+                            data + kHalo3ObjectParentNodeOffset);
                         parent = *reinterpret_cast<const int32_t*>(
                             data + kHalo3ObjectParentOffset);
                         if (parent != -1)
@@ -5639,6 +6033,11 @@ namespace
                             if (parentData &&
                                 parentKind == kHalo3ObjectKindVehicle)
                             {
+                                parentObjectData = parentData;
+                                directParentNode =
+                                    *reinterpret_cast<const int8_t*>(
+                                        parentData +
+                                        kHalo3ObjectParentNodeOffset);
                                 const uint16_t definitionIndex =
                                     *reinterpret_cast<const uint16_t*>(
                                         parentData);
@@ -5667,6 +6066,7 @@ namespace
                                             kHalo3ObjectEntryDataOffset);
                                     if (grandData)
                                     {
+                                        grandObjectData = grandData;
                                         memcpy(grandWindow,
                                                grandData +
                                                    kHalo3ParentCaptureBase,
@@ -5756,10 +6156,9 @@ namespace
             Halo3VehicleTransform& xf = g_halo3VehicleTransform;
             Halo3Frame world{};
             bool frameOk = false;
-            // C12: the raw bounding centre from the same capture window,
-            // handed to the phase lock as the render-side witness.
-            float rawBounds[3] = {0.0f, 0.0f, 0.0f};
-            bool rawBoundsOk = false;
+            float frameBoundsCenter[3] = {};
+            float frameBoundsRadius = 0.0f;
+            bool frameBoundsValid = false;
             if (seated && parentWindowValid && !chainTooDeep)
             {
                 const auto frameFrom = [](const float* window) {
@@ -5828,10 +6227,13 @@ namespace
                         frameOk = false;
                         frameStatus = Halo3FrameStatus::Insane;
                     }
-                    rawBounds[0] = center[0];
-                    rawBounds[1] = center[1];
-                    rawBounds[2] = center[2];
-                    rawBoundsOk = true;
+                    else
+                    {
+                        memcpy(frameBoundsCenter, center,
+                               sizeof(frameBoundsCenter));
+                        frameBoundsRadius = radius;
+                        frameBoundsValid = true;
+                    }
                 }
             }
             else if (seated && chainTooDeep)
@@ -5840,6 +6242,143 @@ namespace
             }
             if (frameOk)
             {
+                // C18: select the node Halo actually attached this occupant to.
+                // A normal rider's unit+0x14 names a node on the direct parent.
+                // A mounted gunner's direct parent is the gun child, whose own
+                // +0x14 names its attachment node on the carrier. The user's
+                // mounted points were authored in that carrier's tag frame.
+                const int nodeObject =
+                    mountedTurret ? parentOfParent : parent;
+                unsigned char* nodeObjectData =
+                    mountedTurret ? grandObjectData : parentObjectData;
+                const uint32_t nodeDefinition =
+                    mountedTurret ? carrierDefIndex : defIndex;
+                const int nodeIndex =
+                    mountedTurret ? directParentNode : unitParentNode;
+                // Forward means toward the windshield and up means out of the
+                // seat. They are placement coordinates in vehicle/tag space,
+                // so they must go through the same live node as the Blender
+                // point; applying them later in HMD/world axes would slide a
+                // tuned camera against the mesh while turning or banking.
+                const int trimSlot = ConfigSeatTrimSlot(
+                    static_cast<int>(anchorId), seat, mountedTurret);
+                const float trimScale = g_worldScale.load();
+                const float trimForward =
+                    ConfigSeatCamForward(g_config, trimSlot) * trimScale;
+                const float trimUp =
+                    ConfigSeatCamUp(g_config, trimSlot) * trimScale;
+
+                Halo3Frame meshFrame = world;
+                Halo3Matrix4x3 liveNode{};
+                float authoredNodeLocal[3] = {};
+                float cameraAnchor[3] = {};
+                bool nodeInterpolated = false;
+                bool anchorValid = false;
+                bool headParented = false;
+                const bool haveLiveNode =
+                    frameBoundsValid &&
+                    Halo3ResolveAuthoredNodeLocal(
+                        generation, nodeObject, nodeDefinition, nodeIndex,
+                        anchorId, seat, mountedTurret, trimForward, trimUp,
+                        authoredNodeLocal) &&
+                    Halo3ReadLiveNodeMatrix(
+                        nodeObject, nodeObjectData, nodeIndex, liveNode,
+                        nodeInterpolated);
+                if (haveLiveNode)
+                {
+                    memcpy(meshFrame.pos, liveNode.position,
+                           sizeof(meshFrame.pos));
+                    memcpy(meshFrame.fwd, liveNode.forward,
+                           sizeof(meshFrame.fwd));
+                    memcpy(meshFrame.up, liveNode.up, sizeof(meshFrame.up));
+
+                    anchorValid = Halo3MatrixTransformPoint(
+                        liveNode, authoredNodeLocal, cameraAnchor) &&
+                        Halo3AnchorWithinBounds(
+                            cameraAnchor, frameBoundsCenter, frameBoundsRadius,
+                            2.0f);
+
+                    // The attached mod's natural bounce comes from this exact
+                    // phase-matched occupant-head marker. The enum-only seat
+                    // debounce is much shorter than Halo's boarding and
+                    // seat-switch animations, so it cannot define H0. Keep the
+                    // exact authored anchor until this concrete seat identity's
+                    // head has aged and remained still in node space.
+                    const bool stableSeat =
+                        g_halo3VehicleFpStable.load(
+                            std::memory_order_relaxed) ==
+                        static_cast<uint32_t>(Halo3VehicleState::Vehicle);
+                    Halo3HeadReference& headRef = g_halo3HeadReference;
+                    const bool sameHeadSeat =
+                        headRef.generation == generation &&
+                        headRef.unitHandle == unit &&
+                        headRef.parentHandle == parent &&
+                        headRef.nodeObjectHandle == nodeObject &&
+                        headRef.seatIndex == seat &&
+                        headRef.nodeIndex == nodeIndex &&
+                        headRef.interpolateNodes ==
+                            g_config.vehicle_cam_smoothing &&
+                        headRef.nodeInterpolated == nodeInterpolated;
+                    if (!sameHeadSeat || !stableSeat)
+                    {
+                        headRef = {};
+                        headRef.generation = generation;
+                        headRef.unitHandle = unit;
+                        headRef.parentHandle = parent;
+                        headRef.nodeObjectHandle = nodeObject;
+                        headRef.seatIndex = seat;
+                        headRef.nodeIndex = nodeIndex;
+                        headRef.interpolateNodes =
+                            g_config.vehicle_cam_smoothing;
+                        headRef.nodeInterpolated = nodeInterpolated;
+                    }
+                    float headWorld[3] = {};
+                    float currentHeadLocal[3] = {};
+                    if (anchorValid && stableSeat &&
+                        Halo3ReadPhaseMatchedHead(
+                            unit, nodeInterpolated, headWorld) &&
+                        Halo3MatrixInverseTransformPoint(
+                            liveNode, headWorld, currentHeadLocal))
+                    {
+                        float headAnchor[3] = {};
+                        if (headRef.settle.Update(nowMs, currentHeadLocal) &&
+                            Halo3HeadLocalDeltaWithinLimit(
+                                currentHeadLocal, headRef.settle.reference) &&
+                            Halo3ComputeHeadParentedPoint(
+                                liveNode, headWorld, headRef.settle.reference,
+                                authoredNodeLocal, headAnchor) &&
+                            Halo3AnchorWithinBounds(
+                                headAnchor, frameBoundsCenter,
+                                frameBoundsRadius, 2.0f))
+                        {
+                            memcpy(cameraAnchor, headAnchor,
+                                   sizeof(cameraAnchor));
+                            headParented = true;
+                        }
+                        else if (headRef.settle.valid &&
+                                 !Halo3HeadLocalDeltaWithinLimit(
+                                     currentHeadLocal,
+                                     headRef.settle.reference))
+                        {
+                            // A large later animation is not natural bounce.
+                            // Return immediately to the exact Blender point and
+                            // require the same identity to settle again.
+                            headRef.settle = {};
+                            headRef.settle.Update(nowMs, currentHeadLocal);
+                        }
+                    }
+                    else if (!headRef.settle.valid)
+                    {
+                        // A quiet window must consist of valid phase-matched
+                        // samples; a gap restarts observation, never the camera.
+                        headRef.settle = {};
+                    }
+                }
+                else
+                {
+                    g_halo3HeadReference = {};
+                }
+
                 // C9 diagnostic (log-only): the user reports the vehicle mesh
                 // "vibrating, fighting against the camera override". The two
                 // candidate causes look completely different here. If the
@@ -5854,11 +6393,22 @@ namespace
                 Halo3MotionDiag& diag = g_halo3MotionDiag;
                 const uint32_t seen =
                     diag.frames.load(std::memory_order_relaxed);
+                if (nodeInterpolated)
+                    diag.interpolatedNode.fetch_add(
+                        1, std::memory_order_relaxed);
+                else if (haveLiveNode)
+                    diag.rawNode.fetch_add(1, std::memory_order_relaxed);
+                if (headParented)
+                    diag.headParented.fetch_add(1,
+                                                std::memory_order_relaxed);
+                if (!anchorValid)
+                    diag.anchorFallback.fetch_add(1,
+                                                  std::memory_order_relaxed);
                 if (seen)
                 {
-                    const float dx = world.pos[0] - diag.lastPos[0];
-                    const float dy = world.pos[1] - diag.lastPos[1];
-                    const float dz = world.pos[2] - diag.lastPos[2];
+                    const float dx = meshFrame.pos[0] - diag.lastPos[0];
+                    const float dy = meshFrame.pos[1] - diag.lastPos[1];
+                    const float dz = meshFrame.pos[2] - diag.lastPos[2];
                     const float step = sqrtf(dx * dx + dy * dy + dz * dz);
                     if (step > 1e-5f)
                     {
@@ -5869,9 +6419,9 @@ namespace
                             diag.maxPosStep.store(step,
                                                   std::memory_order_relaxed);
                     }
-                    const float dot = world.up[0] * diag.lastUp[0] +
-                        world.up[1] * diag.lastUp[1] +
-                        world.up[2] * diag.lastUp[2];
+                    const float dot = meshFrame.up[0] * diag.lastUp[0] +
+                        meshFrame.up[1] * diag.lastUp[1] +
+                        meshFrame.up[2] * diag.lastUp[2];
                     const float tilt =
                         acosf(Clamp(dot, -1.0f, 1.0f)) * 57.2957795f;
                     if (tilt > 0.001f)
@@ -5886,54 +6436,32 @@ namespace
                     }
                 }
                 diag.frames.store(seen + 1, std::memory_order_relaxed);
-                memcpy(diag.lastPos, world.pos, sizeof(diag.lastPos));
-                memcpy(diag.lastUp, world.up, sizeof(diag.lastUp));
+                memcpy(diag.lastPos, meshFrame.pos, sizeof(diag.lastPos));
+                memcpy(diag.lastUp, meshFrame.up, sizeof(diag.lastUp));
 
-                // C10: publish the frame walked across the simulation tick,
-                // not the raw 60 Hz staircase. The gate above and the counters
-                // above both stay on the raw value — the gate because that is
-                // what the engine actually said, the counters because they are
-                // measuring the tick rate itself.
-                const Halo3Frame smooth = Halo3InterpolateFrame(
-                    g_halo3FrameInterp, world, Halo3NowSeconds(),
-                    g_config.vehicle_cam_smoothing,
-                    &g_halo3PhaseLock,
-                    rawBoundsOk ? rawBounds : nullptr);
-                g_halo3SmoothingActive.store(
-                    g_halo3FrameInterp.tickKnown ? 1u : 0u,
-                    std::memory_order_relaxed);
-                g_halo3TickSeconds.store(
-                    static_cast<float>(g_halo3FrameInterp.tick),
-                    std::memory_order_relaxed);
-                // C12: mirror the phase lock for the worker log. Every state
-                // short of "locked" is reported, per the no-silent-fallback
-                // rule, and "not render-smooth" is only claimed once a tick
-                // window actually judged it.
-                uint32_t phaseState = 0;
-                if (g_halo3FrameInterp.tickKnown)
-                {
-                    const Halo3PhaseLock& pl = g_halo3PhaseLock;
-                    if (pl.leadValid)
-                        phaseState = 4;
-                    else if (pl.refValid && pl.smoothEvaluated && !pl.smooth)
-                        phaseState = 3;
-                    else if (pl.refValid)
-                        phaseState = 2;
-                    else
-                        phaseState = 1;
-                }
-                g_halo3PhaseLockState.store(phaseState,
-                                            std::memory_order_relaxed);
-                g_halo3PhaseLeadTicks.store(g_halo3PhaseLock.lead,
+                // C18 already consumes Halo's render-interpolated node bank.
+                // Feeding it through C10-C15 would double-filter it and
+                // recreate the catch-up lag. Leave that predictor dormant.
+                g_halo3FrameInterp.valid = false;
+                g_halo3PhaseLock = Halo3PhaseLock{};
+                g_halo3SmoothingActive.store(0, std::memory_order_relaxed);
+                g_halo3TickSeconds.store(0.0f, std::memory_order_relaxed);
+                g_halo3PhaseLockState.store(0, std::memory_order_relaxed);
+                g_halo3PhaseLeadTicks.store(0.0f,
                                             std::memory_order_relaxed);
 
                 xf.seq.fetch_add(1, std::memory_order_acq_rel);  // -> odd
-                memcpy(xf.pos, smooth.pos, sizeof(xf.pos));
-                memcpy(xf.fwd, smooth.fwd, sizeof(xf.fwd));
-                memcpy(xf.up, smooth.up, sizeof(xf.up));
-                memcpy(xf.rawFwd, world.fwd, sizeof(xf.rawFwd));
+                memcpy(xf.pos, meshFrame.pos, sizeof(xf.pos));
+                memcpy(xf.fwd, meshFrame.fwd, sizeof(xf.fwd));
+                memcpy(xf.up, meshFrame.up, sizeof(xf.up));
+                memcpy(xf.rawFwd, meshFrame.fwd, sizeof(xf.rawFwd));
+                memcpy(xf.anchor, cameraAnchor, sizeof(xf.anchor));
+                xf.anchorValid = anchorValid ? 1u : 0u;
+                xf.nodeInterpolated = nodeInterpolated ? 1u : 0u;
+                xf.headParented = headParented ? 1u : 0u;
                 xf.directType = directType;
                 xf.seatIndex = seat;
+                xf.parentHandle = parent;
                 xf.nativeInVehicle = static_cast<int32_t>(native);
                 xf.vehicleId = static_cast<uint32_t>(anchorId);
                 xf.mountedTurret = mountedTurret ? 1 : 0;
@@ -5944,6 +6472,9 @@ namespace
             else if (xf.valid.load(std::memory_order_relaxed))
             {
                 xf.seq.fetch_add(1, std::memory_order_acq_rel);  // -> odd
+                xf.anchorValid = 0;
+                xf.nodeInterpolated = 0;
+                xf.headParented = 0;
                 xf.valid.store(0, std::memory_order_relaxed);
                 xf.seq.fetch_add(1, std::memory_order_release);  // -> even
                 // Leaving the seat starts the diagnostic window over, so one
@@ -5959,6 +6490,16 @@ namespace
                     0, std::memory_order_relaxed);
                 g_halo3MotionDiag.tiltChanged.store(
                     0, std::memory_order_relaxed);
+                g_halo3MotionDiag.interpolatedNode.store(
+                    0, std::memory_order_relaxed);
+                g_halo3MotionDiag.rawNode.store(
+                    0, std::memory_order_relaxed);
+                g_halo3MotionDiag.headParented.store(
+                    0, std::memory_order_relaxed);
+                g_halo3MotionDiag.anchorFallback.store(
+                    0, std::memory_order_relaxed);
+                g_halo3SeatNodeCache = {};
+                g_halo3HeadReference = {};
             }
         }
         const Halo3VehicleState state = unit == -1
@@ -6126,7 +6667,12 @@ namespace
         float fwd[3] = {0.0f, 0.0f, 0.0f};
         float rawFwd[3] = {0.0f, 0.0f, 0.0f};
         float up[3] = {0.0f, 0.0f, 0.0f};
+        float anchor[3] = {0.0f, 0.0f, 0.0f};
+        bool anchorValid = false;
+        bool nodeInterpolated = false;
+        bool headParented = false;
         int seatIndex = -1;
+        int parentHandle = -1;
         uint32_t identity = static_cast<uint32_t>(Halo3VehicleId::Unknown);
         bool mounted = false;
     };
@@ -6146,57 +6692,50 @@ namespace
         memcpy(out.fwd, xf.fwd, sizeof(out.fwd));
         memcpy(out.rawFwd, xf.rawFwd, sizeof(out.rawFwd));
         memcpy(out.up, xf.up, sizeof(out.up));
+        memcpy(out.anchor, xf.anchor, sizeof(out.anchor));
+        out.anchorValid = xf.anchorValid != 0;
+        out.nodeInterpolated = xf.nodeInterpolated != 0;
+        out.headParented = xf.headParented != 0;
         out.seatIndex = xf.seatIndex;
+        out.parentHandle = xf.parentHandle;
         out.identity = xf.vehicleId;
         out.mounted = xf.mountedTurret != 0;
         if (xf.seq.load(std::memory_order_acquire) != seq)
             return false;
         for (int i = 0; i < 3; ++i)
             if (!isfinite(out.pos[i]) || !isfinite(out.fwd[i]) ||
-                !isfinite(out.up[i]))
+                !isfinite(out.rawFwd[i]) || !isfinite(out.up[i]) ||
+                (out.anchorValid && !isfinite(out.anchor[i])))
                 return false;
         const float fLen = out.fwd[0] * out.fwd[0] + out.fwd[1] * out.fwd[1] +
             out.fwd[2] * out.fwd[2];
+        const float rawFLen = out.rawFwd[0] * out.rawFwd[0] +
+            out.rawFwd[1] * out.rawFwd[1] +
+            out.rawFwd[2] * out.rawFwd[2];
         const float uLen = out.up[0] * out.up[0] + out.up[1] * out.up[1] +
             out.up[2] * out.up[2];
         const float fu = out.fwd[0] * out.up[0] + out.fwd[1] * out.up[1] +
             out.fwd[2] * out.up[2];
-        if (fabsf(fLen - 1.0f) > 0.05f || fabsf(uLen - 1.0f) > 0.05f ||
+        if (fabsf(fLen - 1.0f) > 0.05f ||
+            fabsf(rawFLen - 1.0f) > 0.05f ||
+            fabsf(uLen - 1.0f) > 0.05f ||
             fabsf(fu) > 0.15f)
             return false;
         return true;
     }
 
-    // C5: place the user's Blender-authored seat point in the world using the
-    // measured vehicle transform. A seat with no authored point returns false
-    // and the stock chase view stands.
-    bool Halo3ComputeAuthoredAnchor(float out[3], int* outTrimSlot)
+    // C18: the sampler has already converted the Blender/tag-space point
+    // through the node's stored default inverse and the live rendered node.
+    // Consume that exact world point directly. Applying the authored point to
+    // the node frame a second time would shift every camera by its full offset.
+    bool Halo3ComputeAuthoredAnchor(float out[3])
     {
         Halo3SeatSnapshot seat;
-        if (!Halo3ReadSeatSnapshot(seat))
+        if (!Halo3ReadSeatSnapshot(seat) || !seat.anchorValid)
             return false;
         // C13: the trim slot is keyed by SEAT, not just vehicle — a mounted
         // gunner shares seat index 0 with the driver, so it takes its own.
-        if (outTrimSlot)
-            *outTrimSlot = ConfigSeatTrimSlot(static_cast<int>(seat.identity),
-                                              seat.seatIndex, seat.mounted);
-        // A mounted gunner's point is keyed and framed by its CARRIER, so its
-        // seat index on the gun tag (always 0) is the right key there too.
-        const Halo3SeatPoint* point = Halo3FindSeatPoint(
-            static_cast<Halo3VehicleId>(seat.identity), seat.seatIndex,
-            seat.mounted);
-        if (!point)
-            return false;
-        const float left[3] = {
-            seat.up[1] * seat.fwd[2] - seat.up[2] * seat.fwd[1],
-            seat.up[2] * seat.fwd[0] - seat.up[0] * seat.fwd[2],
-            seat.up[0] * seat.fwd[1] - seat.up[1] * seat.fwd[0]};
-        out[0] = seat.pos[0] + seat.fwd[0] * point->x + left[0] * point->y +
-            seat.up[0] * point->z;
-        out[1] = seat.pos[1] + seat.fwd[1] * point->x + left[1] * point->y +
-            seat.up[1] * point->z;
-        out[2] = seat.pos[2] + seat.fwd[2] * point->x + left[2] * point->y +
-            seat.up[2] * point->z;
+        memcpy(out, seat.anchor, sizeof(seat.anchor));
         return true;
     }
 
@@ -6294,11 +6833,47 @@ namespace
     void Halo3ApplySeatYawFollow()
     {
         Halo3SeatSnapshot seat;
+        const bool fpActive = Halo3VehicleFpActive();
+        const bool haveAuthoredSeat =
+            fpActive && Halo3ReadSeatSnapshot(seat) && seat.anchorValid;
         const bool active =
-            Halo3VehicleFpActive() && Halo3ReadSeatSnapshot(seat) &&
+            haveAuthoredSeat &&
             Halo3SeatFollowsHull(static_cast<Halo3VehicleId>(seat.identity),
                                  seat.seatIndex, seat.mounted);
         const float weight = g_config.vehicle_view_follow;
+
+        // Position-neutral and yaw-neutral are different transactions. Every
+        // concrete authored seat gets a fresh OpenXR position zero exactly once,
+        // including a seat switch, a quick genuine re-entry, or a stationary
+        // turret whose yaw intentionally does not follow. A torn/missing frame
+        // leaves the last key intact, so it cannot re-zero a player's lean.
+        static Halo3SeatPositionKey positionSeat;
+        const bool positionGateStable =
+            g_config.vehicle_first_person &&
+            g_halo3VehicleFpStable.load(std::memory_order_relaxed) ==
+                static_cast<uint32_t>(Halo3VehicleState::Vehicle);
+        if (!positionGateStable)
+            positionSeat = {};
+        if (haveAuthoredSeat)
+        {
+            const uint32_t generation =
+                g_halo3RuntimeGeneration.load(std::memory_order_relaxed);
+            if (!positionSeat.Matches(
+                    generation, seat.parentHandle, seat.seatIndex,
+                    seat.identity, seat.mounted))
+            {
+                float positionQ[4], position[3];
+                if (VR_GetHeadPose(positionQ, position))
+                {
+                    memcpy(g_headPosRef, position, sizeof(g_headPosRef));
+                    g_needPosRecenter.store(false,
+                                            std::memory_order_relaxed);
+                    positionSeat.Set(
+                        generation, seat.parentHandle, seat.seatIndex,
+                        seat.identity, seat.mounted);
+                }
+            }
+        }
 
         // C10: settled seat entry rebases "straight ahead" onto the hull's own
         // nose. The generic recenter cannot do this — it reads the heading off
@@ -6306,8 +6881,8 @@ namespace
         // vehicle from the entry animation, so whichever way the player
         // happened to walk in became their forward.
         //
-        // Rate-limited on purpose. The C9 session logged 42 recenters, several
-        // of them under 200 ms apart, because the debounced seat state flaps
+        // Yaw is rate-limited on purpose. The C9 session logged 42 recenters,
+        // several under 200 ms apart, because the debounced seat state flaps
         // whenever the player-unit read blips. A re-snap mid-drive would yank
         // the world around to put the nose under wherever the head happened to
         // be pointing, so only an entry at least 1.5 s after the last one
@@ -6341,11 +6916,9 @@ namespace
             }
         }
 
-        // C16: fed the RAW hull forward, never the blended one. The follow
-        // INTEGRATES the heading step it is handed, so any rotation the blend
-        // fails to deliver — because it is bounded, or because the blend
-        // stalls — is lost for good and shows up as the car slowly rotating
-        // out from under the camera. The raw hull heading cannot lose any.
+        // C18: feed the same rendered seat/attachment-node forward used by the
+        // anchor. The follow integrates every heading step, so a synthetic
+        // predictor or a different frame would accumulate as visible drift.
         const float delta =
             Halo3SeatYawDelta(g_halo3SeatYaw, seat.rawFwd, active, weight);
         if (delta != 0.0f)
@@ -6522,6 +7095,44 @@ namespace
     // distinct probe capture, plus a one-shot StockFallback notice.
     void LogHalo3VehicleProbeIfNew()
     {
+        // The node anchor and occupant bounce are independent optional
+        // transactions. Runtime faults are raised from the camera thread and
+        // reported here so neither can degrade silently.
+        static uint8_t loggedNodeBinding = 0xFF;
+        static uint8_t loggedHeadBinding = 0xFF;
+        const uint8_t nodeBinding =
+            g_halo3NodeBinding.load(std::memory_order_acquire);
+        if (nodeBinding != loggedNodeBinding &&
+            nodeBinding != static_cast<uint8_t>(
+                Halo3NodeBindingState::NotInstalled))
+        {
+            if (nodeBinding == static_cast<uint8_t>(
+                    Halo3NodeBindingState::Installed))
+                LOG("H3 vehicle node anchor: Installed; authored points follow "
+                    "Halo's rendered seat/attachment nodes");
+            else
+                LOG("H3 vehicle node anchor: StockFallback; rendered-node "
+                    "source unavailable (smoothing ON stays stock; raw-node A/B "
+                    "remains available), camera core unaffected");
+            loggedNodeBinding = nodeBinding;
+        }
+        const uint8_t headBinding =
+            g_halo3HeadBinding.load(std::memory_order_acquire);
+        if (headBinding != loggedHeadBinding &&
+            headBinding != static_cast<uint8_t>(
+                Halo3NodeBindingState::NotInstalled))
+        {
+            if (headBinding == static_cast<uint8_t>(
+                    Halo3NodeBindingState::Installed))
+                LOG("H3 vehicle occupant motion: Installed; animated head "
+                    "translation is relative to the exact authored baseline");
+            else
+                LOG("H3 vehicle occupant motion: StockFallback; relative head "
+                    "bounce disabled, exact node anchor and camera core "
+                    "unaffected");
+            loggedHeadBinding = headBinding;
+        }
+
         static uint32_t nativeSeatSerialLogged = 0;
         const uint32_t nativeSeatSerial =
             g_halo3NativeSeatSerial.load(std::memory_order_acquire);
@@ -6684,15 +7295,9 @@ namespace
         }
     }
 
-    // C9 (log-only), called from the 50 ms worker. One line per 10 s of
-    // driving that tells the two candidate causes of the reported mesh
-    // vibration apart. "hull moved on N%" of sampled camera frames near 100%
-    // means the hull advances every frame and the anchor is in step with the
-    // renderer; well under that means the engine only moves it on its own
-    // simulation tick while MCC renders faster, so a camera pinned to the raw
-    // value staircases against an interpolated mesh. A large tilt with a high
-    // move percentage is suspension rock instead — which the anchor follows
-    // and the deliberately horizon-stable view does not.
+    // C18, called from the 50 ms worker. These counts identify the exact node
+    // source and whether relative occupant-head motion was available. No
+    // logging occurs in the camera hook.
     void LogHalo3SeatMotionIfDriving()
     {
         static uint64_t nextMs = 0;
@@ -6712,31 +7317,30 @@ namespace
         const uint32_t moved = diag.posChanged.load(std::memory_order_relaxed);
         const uint32_t tilted =
             diag.tiltChanged.load(std::memory_order_relaxed);
+        const uint32_t interpolatedNode =
+            diag.interpolatedNode.load(std::memory_order_relaxed);
+        const uint32_t rawNode = diag.rawNode.load(std::memory_order_relaxed);
+        const uint32_t headParented =
+            diag.headParented.load(std::memory_order_relaxed);
+        const uint32_t anchorFallback =
+            diag.anchorFallback.load(std::memory_order_relaxed);
         const double scale = 100.0 / static_cast<double>(frames);
-        const float tickMs =
-            g_halo3TickSeconds.load(std::memory_order_relaxed) * 1000.0f;
-        // C12: which stage the display-phase lock reached. Stage 2 sticking
-        // around means the bounding centre is NOT render-interpolated on this
-        // machine and the C11 pacing stands — that is the loud signal to go
-        // find the real render transform instead.
-        static const char* const kPhaseNames[5] = {
-            "off", "waiting for a parked latch", "latched, measuring",
-            "bounds not render-smooth, C11 pacing", "locked"};
-        uint32_t phaseState =
-            g_halo3PhaseLockState.load(std::memory_order_relaxed);
-        if (phaseState > 4)
-            phaseState = 0;
         LOG("H3 seat motion: %u sampled frames, hull moved on %u (%.0f%%), "
-            "tilted on %u (%.0f%%); largest raw step %.4f wu, largest raw tilt "
-            "%.2f deg; seat %s across a %.2f ms tick, blend %.2f; witness %s; "
+             "tilted on %u (%.0f%%); largest raw step %.4f wu, largest raw tilt "
+            "%.2f deg; node interpolated %u (%.0f%%), raw %u (%.0f%%), "
+            "head-parented %u (%.0f%%), anchor fallback %u (%.0f%%); "
+            "seat frame %s; "
             "view follow %.2f, hull turned %.0f deg since entry, steering by %s",
             frames, moved, moved * scale, tilted, tilted * scale,
             diag.maxPosStep.load(std::memory_order_relaxed),
             diag.maxTiltDeg.load(std::memory_order_relaxed),
-            g_config.vehicle_cam_smoothing ? "SMOOTHED" : "BOLTED to the hull",
-            tickMs,
-            g_halo3BlendAlpha.load(std::memory_order_relaxed),
-            kPhaseNames[phaseState],
+            interpolatedNode, interpolatedNode * scale,
+            rawNode, rawNode * scale,
+            headParented, headParented * scale,
+            anchorFallback, anchorFallback * scale,
+            g_config.vehicle_cam_smoothing
+                ? "RENDERED NODE (no synthetic predictor)"
+                : "RAW NODE (explicit smoothing-off A/B)",
             g_config.vehicle_view_follow,
             g_halo3SeatYawTotal.load(std::memory_order_relaxed) * 57.2957795f,
             g_halo3SeatAuthorsSteering.load(std::memory_order_relaxed)
@@ -6747,6 +7351,10 @@ namespace
         diag.frames.store(0, std::memory_order_relaxed);
         diag.posChanged.store(0, std::memory_order_relaxed);
         diag.tiltChanged.store(0, std::memory_order_relaxed);
+        diag.interpolatedNode.store(0, std::memory_order_relaxed);
+        diag.rawNode.store(0, std::memory_order_relaxed);
+        diag.headParented.store(0, std::memory_order_relaxed);
+        diag.anchorFallback.store(0, std::memory_order_relaxed);
         diag.maxPosStep.store(0.0f, std::memory_order_relaxed);
         diag.maxTiltDeg.store(0.0f, std::memory_order_relaxed);
     }
@@ -9286,6 +9894,25 @@ namespace
         "48 8B 05 ?? ?? ?? ?? 0F B7 C9 8B 54 C8 04 85 D2 75 04 33 D2 EB 0B "
         "48 8B 05 ?? ?? ?? ?? 48 8D 14 90 33 C0 45 33 C0 "
         "48 81 C2 C0 02 00 00 B9 0B 00 00 00 83 3A 00";
+    // C18 native render-node path. halo3.dll+0x1846AC returns the exact
+    // interpolated 0x34-byte node bank consumed by both the visible-object
+    // renderer (+0x3496F3 caller) and the native marker resolver
+    // (+0x343E6F caller). Its fixed prologue and argument moves prove the ABI:
+    // object handle, matrix-bank output, node-count output.
+    inline constexpr uintptr_t kHalo3InterpolatedNodesExpectedRva = 0x1846AC;
+    const char* kHalo3InterpolatedNodesSig =
+        "48 8B C4 48 89 58 08 48 89 68 10 48 89 70 18 "
+        "57 41 54 41 55 41 56 41 57 48 83 EC 30 "
+        "4C 8B EA 0F 29 70 C8 48 8D 50 20 8B F9 4D 8B F0";
+    // Internal object_get_markers_by_string_id implementation. The full
+    // six-argument ABI is proven by Halo's unit-camera evaluator, which calls
+    // it for the occupant head with localOnly=false/interpolateNodes=true.
+    // The 0x70-byte output carries final world translation at +0x60.
+    inline constexpr uintptr_t kHalo3MarkersInternalExpectedRva = 0x343D74;
+    const char* kHalo3MarkersInternalSig =
+        "48 8B C4 48 89 58 08 48 89 68 10 48 89 70 18 "
+        "66 44 89 48 20 57 41 54 41 55 41 56 41 57 48 83 EC 70 "
+        "45 33 F6 8B E9 49 8B F8 44 8B FA 8B D9 45 0F B7 DE";
 
 #if HALOMCCVR_EXPERIMENTAL_ODST_BRINGUP
     const char* kOdstFpInterpolateSig =
@@ -9641,21 +10268,29 @@ namespace
                     "hook failed; native camera recoil/shake remains active");
         }
 
-        // Halo 3 vehicle probe identities (log-only candidate). Optional:
-        // resolve failure leaves the probe absent and every future vehicle
-        // feature stock; the camera core is never affected. All three targets
-        // are leaf/read-only engine functions the probe calls SEH-guarded from
-        // proven engine threads (docs/HALO3-VEHICLE-EVIDENCE.md).
+        // Halo 3 vehicle-camera transactions. The three established vehicle
+        // identities own only the base sampler. Render-node interpolation and
+        // animated-head lookup are independent optional features: either may
+        // fall back to stock without disarming the base vehicle path or camera.
         {
             g_halo3VehicleBinding.store(
                 static_cast<uint8_t>(Halo3VehicleBindingState::NotInstalled),
+                std::memory_order_release);
+            g_halo3NodeBinding.store(
+                static_cast<uint8_t>(Halo3NodeBindingState::NotInstalled),
+                std::memory_order_release);
+            g_halo3HeadBinding.store(
+                static_cast<uint8_t>(Halo3NodeBindingState::NotInstalled),
                 std::memory_order_release);
             g_halo3VehicleSnapshot.store(0, std::memory_order_release);
             g_halo3PlayerUnitGetter = nullptr;
             g_halo3UnitInVehicle = nullptr;
             g_halo3VehicleTypeAccessor = nullptr;
+            g_halo3InterpolatedNodes = nullptr;
+            g_halo3MarkersInternal = nullptr;
             g_halo3TagInstanceTable = nullptr;
             g_halo3TagDataBase = nullptr;
+
             const uintptr_t nativeHit =
                 sig::Find(base, size, kHalo3UnitInVehicleSig);
             const uintptr_t getterHit =
@@ -9695,8 +10330,8 @@ namespace
                     static_cast<uint8_t>(Halo3VehicleBindingState::Installed),
                     std::memory_order_release);
                 LOG("H3 vehicle evidence: resolved unit_in_vehicle=+0x%llX "
-                    "player_unit=+0x%llX type_accessor=+0x%llX [unique; "
-                    "expected +0x%llX/+0x%llX/+0x%llX]; tag globals "
+                    "player_unit=+0x%llX type_accessor=+0x%llX "
+                    "[unique; expected +0x%llX/+0x%llX/+0x%llX]; tag globals "
                     "instanceTable=+0x%llX tagBase=+0x%llX (decoded from the "
                     "matched body)",
                     (unsigned long long)(nativeHit - base),
@@ -9714,12 +10349,85 @@ namespace
             }
             else
             {
+                g_halo3VehicleBinding.store(
+                    static_cast<uint8_t>(
+                        Halo3VehicleBindingState::StockFallback),
+                    std::memory_order_release);
                 LOG("H3 vehicle evidence: signature resolve failed "
                     "(native=%d/%d getter=%d/%d type=%d/%d found/unique); "
-                    "vehicle probe absent, all vehicle behavior stock",
+                    "vehicle transaction absent, all vehicle behavior stock; "
+                    "camera core unaffected",
                     nativeHit ? 1 : 0, nativeUnique ? 1 : 0,
                     getterHit ? 1 : 0, getterUnique ? 1 : 0,
                     typeHit ? 1 : 0, typeUnique ? 1 : 0);
+            }
+
+            const uintptr_t nodeHit =
+                sig::Find(base, size, kHalo3InterpolatedNodesSig);
+            const bool nodeUnique = nodeHit && !sig::Find(
+                nodeHit + 1, base + size - nodeHit - 1,
+                kHalo3InterpolatedNodesSig);
+            if (nodeUnique)
+            {
+                g_halo3InterpolatedNodes =
+                    reinterpret_cast<Halo3InterpolatedNodesFn>(nodeHit);
+                g_halo3NodeBinding.store(
+                    static_cast<uint8_t>(Halo3NodeBindingState::Installed),
+                    std::memory_order_release);
+                LOG("H3 vehicle render nodes: Installed provider=+0x%llX "
+                    "[unique; expected +0x%llX]",
+                    (unsigned long long)(nodeHit - base),
+                    (unsigned long long)
+                        kHalo3InterpolatedNodesExpectedRva);
+            }
+            else
+            {
+                g_halo3NodeBinding.store(
+                    static_cast<uint8_t>(
+                        Halo3NodeBindingState::StockFallback),
+                    std::memory_order_release);
+                LOG("H3 vehicle render nodes: StockFallback "
+                    "(provider=%d/%d found/unique, first=+0x%llX, "
+                    "expected +0x%llX); smoothing ON stays stock, raw-node A/B "
+                    "and camera core unaffected",
+                    nodeHit ? 1 : 0, nodeUnique ? 1 : 0,
+                    (unsigned long long)(nodeHit ? nodeHit - base : 0),
+                    (unsigned long long)
+                        kHalo3InterpolatedNodesExpectedRva);
+            }
+
+            const uintptr_t markerHit =
+                sig::Find(base, size, kHalo3MarkersInternalSig);
+            const bool markerUnique = markerHit && !sig::Find(
+                markerHit + 1, base + size - markerHit - 1,
+                kHalo3MarkersInternalSig);
+            if (markerUnique)
+            {
+                g_halo3MarkersInternal =
+                    reinterpret_cast<Halo3MarkersInternalFn>(markerHit);
+                g_halo3HeadBinding.store(
+                    static_cast<uint8_t>(Halo3NodeBindingState::Installed),
+                    std::memory_order_release);
+                LOG("H3 vehicle head bounce: Installed marker resolver=+0x%llX "
+                    "[unique; expected +0x%llX]",
+                    (unsigned long long)(markerHit - base),
+                    (unsigned long long)
+                        kHalo3MarkersInternalExpectedRva);
+            }
+            else
+            {
+                g_halo3HeadBinding.store(
+                    static_cast<uint8_t>(
+                        Halo3NodeBindingState::StockFallback),
+                    std::memory_order_release);
+                LOG("H3 vehicle head bounce: StockFallback "
+                    "(resolver=%d/%d found/unique, first=+0x%llX, "
+                    "expected +0x%llX); render-node feature, base vehicle "
+                    "path, and camera core unaffected",
+                    markerHit ? 1 : 0, markerUnique ? 1 : 0,
+                    (unsigned long long)(markerHit ? markerHit - base : 0),
+                    (unsigned long long)
+                        kHalo3MarkersInternalExpectedRva);
             }
         }
 

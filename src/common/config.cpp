@@ -639,8 +639,8 @@ void ConfigSave()
     fprintf(f, "#  FIRST-PERSON VEHICLES\n");
     fprintf(f, "#  Sit in the seat instead of floating behind the vehicle.\n");
     fprintf(f, "# -------------------------------------------------------------------\n\n");
-    fprintf(f, "# First-person vehicle camera (currently Halo 3). The position is the\n");
-    fprintf(f, "# game's own per-seat camera pivot; your head look and leaning stay\n");
+    fprintf(f, "# First-person vehicle camera (currently Halo 3). The position is your\n");
+    fprintf(f, "# Blender-authored point for each seat; head look and leaning stay\n");
     fprintf(f, "# live. 0 = the stock behind-the-vehicle view.\n");
     fprintf(f, "# (default %d)\n", d.vehicle_first_person ? 1 : 0);
     fprintf(f, "vehicle_first_person = %d\n\n",
@@ -682,11 +682,10 @@ void ConfigSave()
     fprintf(f, "# every control behaves exactly as it did before this feature.\n");
     fprintf(f, "# (default %.2f, range 0 to 1)\n", d.vehicle_view_follow);
     fprintf(f, "vehicle_view_follow = %.2f\n\n", g_config.vehicle_view_follow);
-    fprintf(f, "# OFF bolts your seat rigidly to the car's own simulated\n");
-    fprintf(f, "# position, so you feel the suspension, the boost and the bank\n");
-    fprintf(f, "# exactly as the physics produce them. That is the default.\n");
-    fprintf(f, "# ON blends between the game's 60-per-second updates instead:\n");
-    fprintf(f, "# gentler, but it places you slightly behind the car.\n");
+    fprintf(f, "# ON (default) parents that point to the exact interpolated seat or\n");
+    fprintf(f, "# attachment node Halo renders and adds only occupant-head motion\n");
+    fprintf(f, "# relative to the settled seat pose. No filter or placement shift.\n");
+    fprintf(f, "# OFF uses the raw node matrices as a diagnostic A/B.\n");
     fprintf(f, "# (default %d)\n", d.vehicle_cam_smoothing ? 1 : 0);
     fprintf(f, "vehicle_cam_smoothing = %d\n\n", g_config.vehicle_cam_smoothing ? 1 : 0);
     fprintf(f, "# Motion steering. In a Warthog, Mongoose, Ghost, Prowler or\n");

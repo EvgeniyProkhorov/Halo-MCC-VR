@@ -1321,3 +1321,211 @@ Status: **HEADSET REJECTED**. The next candidate disables both C17 consumers:
 the loaded-seat tag transaction never runs and `ApplyHeadLook` again consumes
 the C5-C16 authored anchor. C17 code remains dormant, per the project rollback
 rule; deleting it would be a separate headset-tested cleanup candidate.
+
+## C17 post-rejection correction and C18 live-node design - 2026-08-01
+
+This section supersedes the pre-test inference above about how the attached mod
+works. C17 did not reproduce that mod: it used the wrong cache layout, removed
+camera tracks the mod retains, and mixed a native world position with an
+object-root basis. Candidate `ee5351a` proved that transaction active and the
+headset rejected it. Source `ce26903` disables the behavior and is the current
+rollback base.
+
+### Exact attached-artifact comparison
+
+The attached ZIP has SHA-256
+`9BA49F10BD44BE88AF917C991A9F6F273A1A5A00637804B9032FD8F49BF34E5F`.
+Its only payload, `120_halo.map`, is 513,187,840 bytes with SHA-256
+`0CC42E7E785832FE95D765879A276283FBBC624AF06EE85EE7DDBC33B706106A`.
+It is cache version 11 from 2020-11-24. The matching dddb334-era cache schema,
+not the current Assembly plugin cited above, places the vehicle seats block at
+`vehi+0x2A0`, uses a `0xE4` seat stride, puts the seat camera-marker string ID at
+seat `+0x6C`, and puts the camera-tracks block at seat `+0x80`.
+
+After parsing both caches through their corresponding layouts, the relevant
+Warthog changes are:
+
+| Seat | Flags | Camera marker | Camera track |
+| --- | --- | --- | --- |
+| driver | `0x48014 -> 0x48004` (clear bit 4 only) | null -> `camera_driver` | count remains 1 |
+| passenger | `0x1070 -> 0x1020` (clear bits 4 and 6) | keeps `camera_rider` | count remains 1 |
+| chaingun gunner | `0x101198 -> 0x100108` (clear bits 4, 7 and 12) | keeps `camera_gunner` | count remains 1 |
+
+The referenced `warthog_d_camera` track (13 points) and
+`warthog_g_camera` track (15 points) are bit-for-bit unchanged from current
+Update 14 stock. All 16 main-Warthog nodes and all five chaingun nodes are also
+unchanged. Apart from their string IDs, only these marker translations differ:
+
+| Marker / node | Attached mod | Current stock |
+| --- | --- | --- |
+| `camera_driver` / Warthog node 0 | `(-0.010000, +0.1680864, +0.230000)` | `(+0.007445268, +0.1680864, +0.2062165)` |
+| `camera_rider` / Warthog node 0 | `(-0.010000, -0.1586443, +0.3855522)` | `(+0.07150621, -0.1586443, +0.3855522)` |
+| `camera_gunner` / chaingun node 3 | `(-0.300000, 0, +0.170000)` | `(-0.003213291, -0.000000093, -0.005836391)` |
+
+The mod contains no renderer hook and no object-transform rewrite. It keeps
+Halo's native seat-camera and camera-track machinery and authors marker data on
+model nodes. C17's zero-track transaction therefore was not implementation
+parity.
+
+### What the native camera and renderer actually consume
+
+Official H3EK and the pinned retail DLL independently identify the same
+read-only node provider and marker resolver:
+
+| Function | H3EK RVA | Retail `halo3.dll` RVA | Verified role |
+| --- | --- | --- | --- |
+| interpolated node-bank provider | `+0x4D7C20` | `+0x1846AC` | returns the live `0x34`-byte node-matrix bank and count |
+| internal marker resolver | `+0xA3ABE0` | `+0x343D74` | resolves a marker; argument 6 requests interpolated nodes |
+| public marker wrapper | `+0xA42F40` | - | non-interpolated public wrapper is not the C18 source |
+| native unit-camera evaluator | `+0xA61330` | `+0x3555EC` | invokes the internal resolver with `localOnly=false`, `interpolateNodes=true` |
+
+The pinned Steam DLL is SHA-256
+`B209D8454B12DC77E54CCD2C9924EC8D44B8619D21CF98E36FFAF601E67EFB63`.
+The provider body is `0x1EA` bytes with SHA-256
+`9F8CB292784AABA32078A9D52CC72744763126111092A886A58002022C0EEAF7`;
+the resolver body is `0x281` bytes with SHA-256
+`28C4C37308F338B38F243A564E6E85BB6A806E301DAEB0E14E2A4440E4314C7E`.
+Relocation-tolerant entry signatures each match exactly once in both the Steam
+and Microsoft Store modules, at the same RVAs. The Store module checked here is
+SHA-256 `FCE2D92F06FCCEF3C4A66933AB280E90EC1AD705CFE71E68107816324D76FF6B`.
+The RVAs remain diagnostics; runtime ownership requires those unique matches.
+
+The internal resolver ABI is
+`int16(object, string_id, object_marker*, maximum_count, local_only,
+interpolate_nodes)`. Its `object_marker` is `0x70` bytes: node index `+0x00`,
+node matrix `+0x04`, final matrix `+0x38`, final world translation `+0x60`, and
+radius `+0x6C`. Retail's argument-6 branch calls the provider at
+`+0x343E6F`; H3EK does so at `+0xA3ACE4`.
+
+This provider is not merely camera-adjacent. The visible retail object renderer
+calls the same `+0x1846AC` at `+0x3496F3`; the H3EK renderer calls
+`+0x4D7C20` at `+0x96716A`. Both take the raw node bank only when the provider
+reports no interpolated bank. This closes the ownership edge C10-C16 guessed:
+the camera can consume the same live node matrices as the visible mesh without
+predicting an object root.
+
+Clearing seat bit 4 does **not** make the edited vehicle camera marker the final
+normal first-person position for a live biped occupant. The native evaluator
+first resolves the vehicle marker, then its bit-4-clear branch resolves the
+occupant's `head` marker (string ID `0x9F`) with interpolated nodes and overwrites
+the prior result. Retail performs the condition at `+0x3557EC`, the head query
+at `+0x355843..+0x35585B`, and the overwrite at `+0x355865`; H3EK's homolog
+starts at `+0xA614CD`. Thus the attached mod's vehicle-marker translation edits
+are vestigial in normal live-biped first person after bit 4 is cleared. Tracks
+remain relevant to the forced-following and bit-6 entry-camera states, which is
+why their unchanged presence cannot be treated as dead data.
+
+The official exported tags under `out/analysis/h3_vehicle_markers` provide a
+second reason not to key the implementation on a camera-marker name. All 20
+supported seat records have camera tracks, but only 15 have a dedicated
+render-model camera group. The five without one are the Wraith, Prowler,
+Banshee, Hornet and Scorpion drivers. Every occupant does, however, name the
+node on which Halo attached it.
+
+### Proven layouts and placement-preserving math
+
+For an attached object, object byte `+0x14` is its signed parent-node index. The
+signed word at object `+0x136` is the node-bank **byte size**, which must be
+positive and divisible by `0x34`; dividing by `0x34` gives the node count. The
+signed relative offset at `+0x138` locates the raw bank, whose matrix stride is
+`0x34`. For loaded tags, the verified chain is vehicle `vehi+0x40` model datum
+-> model `hlmt+0x0C` render-model datum -> render-model `mode+0x30` nodes
+block. A node is `0x60` bytes and stores its inverse default
+`real_matrix4x3` at node `+0x28`. A `real_matrix4x3` is scale followed by
+forward, left, up and position, total size `0x34`.
+
+Let `P` be the unchanged Blender-authored point plus the configured forward/up
+trim in vehicle/tag space, `D^-1`
+the selected node's stored inverse default matrix, `W(t)` the vehicle's live
+model-to-world transform, and `L(t)` the provider's live world-space matrix
+for that node. Resolve once per stable seat:
+
+`P_node = D^-1 * P`
+
+Then the exact base camera point is:
+
+`P_base(t) = L(t) * P_node`
+
+At the default pose `L(t)=W(t)*D`, so
+`P_base=W(t)*D*(D^-1*P)=W(t)*P`: the camera is exactly the authored local
+placement carried into the world, instead of a recalibrated or guessed offset.
+Later translation, suspension, bank and animation come only from Halo's live
+node.
+
+The mod's natural occupant bounce is added without moving that baseline. The
+15-sample enum-only seat debounce is not a head-reference gate: at the measured
+camera-call rate it can finish in about 62 ms, while boarding and seat-switch
+animation is still moving the occupant toward the destination. Freezing that
+transient was a direct explanation for C17-style deep offsets and visible
+catch-up.
+
+C18 keys the reference to the concrete
+`(generation, unit, direct parent, node object, seat, node, source)` identity.
+On any identity change it keeps `P_base` unchanged for at least 1.5 seconds and
+until the head has stayed within a 0.015-wu node-local sphere for a continuous
+500 ms. Invalid/missing samples restart that pre-latch observation. Only then
+does it latch the occupant-head position `H_world(t0)` in the same node space:
+
+`H0 = L(t0)^-1 * H_world(t0)`
+
+For later frames, `H(t)=L(t)^-1*H_world(t)` and:
+
+`P_camera(t) = L(t) * (P_node + H(t) - H0)`
+
+At the latch frame `H(t0)-H0=0`, so the result is exactly the authored point.
+Only subsequent occupant-head motion is added; vehicle motion has a single
+parent, `L(t)`, and cannot be double-counted. A later head-local displacement
+over 0.08 wu is treated as another animation transition, not bounce: C18
+immediately returns to `P_base` and requires a new settle window.
+
+The resolver can independently fall back to a raw unit node even when its
+`interpolate_nodes` argument is true. Therefore an interpolated vehicle node
+does not accept the returned head position on the argument alone. C18 obtains
+the provider's unit bank, recomposes
+`unit_node[marker.node_index] * marker.node_matrix.position`, and requires that
+translation to match the resolver's final `marker.matrix.position` within eight
+scaled float epsilons. A mismatch omits head bounce for that frame and retains
+the exact node-authored baseline. With a raw vehicle node, the resolver is
+explicitly forced raw.
+
+Position neutralization is independent of yaw follow. On the first valid anchor
+for each concrete `(runtime generation, parent handle, seat, vehicle identity,
+mounted state)` identity, C18 captures the current OpenXR head position as the
+neutral room-space origin. That includes seat switches, rapid real re-entry and
+stationary turrets; the old 1.5-second anti-flap limit remains only on the yaw
+snap. A missing/torn frame retains the concrete key and cannot repeatedly erase
+leaning. Without this split, room translation accumulated since an older
+on-foot/manual recenter would be added after C18 and shift every Blender point
+uniformly. Leaning after the concrete-seat capture remains live; only stale
+pre-entry translation is removed.
+
+Normal seats select the direct vehicle and the occupant unit's parent-node byte.
+A mounted gunner selects the grandparent carrier and the mounted gun child's
+parent-node byte, because those Blender points were authored in carrier tag
+space. This covers the Warthog `turret`, Scorpion/Wraith
+`anti_infantry_turret`, and Prowler `mauler_g` attachment nodes without copying
+a marker, bone or offset between vehicles.
+
+### Negative finding and transaction boundary
+
+The discarded rigid-root proposal used retail `+0x20D6C` and `+0x20E0C`.
+Their shared helper at `+0x20CD8` requires object-table kind byte `+3 == 0`;
+the verified vehicle kind is 1, so both accessors return false for the vehicle
+handles in scope. Even without that gate, they provide only the root
+`+0x50/+0x5C/+0x68` frame before node assembly and omit suspension/body-node
+motion. They are not a vehicle-mesh camera solution.
+
+C18 therefore leaves loaded seat, marker and track tags untouched. The object
+sampler remains only for bounded seat identity, parent selection, sanity bounds,
+yaw follow and controls; it is not the camera translation parent. The live-node
+binding and occupant-head binding are separate optional transactions. A zero or
+multiple signature match, fault, invalid byte size/count/index/matrix, torn
+sample or out-of-bounds anchor falls back only that camera-parent feature to
+stock. Head failure retains the node-authored baseline; neither failure disarms
+the Halo 3 camera core, OpenXR, or unrelated vehicle controls.
+When the interpolated-node source is absent, smoothing-on placement stays stock;
+the explicit smoothing-off raw-node A/B remains available.
+
+**Status: C18 DESIGN/CANDIDATE ONLY - NOT HEADSET ACCEPTED.** It must not advance
+`docs/CURRENT-STATE.md` until the user accepts the exact packaged DLL in the
+headset. The accepted-build pointer remains unchanged.

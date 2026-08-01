@@ -5073,6 +5073,247 @@ int main()
                 "identify a vehicle when two candidates are both plausible");
         }
 
+        // C18 interpolated node anchoring. The default inverse converts the
+        // Blender/tag-space camera point to node-local once; the live node
+        // returns it to world space. Rest pose must therefore preserve the
+        // authored point exactly, while animation belongs entirely to the node.
+        {
+            Halo3Matrix4x3 defaultNode{};
+            defaultNode.scale = 2.0f;
+            defaultNode.forward[1] = 1.0f;
+            defaultNode.left[0] = -1.0f;
+            defaultNode.up[2] = 1.0f;
+            defaultNode.position[0] = 10.0f;
+            defaultNode.position[1] = -3.0f;
+            defaultNode.position[2] = 2.0f;
+
+            // Exact affine inverse of defaultNode, in the same 0x34 layout.
+            Halo3Matrix4x3 defaultInverse{};
+            defaultInverse.scale = 0.5f;
+            defaultInverse.forward[1] = -1.0f;
+            defaultInverse.left[0] = 1.0f;
+            defaultInverse.up[2] = 1.0f;
+            defaultInverse.position[0] = 1.5f;
+            defaultInverse.position[1] = 5.0f;
+            defaultInverse.position[2] = -1.0f;
+
+            const float authored[3] = {9.64f, -1.76f, 3.62f};
+            const float expectedNodeLocal[3] = {0.62f, 0.18f, 0.81f};
+            float recoveredLocal[3] = {};
+            float restAnchor[3] = {};
+            const bool restOk =
+                Halo3MatrixInverseTransformPoint(
+                    defaultNode, authored, recoveredLocal) &&
+                Halo3ComputeNodeAnchoredPoint(
+                    defaultInverse, defaultNode, authored, restAnchor);
+            const bool restExact =
+                std::fabs(recoveredLocal[0] - expectedNodeLocal[0]) < 1e-5f &&
+                std::fabs(recoveredLocal[1] - expectedNodeLocal[1]) < 1e-5f &&
+                std::fabs(recoveredLocal[2] - expectedNodeLocal[2]) < 1e-5f &&
+                std::fabs(restAnchor[0] - authored[0]) < 1e-5f &&
+                std::fabs(restAnchor[1] - authored[1]) < 1e-5f &&
+                std::fabs(restAnchor[2] - authored[2]) < 1e-5f;
+
+            // The live node translates and rotates 180 degrees relative to the
+            // rest node; no object-root interpolation participates.
+            Halo3Matrix4x3 liveNode{};
+            liveNode.scale = 2.0f;
+            liveNode.forward[1] = -1.0f;
+            liveNode.left[0] = 1.0f;
+            liveNode.up[2] = 1.0f;
+            liveNode.position[0] = -4.0f;
+            liveNode.position[1] = 12.0f;
+            liveNode.position[2] = 1.0f;
+            float animatedAnchor[3] = {};
+            const bool animatedOk = Halo3ComputeNodeAnchoredPoint(
+                defaultInverse, liveNode, authored, animatedAnchor);
+            const bool animationFollowed =
+                std::fabs(animatedAnchor[0] - (-3.64f)) < 1e-5f &&
+                std::fabs(animatedAnchor[1] - 10.76f) < 1e-5f &&
+                std::fabs(animatedAnchor[2] - 2.62f) < 1e-5f;
+
+            // Head translation is latched in this same node space. On latch it
+            // contributes zero; subsequent head-local delta passes through
+            // exactly while the authored baseline remains unchanged.
+            const float headReference[3] = {0.10f, -0.05f, 0.20f};
+            float latchHeadWorld[3] = {};
+            const bool latchHeadOk = Halo3MatrixTransformPoint(
+                liveNode, headReference, latchHeadWorld);
+            float latchCamera[3] = {};
+            const bool latchCameraOk = Halo3ComputeHeadParentedPoint(
+                liveNode, latchHeadWorld, headReference, expectedNodeLocal,
+                latchCamera);
+            const bool latchExact =
+                std::fabs(latchCamera[0] - animatedAnchor[0]) < 1e-5f &&
+                std::fabs(latchCamera[1] - animatedAnchor[1]) < 1e-5f &&
+                std::fabs(latchCamera[2] - animatedAnchor[2]) < 1e-5f;
+
+            const float movedHeadLocal[3] = {0.16f, -0.07f, 0.24f};
+            float movedHeadWorld[3] = {};
+            const bool movedHeadOk = Halo3MatrixTransformPoint(
+                liveNode, movedHeadLocal, movedHeadWorld);
+            float movedCamera[3] = {};
+            const bool movedCameraOk = Halo3ComputeHeadParentedPoint(
+                liveNode, movedHeadWorld, headReference, expectedNodeLocal,
+                movedCamera);
+            const bool headMotionFollowed =
+                std::fabs(movedCamera[0] - (-3.68f)) < 1e-5f &&
+                std::fabs(movedCamera[1] - 10.64f) < 1e-5f &&
+                std::fabs(movedCamera[2] - 2.70f) < 1e-5f;
+
+            // Changing the live rendered node after H0 is frozen must not
+            // reintroduce an object/root parent or preserve any old world-space
+            // offset. Both the authored point and head delta move exactly once
+            // through the new node.
+            Halo3Matrix4x3 laterNode{};
+            laterNode.scale = 1.5f;
+            laterNode.forward[1] = 1.0f;
+            laterNode.left[0] = -1.0f;
+            laterNode.up[2] = 1.0f;
+            laterNode.position[0] = 5.0f;
+            laterNode.position[1] = -2.0f;
+            laterNode.position[2] = 7.0f;
+            float laterHeadWorld[3] = {};
+            float laterCamera[3] = {};
+            const bool laterNodeOk =
+                Halo3MatrixTransformPoint(
+                    laterNode, movedHeadLocal, laterHeadWorld) &&
+                Halo3ComputeHeadParentedPoint(
+                    laterNode, laterHeadWorld, headReference,
+                    expectedNodeLocal, laterCamera) &&
+                std::fabs(laterCamera[0] - 4.76f) < 1e-5f &&
+                std::fabs(laterCamera[1] - (-0.98f)) < 1e-5f &&
+                std::fabs(laterCamera[2] - 8.275f) < 1e-5f;
+
+            // A frame-count debounce froze H0 during the boarding animation.
+            // The C18 latch instead needs both concrete-seat age and a
+            // continuous node-local quiet window. A reset (the action taken on
+            // a concrete seat switch) must start both clocks again.
+            Halo3HeadSettleLatch settle;
+            const float enteringHead[3] = {0.10f, -0.05f, 0.70f};
+            const float seatedHead[3] = {0.10f, -0.05f, 0.20f};
+            const bool settleHeldInitial =
+                !settle.Update(1000, enteringHead) &&
+                !settle.Update(2200, seatedHead) &&
+                !settle.Update(2699, seatedHead);
+            const bool settleLatched =
+                settle.Update(2700, seatedHead) && settle.valid &&
+                std::fabs(settle.reference[0] - seatedHead[0]) < 1e-6f &&
+                std::fabs(settle.reference[1] - seatedHead[1]) < 1e-6f &&
+                std::fabs(settle.reference[2] - seatedHead[2]) < 1e-6f;
+            const float safeBounce[3] = {
+                seatedHead[0] + 0.079f, seatedHead[1], seatedHead[2]};
+            const float animationJump[3] = {
+                seatedHead[0] + 0.081f, seatedHead[1], seatedHead[2]};
+            const bool headDeltaBounded =
+                Halo3HeadLocalDeltaWithinLimit(
+                    safeBounce, settle.reference) &&
+                !Halo3HeadLocalDeltaWithinLimit(
+                    animationJump, settle.reference);
+            settle = {};
+            const bool seatSwitchRestarts =
+                !settle.Update(2701, seatedHead) && !settle.valid &&
+                settle.observedSinceMs == 2701;
+
+            Halo3SeatPositionKey positionKey;
+            const bool positionKeyStartsEmpty =
+                !positionKey.Matches(
+                    7, 0x12340002, 0,
+                    static_cast<uint32_t>(Halo3VehicleId::Warthog), false);
+            positionKey.Set(
+                7, 0x12340002, 0,
+                static_cast<uint32_t>(Halo3VehicleId::Warthog), false);
+            const bool positionKeyConcrete =
+                positionKey.Matches(
+                    7, 0x12340002, 0,
+                    static_cast<uint32_t>(Halo3VehicleId::Warthog), false) &&
+                !positionKey.Matches(
+                    8, 0x12340002, 0,
+                    static_cast<uint32_t>(Halo3VehicleId::Warthog), false) &&
+                !positionKey.Matches(
+                    7, 0x12340003, 0,
+                    static_cast<uint32_t>(Halo3VehicleId::Warthog), false) &&
+                !positionKey.Matches(
+                    7, 0x12340002, 1,
+                    static_cast<uint32_t>(Halo3VehicleId::Warthog), false) &&
+                !positionKey.Matches(
+                    7, 0x12340002, 0,
+                    static_cast<uint32_t>(Halo3VehicleId::Mongoose), false) &&
+                !positionKey.Matches(
+                    7, 0x12340002, 0,
+                    static_cast<uint32_t>(Halo3VehicleId::Warthog), true);
+
+            // Actual Warthog hull node fixture from the official exported
+            // render-model tag. This pins the scale-first +0x28 interpretation
+            // and proves a configured vehicle-local placement trim survives
+            // D^-1 -> D without changing axes or being applied twice.
+            Halo3Matrix4x3 hogDefault{};
+            hogDefault.scale = 1.0f;
+            hogDefault.forward[0] = 1.0f;
+            hogDefault.left[1] = 1.0f;
+            hogDefault.up[2] = 1.0f;
+            hogDefault.position[0] = -0.0250015f;
+            hogDefault.position[1] = -7.03e-10f;
+            hogDefault.position[2] = 0.42f;
+            Halo3Matrix4x3 hogInverse{};
+            hogInverse.scale = 1.0f;
+            hogInverse.forward[0] = 1.0f;
+            hogInverse.left[1] = 1.0f;
+            hogInverse.up[2] = 1.0f;
+            hogInverse.position[0] = 0.0250015f;
+            hogInverse.position[1] = 7.03e-10f;
+            hogInverse.position[2] = -0.42f;
+            const float hogAdjustedPoint[3] = {
+                0.0299f + 0.0328084f, 0.1683f,
+                0.6663f + 0.0164042f};
+            float hogRestAnchor[3] = {};
+            const bool actualTagFixture = Halo3ComputeNodeAnchoredPoint(
+                hogInverse, hogDefault, hogAdjustedPoint, hogRestAnchor) &&
+                std::fabs(hogRestAnchor[0] - hogAdjustedPoint[0]) < 1e-6f &&
+                std::fabs(hogRestAnchor[1] - hogAdjustedPoint[1]) < 1e-6f &&
+                std::fabs(hogRestAnchor[2] - hogAdjustedPoint[2]) < 1e-6f;
+
+            // Every public helper refuses torn/non-finite matrices and points.
+            Halo3Matrix4x3 nonfinite = liveNode;
+            nonfinite.position[1] = std::numeric_limits<float>::quiet_NaN();
+            Halo3Matrix4x3 zeroScale = liveNode;
+            zeroScale.scale = 0.0f;
+            Halo3Matrix4x3 badBasis = liveNode;
+            badBasis.left[0] = 0.0f;
+            badBasis.left[1] = -1.0f; // duplicates forward
+            const float nonfinitePoint[3] = {
+                0.0f, std::numeric_limits<float>::infinity(), 0.0f};
+            float rejected[3] = {91.0f, 92.0f, 93.0f};
+            const bool invalidRejected =
+                Halo3MatrixCountFromByteSize(0x34) == 1 &&
+                Halo3MatrixCountFromByteSize(0x68) == 2 &&
+                Halo3MatrixCountFromByteSize(0x35) == 0 &&
+                Halo3MatrixCountFromByteSize(0) == 0 &&
+                !Halo3MatrixValid(nonfinite) &&
+                !Halo3MatrixValid(zeroScale) &&
+                !Halo3MatrixValid(badBasis) &&
+                !Halo3MatrixTransformPoint(nonfinite, authored, rejected) &&
+                !Halo3MatrixInverseTransformPoint(
+                    zeroScale, authored, rejected) &&
+                !Halo3ComputeNodeAnchoredPoint(
+                    defaultInverse, badBasis, authored, rejected) &&
+                !Halo3ComputeHeadParentedPoint(
+                    liveNode, nonfinitePoint, headReference,
+                    expectedNodeLocal, rejected) &&
+                rejected[0] == 91.0f && rejected[1] == 92.0f &&
+                rejected[2] == 93.0f;
+
+            Check(restOk && restExact && animatedOk && animationFollowed &&
+                    latchHeadOk && latchCameraOk && latchExact && movedHeadOk &&
+                    movedCameraOk && headMotionFollowed && laterNodeOk &&
+                    settleHeldInitial && settleLatched && headDeltaBounded &&
+                    seatSwitchRestarts && positionKeyStartsEmpty &&
+                    positionKeyConcrete && actualTagFixture && invalidRejected,
+                "Halo 3 live node anchoring preserves the exact authored point, "
+                "waits out entry motion, inherits mesh/head-local motion once, "
+                "and rejects invalid data");
+        }
+
         // C10 frame smoothing. MEASURED: the camera samples at 240/sec while
         // the hull only moves at 60, so three of every four published frames
         // must be walked toward the next simulation state instead of repeating
