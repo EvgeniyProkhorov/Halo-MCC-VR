@@ -5848,6 +5848,46 @@ int main()
                 "reaches a seat that aims the frame it would follow");
         }
 
+        // C20 first-person seat flag. The exact stock flag words come from the
+        // E1 official H3EK exports recorded in docs/HALO3-VEHICLE-EVIDENCE.md.
+        {
+            constexpr uint32_t kWarthogDriver = 0x40014u;   // bits {2,4,18}
+            constexpr uint32_t kWarthogPassenger = 0x1070u; // bits {4,5,6,12}
+            constexpr uint32_t kMachinegunTurret = 0x5500018u;
+            // Every stock player seat is third person, which is why Halo has no
+            // first-person vehicle view of its own — and is the live proof that
+            // the seat walk landed on a real player seat.
+            const bool recognised =
+                Halo3SeatFlagsLookLikePlayerSeat(kWarthogDriver) &&
+                Halo3SeatFlagsLookLikePlayerSeat(kWarthogPassenger) &&
+                Halo3SeatFlagsLookLikePlayerSeat(kMachinegunTurret) &&
+                !Halo3SeatFlagsLookLikePlayerSeat(0u) &&
+                // A record that already reads first person is refused, so a
+                // mis-walked seat can never be "restored" to a value we
+                // invented.
+                !Halo3SeatFlagsLookLikePlayerSeat(
+                    Halo3FirstPersonSeatFlags(kWarthogDriver));
+            // Exactly one bit changes, and only that bit. The passenger keeps
+            // `allows weapons` (5) and `third person on enter` (6); the gunner
+            // keeps `first person camera slaved to gun` (7) — the reference mod
+            // clears more, and this candidate deliberately does not.
+            const bool onlyBit4 =
+                Halo3FirstPersonSeatFlags(kWarthogDriver) == 0x40004u &&
+                Halo3FirstPersonSeatFlags(kWarthogPassenger) == 0x1060u &&
+                Halo3FirstPersonSeatFlags(kMachinegunTurret) == 0x5500008u;
+            // Restoring is the exact inverse for every seat in the table, so
+            // seat exit cannot leave a vehicle permanently altered.
+            bool reversible = true;
+            for (uint32_t flags : {kWarthogDriver, kWarthogPassenger,
+                                   kMachinegunTurret})
+                reversible = reversible &&
+                    (Halo3FirstPersonSeatFlags(flags) |
+                     kHalo3SeatThirdPersonCameraBit) == flags;
+            Check(recognised && onlyBit4 && reversible,
+                "The first-person seat flag clears only `third person camera` "
+                "on a seat proven to have it, and restores exactly");
+        }
+
         // C9 virtual wheel: two gripped hands, the tilt of the line between
         // them, read in the head's own heading plane.
         {

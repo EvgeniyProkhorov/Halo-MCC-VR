@@ -1259,14 +1259,48 @@ inline constexpr uintptr_t kHalo3DefMinFlipVelocityOffset = 0x39C;
 inline constexpr uintptr_t kHalo3DefMaxFlipVelocityOffset = 0x3A0;
 inline constexpr uintptr_t kHalo3DefBlurSpeedOffset = 0x3B4;
 
-// C17 native seat-camera ownership. These are the Halo 3 cache-layout fields
-// independently described by the official H3EK seat exports and Assembly's
-// Halo3MCC vehi plugin. The runtime patches only the currently occupied loaded
-// tag, saving and restoring both values; no map file is ever changed.
+// Halo 3 cache-layout seat fields, independently described by the official
+// H3EK seat exports and Assembly's Halo3MCC vehi plugin, and confirmed in the
+// pinned retail module: `halo3+0x35579D` computes the occupied seat record as
+// `seats_block + seat_index * 0xD4` and reads its flags dword at seat `+0x00`.
+// The runtime patches only the currently occupied loaded tag, saving and
+// restoring the original value; no map file is ever changed.
 inline constexpr uintptr_t kHalo3VehicleSeatsBlockOffset = 0x258;
 inline constexpr size_t kHalo3VehicleSeatStride = 0xD4;
 inline constexpr uint32_t kHalo3SeatThirdPersonCameraBit = 1u << 4;
 inline constexpr uintptr_t kHalo3SeatCameraTracksBlockOffset = 0x80;
+
+// C20 — the one field that decides whether a seated player is first person.
+//
+// Halo 3 re-reads this bit from the LOADED TAG every camera frame; nothing is
+// latched at seat entry. The verified retail chain in the pinned module is:
+//   halo3+0x1326E8  reads the occupied seat's flags and returns bit 4 as
+//                   "this seat is third person" (it also folds in bit 6,
+//                   `third person on enter`, for the entry window);
+//   halo3+0x212198  calls it and dispatches on the result — first person goes
+//                   to the FP camera update at +0x17DAEC, third person to the
+//                   following/chase camera at +0x2144C0;
+//   halo3+0x3555EC  the seated camera evaluator, whose bit-4-clear branch at
+//                   +0x3557F5 resolves the occupant's own `head` marker.
+// Every stock Halo 3 player seat sets bit 4 (E1 exports), which is why the
+// title has no first-person vehicle view of its own, and why the community
+// first-person-vehicle map mod analysed in this document clears exactly this
+// bit on the driver, passenger and gunner seats. Requiring the bit to be SET
+// before patching is therefore also the live proof that the seat walk landed
+// on a real player seat.
+//
+// C17 additionally zeroed the seat's camera-track count. The reference mod
+// keeps those tracks, and C17 was headset-rejected; the track count is read
+// here as a bounds check only and is never written.
+inline constexpr bool Halo3SeatFlagsLookLikePlayerSeat(uint32_t seatFlags)
+{
+    return (seatFlags & kHalo3SeatThirdPersonCameraBit) != 0;
+}
+
+inline constexpr uint32_t Halo3FirstPersonSeatFlags(uint32_t seatFlags)
+{
+    return seatFlags & ~kHalo3SeatThirdPersonCameraBit;
+}
 
 // C8 vehicle identity. Physics type is a CLASS, not a vehicle: (1,seat 0) is
 // warthog AND mongoose, (3,seat 0) is ghost, wraith AND mauler. The C7

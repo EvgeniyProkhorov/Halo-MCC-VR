@@ -295,6 +295,8 @@ void ConfigLoad(const wchar_t* path)
         }
         else if (!strcmp(key, "vehicle_cam_smoothing"))
             g_config.vehicle_cam_smoothing = atoi(val) != 0;
+        else if (!strcmp(key, "vehicle_hide_body"))
+            g_config.vehicle_hide_body = atoi(val) != 0;
         else if (!strcmp(key, "vehicle_motion"))
             g_config.vehicle_motion = atoi(val) != 0;
         else if (!strcmp(key, "vehicle_wheel_max_deg"))
@@ -716,6 +718,14 @@ void ConfigSave()
     fprintf(f, "# OFF uses the raw node matrices as a diagnostic A/B.\n");
     fprintf(f, "# (default %d)\n", d.vehicle_cam_smoothing ? 1 : 0);
     fprintf(f, "vehicle_cam_smoothing = %d\n\n", g_config.vehicle_cam_smoothing ? 1 : 0);
+    fprintf(f, "# ON (default) tells Halo the seat you are sitting in is a\n");
+    fprintf(f, "# FIRST-PERSON seat, so the game stops drawing your own\n");
+    fprintf(f, "# character in the space your head occupies. Only the seat you\n");
+    fprintf(f, "# are actually in is changed, and it is put back the moment you\n");
+    fprintf(f, "# get out; no game file is ever modified. Has no effect at all\n");
+    fprintf(f, "# when vehicle_first_person = 0.\n");
+    fprintf(f, "# (default %d)\n", d.vehicle_hide_body ? 1 : 0);
+    fprintf(f, "vehicle_hide_body = %d\n\n", g_config.vehicle_hide_body ? 1 : 0);
     fprintf(f, "# Motion steering. In a Warthog, Mongoose, Ghost, Prowler or\n");
     fprintf(f, "# Chopper, DOUBLE-CLICK both grips to take hold of an invisible\n");
     fprintf(f, "# steering wheel: hold your hands as if on a wheel and tilt it,\n");

@@ -315,3 +315,14 @@ binary claim adversarially re-derived). Verified facts, pinned module build
   match+44/+48 with verification bytes at match+86/+106).
 - All three vehicle-probe AOBs (native, getter, type accessor) measured
   exactly one raw match, three independent times.
+- Seat records: vehicle definition `+0x258` = seats tag block, stride `0xD4`,
+  flags dword at seat `+0x00`, camera-tracks block at seat `+0x80`. Confirmed
+  by the engine's own indexing (`0x35579D`/`0x1327D0` both compute
+  `seats + seat*0xD4` and read `+0x00`), independently of the H3EK exports and
+  Assembly's vehi plugin.
+- Seat flag bit 4 `third person camera` selects the seated player's camera and
+  is re-read from the loaded tag every camera evaluation, never latched at
+  entry: `0x1326E8` returns it, `0x212198` dispatches on the result to the
+  first-person camera update `0x17DAEC` (bit 0 clear) or the following camera
+  `0x2144C0`, and the seated camera evaluator `0x3555EC` gates its occupant
+  `head`-marker branch on it at `0x3557F5`. Every stock player seat sets it.

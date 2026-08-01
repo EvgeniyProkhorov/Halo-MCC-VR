@@ -1577,3 +1577,81 @@ to -1.0..1.5 m; lateral range is -1.0..1.0 m.
 **Status: C18 rendered-node mesh behavior HEADSET CONFIRMED; C19 candidate
 changes NOT YET HEADSET ACCEPTED.** The accepted-build pointer remains
 unchanged pending the exact packaged C19 headset result.
+
+## C20 — hide the occupant's character model in a first-person seat
+
+The C19 headset session left one thing unaddressed: with the VR camera sitting
+at the authored seat point, Halo is still drawing the player's own character
+model in the space the headset looks out of. Halo already has a state that
+suppresses it — its own first-person state — and a single seat field selects it.
+
+### The verified live chain (pinned retail `halo3.dll`)
+
+The pinned Steam module is SHA-256
+`B209D8454B12DC77E54CCD2C9924EC8D44B8619D21CF98E36FFAF601E67EFB63`.
+All four sites below were read from that module's on-disk image by RVA.
+
+| Retail RVA | Role | What the disassembly shows |
+| --- | --- | --- |
+| `+0x1326E8` | seated camera-mode chooser | Computes the occupied seat record as `seats + seat*0xD4` (`+0x1327D0 imul rcx, rax, 0xD4`), loads its flags dword at seat `+0x00` (`+0x1327D7`), extracts bit 4 (`shr esi,4; and esi,1`) and bit 6 (`shr eax,6`), writes a mode enum through its out-parameter and **returns bit 4 in `eax`** |
+| `+0x212198` | camera-update dispatcher | Calls `+0x1326E8` (`+0x2121B8`), then `test eax,eax` → **zero goes to the first-person camera update `+0x17DAEC`, non-zero to the following/chase camera `+0x2144C0`** |
+| `+0x17DAEC` | first-person camera update | Calls the seated camera evaluator `+0x3555EC`, then tests seat flag bit 7 `first person camera slaved to gun` (`+0x17DBDB shr eax,7`) |
+| `+0x3555EC` | seated camera evaluator | Recomputes the same `seat*0xD4` record (`+0x35579D`), and at `+0x3557F5` loads seat flags and `shr eax,4; test bl,al; jne <end>` — the occupant `head` marker query at `+0x355853` (`edx = 0x9F`) runs **only when bit 4 is clear** |
+
+Two facts follow directly, without inference:
+
+1. **The seat's `third person camera` bit is the switch** between Halo's
+   first-person camera and its chase camera for a seated player.
+2. **It is re-read from the loaded tag on every camera evaluation** — nothing
+   is latched at seat entry — so patching the loaded seat takes effect on the
+   next frame and restoring it is complete.
+
+This closes the layout question C17 left open from a second direction: the
+`vehi+0x258` seats block, the `0xD4` stride, and flags at seat `+0x00` are now
+confirmed by the engine's own indexing arithmetic, not only by the E1 exports
+and Assembly's plugin.
+
+### Why this is the right field
+
+- Every stock Halo 3 player seat sets bit 4 (E1 official H3EK exports), which
+  is exactly why the title ships no first-person vehicle view.
+- The community first-person-vehicle map mod already dissected in this document
+  clears exactly this bit on the Warthog driver, passenger and gunner seats.
+  It is the only field all three of its edited seats have in common.
+- Requiring the bit to be SET before writing doubles as the live proof that the
+  tag walk landed on a real player seat; anything else is a loud
+  `StockFallback` for this feature alone.
+
+### What C20 changes, and what it deliberately does not
+
+While the player is seated and the VR vehicle camera owns the view, the
+currently occupied loaded seat record has bit 4 cleared; the original value is
+restored on seat exit, seat change, feature disable, probe teardown and title
+teardown, and only if the live value is still the one we wrote. No map file is
+touched.
+
+C20 is **not** C17. C17 also zeroed the seat's camera-track count and then made
+the resulting native camera the motion parent, and was headset-rejected for
+placement. Here the camera remains the accepted C18/C19 authored-node anchor —
+`ApplyHeadLook` overwrites position from that anchor and orientation from the
+headset, so which camera Halo selects underneath cannot move the view. The
+camera-track count is read as a bounds check and never written; the reference
+mod keeps those tracks. `Halo3ComputeNativeParentedAnchor` remains dormant and
+uncalled.
+
+New config `vehicle_hide_body` (default 1) gates the transaction, and
+`vehicle_first_person = 0` suppresses it entirely, so third-person driving is
+byte-for-byte unaffected.
+
+### The open question this candidate answers
+
+Bit 4 provably selects Halo's first-person *camera*. Whether that state also
+suppresses the occupant's third-person model — and, in the `allows weapons`
+passenger seats (bit 5: Warthog seat 1, Mongoose seat 1, Hornet seats 1–2,
+Prowler seats 1–2), whether it brings up the first-person weapon that the
+existing `floating_hands` and controller-aim path would then own — is a
+runtime property the headset test resolves. Both outcomes are informative and
+neither can disarm the camera core.
+
+**Status: C20 candidate — NOT HEADSET ACCEPTED.** The accepted-build pointer is
+unchanged.

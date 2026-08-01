@@ -813,6 +813,13 @@ namespace
             "ON (default) uses the exact seat/attachment node Halo renders\n"
             "and adds occupant bounce relative to the settled seat pose. It\n"
             "does not filter or shift your authored point. OFF is raw-node A/B.");
+        changed |= ImGui::Checkbox("Hide my character in the seat",
+                                   &g_config.vehicle_hide_body);
+        ImGui::TextDisabled(
+            "ON (default) tells Halo the seat you are in is a first-person\n"
+            "seat, so your own body is no longer drawn where your head is.\n"
+            "Only the seat you occupy is changed and it is restored the\n"
+            "instant you get out. Third-person driving is unaffected.");
         ImGui::Spacing();
         ImGui::Separator();
         ImGui::Text("Motion steering");

@@ -5788,14 +5788,12 @@ namespace
         {
             __try
             {
-                const uint32_t patchedFlags = patch.originalFlags &
-                    ~kHalo3SeatThirdPersonCameraBit;
+                const uint32_t patchedFlags =
+                    Halo3FirstPersonSeatFlags(patch.originalFlags);
                 // Restore only values that are still ours. A concurrent engine
                 // change wins rather than being overwritten during teardown.
                 if (patch.flags && *patch.flags == patchedFlags)
                     *patch.flags = patch.originalFlags;
-                if (patch.cameraTrackCount && *patch.cameraTrackCount == 0)
-                    *patch.cameraTrackCount = patch.originalCameraTrackCount;
             }
             __except (EXCEPTION_EXECUTE_HANDLER)
             {
@@ -5812,14 +5810,26 @@ namespace
             g_halo3NativeSeatSerial.fetch_add(1, std::memory_order_release);
     }
 
-    bool Halo3EnsureNativeSeatPatch(uint32_t definitionIndex, int seatIndex,
-                                    uint32_t generation)
+    // C20: clear the occupied seat's `third person camera` bit for as long as
+    // the VR vehicle camera owns the view, so Halo puts the occupant in its own
+    // first-person state and stops drawing the player's character model in the
+    // space the headset is looking out of. Halo re-reads the bit from the
+    // loaded tag every camera frame (halo3+0x1326E8 -> +0x212198), so the
+    // effect is immediate and the restore below is complete.
+    //
+    // This is NOT C17. C17 additionally zeroed the seat's camera-track count
+    // and then made the resulting native camera the motion parent; that was
+    // headset-rejected. Only the flag is written here, the camera-track count
+    // is read as a bounds check and never modified, and the camera itself
+    // remains the accepted C18/C19 authored-node anchor.
+    bool Halo3EnsureFirstPersonSeatFlag(uint32_t definitionIndex, int seatIndex,
+                                        uint32_t generation)
     {
         Halo3NativeSeatPatch& patch = g_halo3NativeSeatPatch;
         const bool sameSeat = patch.generation == generation &&
             patch.definitionIndex == definitionIndex &&
             patch.seatIndex == seatIndex;
-        if (!g_config.vehicle_first_person)
+        if (!g_config.vehicle_first_person || !g_config.vehicle_hide_body)
         {
             Halo3RestoreNativeSeatPatch();
             return false;
@@ -5873,20 +5883,21 @@ namespace
                     const int32_t originalTrackCount = *trackCount;
                     // Every official H3 player seat has bit 4. Requiring it is
                     // the live layout proof that keeps a bad tag walk stock.
-                    if ((originalFlags & kHalo3SeatThirdPersonCameraBit) &&
+                    // The track count is only a second bounds check on the same
+                    // seat record; the reference mod keeps those tracks and so
+                    // do we.
+                    if (Halo3SeatFlagsLookLikePlayerSeat(originalFlags) &&
                         originalTrackCount >= 0 && originalTrackCount <= 16)
                     {
+                        const uint32_t patchedFlags =
+                            Halo3FirstPersonSeatFlags(originalFlags);
                         patch.flags = flags;
                         patch.cameraTrackCount = trackCount;
                         patch.originalFlags = originalFlags;
                         patch.originalCameraTrackCount = originalTrackCount;
                         patch.active = true;
-                        *flags = originalFlags &
-                            ~kHalo3SeatThirdPersonCameraBit;
-                        *trackCount = 0;
-                        installed = *flags == (originalFlags &
-                                ~kHalo3SeatThirdPersonCameraBit) &&
-                            *trackCount == 0;
+                        *flags = patchedFlags;
+                        installed = *flags == patchedFlags;
                     }
                 }
             }
@@ -6121,9 +6132,15 @@ namespace
 
         const bool seated = seat >= 0 && parent != -1 &&
             parentKind == kHalo3ObjectKindVehicle;
-        // C17 rollback: never mutate a loaded seat tag. This also restores a
-        // patch immediately if a config reload crosses an old live session.
-        Halo3RestoreNativeSeatPatch();
+        // C20: while the player is in a seat, tell Halo that seat is first
+        // person so it stops drawing the character model around the headset.
+        // Off foot, on feature-disable, or on any layout failure this restores
+        // the seat's own value immediately — including when a config reload
+        // crosses an old live session.
+        if (seated)
+            Halo3EnsureFirstPersonSeatFlag(defIndex, seat, generation);
+        else
+            Halo3RestoreNativeSeatPatch();
         // Publish the vehicle transform for the authored-point camera.
         // C7: root parents publish their +0x50 frame directly; attached
         // parents (mounted turrets) compose carrier ∘ local, since their
@@ -7175,13 +7192,16 @@ namespace
             const auto nativeState = static_cast<Halo3NativeSeatState>(
                 g_halo3NativeSeatState.load(std::memory_order_acquire));
             if (nativeState == Halo3NativeSeatState::Active)
-                LOG("H3 native seat camera: Active; Halo owns rendered vehicle "
-                    "motion, Blender placement correction enabled");
+                LOG("H3 first-person seat: Active; occupied seat reports "
+                    "first person, so Halo stops drawing the player's own "
+                    "character model. Camera anchor unchanged");
             else if (nativeState == Halo3NativeSeatState::StockFallback)
-                LOG("H3 native seat camera: StockFallback; loaded seat layout "
-                    "did not validate, camera core unaffected");
+                LOG("H3 first-person seat: StockFallback; loaded seat layout "
+                    "did not validate, character model stays drawn and the "
+                    "camera core is unaffected");
             else
-                LOG("H3 native seat camera: restored stock seat fields");
+                LOG("H3 first-person seat: restored the seat's own camera "
+                    "flag");
             nativeSeatSerialLogged = nativeSeatSerial;
         }
         static bool fallbackLogged = false;

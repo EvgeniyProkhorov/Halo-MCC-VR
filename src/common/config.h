@@ -178,6 +178,13 @@ struct Config
     // plus occupant-head motion relative to the settled pose in that seat.
     // 0 = raw node matrices as a diagnostic A/B.
     bool vehicle_cam_smoothing = true;
+    // Tell Halo the occupied seat is a FIRST-PERSON seat while the VR vehicle
+    // camera owns the view, so the engine stops drawing your own character
+    // where your head is. Only the currently occupied loaded seat tag is
+    // touched, and the original value is restored on seat exit; the map file
+    // is never modified. Ignored entirely when vehicle_first_person = 0, so
+    // third-person driving is unaffected.
+    bool vehicle_hide_body = true;
 
     // Motion steering in look-steered ground driver seats: grab an invisible
     // wheel with both grips and turn it. 0 = the right stick steers.
