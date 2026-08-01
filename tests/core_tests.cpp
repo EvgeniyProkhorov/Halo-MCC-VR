@@ -4078,21 +4078,71 @@ int main()
         "Every seat of a vehicle keys a distinct trim slot, an unidentified "
         "vehicle or unauthored seat keys none, and the gunner slot is "
         "reserved for mounted turrets whatever seat index they report");
+    // The mongoose is the control group: no shipped seat trim touches it, so
+    // it still shows the bare universal fallback. Seats the maintainer tuned
+    // are asserted separately below, against the shipped table itself.
+    const int mongooseDriver = ConfigSeatTrimSlot(3, 0, false);
     Check(ConfigSeatCamForward(g_config, hogDriver) == 0.44f &&
-              ConfigSeatCamForward(g_config, hogPassenger) == 0.20f &&
+              ConfigSeatCamForward(g_config, mongooseDriver) == 0.20f &&
               ConfigSeatCamForward(g_config, hogGunner) == 0.20f &&
               ConfigSeatCamUp(g_config, hogGunner) == 0.31f &&
               ConfigSeatCamUp(g_config, hogDriver) == -0.10f &&
               ConfigSeatCamUp(g_config, hornetSeat2) == 0.33f &&
               ConfigSeatCamUp(g_config, ghostDriver) == -0.10f &&
               ConfigSeatCamForward(g_config, -1) == 0.20f &&
+              // The file wins over a shipped seat default: the warthog
+              // passenger's lateral trim ships at -0.10 and this config sets
+              // it to -0.27.
               ConfigSeatCamRight(g_config, hogPassenger) == -0.27f &&
               ConfigSeatCamRight(g_config, hogDriver) == 0.12f &&
               ConfigSeatCamRight(g_config, -1) == 0.12f &&
               g_config.vehicle_view_follow,
-        "A seat overrides exactly the axis written for it; the same "
-        "vehicle's other seats, and every unset axis, follow the universal "
-        "trim; a legacy non-zero follow fraction migrates to ON");
+        "A seat overrides exactly the axis written for it; an untuned "
+        "vehicle's seats and every unset axis follow the universal trim; a "
+        "config value beats the shipped seat default; a legacy non-zero "
+        "follow fraction migrates to ON");
+
+    // The maintainer's headset-tuned seats ARE the product default, so a file
+    // that predates a key must still land on their placement rather than on a
+    // bare universal trim. Asserted on a fresh Config so it reflects the
+    // built-ins, not whatever the file above happened to write.
+    {
+        Config fresh;
+        const int shipScorpionDriver = ConfigSeatTrimSlot(1, 0, false);
+        const int shipHogPassenger = ConfigSeatTrimSlot(2, 1, false);
+        const int shipProwlerGunner = ConfigSeatTrimSlot(6, 0, true);
+        const int shipChopperDriver = ConfigSeatTrimSlot(9, 0, false);
+        const int untunedMongoose = ConfigSeatTrimSlot(3, 0, false);
+        const bool applied =
+            ConfigSeatCamForward(fresh, shipScorpionDriver) == 0.29f &&
+            ConfigSeatCamUp(fresh, shipScorpionDriver) == 1.50f &&
+            ConfigSeatCamRight(fresh, shipScorpionDriver) == -0.03f &&
+            ConfigSeatCamForward(fresh, shipHogPassenger) == -0.28f &&
+            ConfigSeatCamUp(fresh, shipProwlerGunner) == 0.30f &&
+            ConfigSeatCamForward(fresh, shipChopperDriver) == 0.12f;
+        // Only the axes actually moved are set. The chopper driver's lateral
+        // and the prowler gunner's forward were never touched, so they must
+        // still follow the universal trim and move with it.
+        const bool untouchedAxesFollow =
+            !fresh.vehicle_cam_right_set[shipChopperDriver] &&
+            !fresh.vehicle_cam_forward_set[shipProwlerGunner] &&
+            ConfigSeatCamRight(fresh, shipChopperDriver) ==
+                fresh.vehicle_cam_right_m &&
+            ConfigSeatCamForward(fresh, shipProwlerGunner) ==
+                fresh.vehicle_cam_forward_m;
+        // A vehicle nobody tuned keeps a completely bare slot.
+        const bool untunedStaysBare =
+            !fresh.vehicle_cam_forward_set[untunedMongoose] &&
+            !fresh.vehicle_cam_up_set[untunedMongoose] &&
+            !fresh.vehicle_cam_right_set[untunedMongoose];
+        // The follow is off out of the box; the vehicles ship world-locked.
+        const bool followShipsOff = !fresh.vehicle_view_follow;
+        Check(applied && untouchedAxesFollow && untunedStaysBare &&
+                  followShipsOff,
+            "The maintainer's tuned seat placements are the built-in "
+            "defaults, only on the axes they moved, and the view follow "
+            "ships off");
+    }
     ConfigSave();
     const std::string perSeatConfig = ReadTextFile(primary);
     Check(CountText(perSeatConfig, "\nvehicle_cam_forward_m_warthog_driver = ") == 1 &&

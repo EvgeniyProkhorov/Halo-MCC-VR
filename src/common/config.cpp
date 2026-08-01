@@ -11,6 +11,37 @@
 #include "log.h"
 
 Config g_config;
+
+// The maintainer's headset-tuned seat placements become the built-in defaults,
+// so a config file that predates a key is still tuned rather than bare. An
+// entry naming a seat the slot table cannot key is skipped rather than written
+// somewhere else, which keeps a future enum change from silently landing a
+// scorpion's trim on a mongoose.
+Config::Config()
+{
+    for (const ConfigShippedSeatTrim& trim : kConfigShippedSeatTrims)
+    {
+        const int slot = ConfigSeatTrimSlot(
+            trim.vehicleId, trim.seatIndex, trim.mountedTurret);
+        if (slot < 0 || slot >= kVehicleTrimSlots)
+            continue;
+        if (trim.hasForward)
+        {
+            vehicle_cam_forward_v[slot] = trim.forward;
+            vehicle_cam_forward_set[slot] = true;
+        }
+        if (trim.hasUp)
+        {
+            vehicle_cam_up_v[slot] = trim.up;
+            vehicle_cam_up_set[slot] = true;
+        }
+        if (trim.hasRight)
+        {
+            vehicle_cam_right_v[slot] = trim.right;
+            vehicle_cam_right_set[slot] = true;
+        }
+    }
+}
 static std::wstring g_path;
 
 static bool ParseFloatSetting(const char* key, const char* text, float& destination)

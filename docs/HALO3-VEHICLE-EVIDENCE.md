@@ -1863,3 +1863,50 @@ worker emits `H3 vehicle: play space re-centred on a settled seat entry/exit`
 with the running total.
 
 **Status: C23 candidate — NOT HEADSET ACCEPTED.**
+
+## C24 — the maintainer's tuned vehicle configuration becomes the default
+
+C23 was tested on the **Microsoft Store / Game Pass** edition and accepted
+("works great"). That session's tuning is the product's tuning, per the policy
+in force since Alpha 0.3.0: the shipped ZIP carries the maintainer's own live
+`halomccvr.cfg`, and users are told to replace theirs.
+
+Two things follow from that, and this candidate does both.
+
+**The tuned config now lives in both editions.** The Store file
+(SHA-256 `D0F12A32716385739051B5DF45AF634FB5AE9B3C1B2EC1DA33F0219DD48392E5`)
+was copied verbatim over the Steam one; both editions now hash identically, so
+testing continues on Steam from exactly the state that was accepted. The
+previous Steam config is preserved under
+`out/deploy-backups/cfg-steam-before-gamepass-copy-20260801`. Note it was the
+larger of the two and carried per-seat trims the Store file does not — those
+were superseded by the Game Pass pass, not lost by accident.
+
+**The tuning is also baked into the built-in defaults.** Config parsing performs
+no migration, so any key a user's older file lacks silently falls back to the
+compiled default rather than to the shipped value — the exact trap
+`fit_desktop_window` fell into before 0.3.0. Leaving the tuning only in the
+config file would mean a retained old file quietly reverts to untuned vehicles.
+
+- `vehicle_view_follow` now defaults to **false**. The maintainer drove every
+  seat and turned it off; it remains available in the config and in F1.
+- `kConfigShippedSeatTrims` carries the tuned per-seat placements — scorpion
+  driver, warthog driver, warthog passenger, prowler gunner, hornet driver and
+  chopper driver — and `Config::Config` stamps them into the per-seat arrays.
+
+Only the axes actually moved are marked set, so every other axis of those seats
+still follows the universal trim and still moves with it. A vehicle nobody
+tuned keeps a completely bare slot. An entry naming a seat the slot table
+cannot key is skipped rather than written elsewhere, so a future enum change
+cannot silently land one vehicle's trim on another.
+
+Test coverage was strengthened rather than relaxed. The existing per-seat
+override test kept its meaning by moving its universal-fallback assertion onto
+the **mongoose**, which no shipped trim touches, and it now also proves that a
+config value beats a shipped seat default (the warthog passenger's lateral trim
+ships at -0.10 and the test file sets -0.27). A new check asserts the shipped
+table lands on the right slots, leaves untouched axes following the universal
+trim, leaves untuned vehicles bare, and that the follow ships off.
+
+**Status: C24 candidate — NOT HEADSET ACCEPTED.** C23's behavior was accepted on
+the Store edition; this candidate changes defaults and configuration only.

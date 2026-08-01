@@ -98,8 +98,47 @@ inline constexpr int ConfigSeatTrimSlot(int vehicleId, int seatIndex,
     return v * kVehicleSeatSlots + seatIndex;
 }
 
+// Seat placements the maintainer tuned in the headset and which therefore ship
+// as the product's own defaults, exactly as the released ZIP ships their live
+// config. Written 2026-08-01 from the Game Pass session that accepted the
+// first-person vehicle work. Config parsing performs no migration, so a user
+// keeping an older file silently falls back to these built-ins — baking them in
+// is what stops that fallback from being untuned.
+//
+// Each entry names its vehicle by Halo3VehicleId value (1 = scorpion .. 10 =
+// turret, mirroring kVehicleTrimNames) and its seat by index, or by the mounted
+// flag for a turret gunner. Only the axes the maintainer actually moved are
+// marked set, so every other axis still follows the universal trim.
+struct ConfigShippedSeatTrim
+{
+    int vehicleId;
+    int seatIndex;
+    bool mountedTurret;
+    float forward;
+    float up;
+    float right;
+    bool hasForward;
+    bool hasUp;
+    bool hasRight;
+};
+
+inline constexpr ConfigShippedSeatTrim kConfigShippedSeatTrims[] = {
+    // vehicle, seat, mounted,  forward,  up,     right,  F,     U,     R
+    {1, 0, false,  0.29f,  1.50f, -0.03f, true,  true,  true},  // scorpion driver
+    {2, 0, false, -0.04f,  0.00f,  0.00f, true,  false, false}, // warthog driver
+    {2, 1, false, -0.28f,  0.55f, -0.10f, true,  true,  true},  // warthog passenger
+    {6, 0, true,   0.00f,  0.30f,  0.00f, false, true,  false}, // prowler gunner
+    {8, 0, false, -0.23f, -0.09f, -0.03f, true,  true,  true},  // hornet driver
+    {9, 0, false,  0.12f, -0.06f,  0.00f, true,  true,  false}, // chopper driver
+};
+
 struct Config
 {
+    // Stamps kConfigShippedSeatTrims into the per-seat arrays. Every other
+    // member keeps its default member initializer, so `Config{}` remains the
+    // one description of a fresh configuration.
+    Config();
+
     int config_version = 5;
 
     // Portable OpenXR feedback and pose stabilization. Headset smoothing is a
@@ -173,7 +212,9 @@ struct Config
     bool vehicle_cam_right_set[kVehicleTrimSlots] = {};
     // ON turns the view by every heading change from the same concrete vehicle
     // seat. OFF keeps the world-locked view Alpha 0.3.1 shipped.
-    bool vehicle_view_follow = true;
+    // Headset-tuned OFF by the maintainer on 2026-08-01 after driving every
+    // seat: the follow is available but is not what the vehicles ship as.
+    bool vehicle_view_follow = false;
     // Use the same interpolated seat/attachment node the visible vehicle uses,
     // plus occupant-head motion relative to the settled pose in that seat.
     // 0 = raw node matrices as a diagnostic A/B.
