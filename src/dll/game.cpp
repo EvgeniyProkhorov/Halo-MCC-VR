@@ -7811,6 +7811,64 @@ namespace
         return g_origCamCopy(dst, src);
     }
 
+    // Counters only. The hook stays allocation/lock/log free; every line is
+    // emitted by LogHalo3CameraEffectIfNew on the 50 ms worker.
+    std::atomic<uint32_t> g_halo3CamEffectRuns{0};   // stock stage executed
+    std::atomic<uint32_t> g_halo3CamEffectMoved{0};  // ...and it moved the view
+    std::atomic<uint32_t> g_halo3CamEffectBypass{0}; // record unreadable
+
+    // The observer record that observer_apply_camera_effect reads and writes,
+    // resolved through the same engine TLS slot the vehicle observer capture
+    // already uses. Null before the TLS index is bound, or on a fault.
+    unsigned char* Halo3ObserverRecord()
+    {
+        if (!g_engineTlsIndex)
+            return nullptr;
+        __try
+        {
+            auto** slots = reinterpret_cast<void**>(__readgsqword(0x58));
+            auto* tls = slots ? reinterpret_cast<unsigned char*>(
+                slots[*g_engineTlsIndex]) : nullptr;
+            return tls ? *reinterpret_cast<unsigned char**>(
+                             tls + kHalo3TlsObserverOffset)
+                       : nullptr;
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            return nullptr;
+        }
+    }
+
+    // The exact three fields the effect stage writes back: position, forward
+    // and up. Nine floats, in that order.
+    bool Halo3CopyObserverView(unsigned char* observer, float view[9],
+                               bool store)
+    {
+        __try
+        {
+            unsigned char* pos = observer + kHalo3ObserverPosOffset;
+            unsigned char* fwd = observer + kHalo3ObserverFwdOffset;
+            unsigned char* up = observer + kHalo3ObserverUpOffset;
+            if (store)
+            {
+                memcpy(pos, view + 0, sizeof(float) * 3);
+                memcpy(fwd, view + 3, sizeof(float) * 3);
+                memcpy(up, view + 6, sizeof(float) * 3);
+            }
+            else
+            {
+                memcpy(view + 0, pos, sizeof(float) * 3);
+                memcpy(view + 3, fwd, sizeof(float) * 3);
+                memcpy(view + 6, up, sizeof(float) * 3);
+            }
+            return true;
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            return false;
+        }
+    }
+
     void __fastcall ObserverCameraEffectHook(int userIndex)
     {
         // Log-only vehicle probe: capture the slot-0 observer record's float
@@ -7820,10 +7878,89 @@ namespace
         // Halo applies weapon recoil, explosions, and other authored camera
         // impulses after it computes the observer's stable camera result. A
         // monitor can move the view independently of the player; an HMD must
-        // never do that. Keep the stock effects when VR head tracking is off,
-        // but make the tracked headset the sole owner of the VR view pose.
+        // never do that. Keep the stock effects when VR head tracking is off.
         if (!g_enabled.load(std::memory_order_relaxed))
+        {
             g_origObserverCameraEffect(userIndex);
+            return;
+        }
+        // Head tracking on. Bypassing the stage outright kept the view still
+        // but stopped running Halo's OWN effect code, so a sustained authored
+        // effect was never consumed. The Cortana channel holds exactly that
+        // kind of effect (gs_cortana_header calls damage_players with
+        // cinematics\cortana_channel\cortana_effect, a damage_effect carrying
+        // rotation and instantaneous acceleration), and the headset report is
+        // "Chief is spinning under my head camera" while F2 - which restores
+        // this call - stops it.
+        //
+        // So run the stock stage exactly as Halo wrote it, then put back only
+        // the three fields it writes. The engine's effect state advances
+        // normally and the tracked headset still owns the view pose, so the
+        // comfort guarantee is unchanged rather than traded away.
+        //
+        // Slot 0 is the local VR player and the only record this resolves;
+        // other users keep the previous bypass.
+        unsigned char* observer = userIndex == 0 ? Halo3ObserverRecord()
+                                                 : nullptr;
+        float saved[9];
+        if (!observer || !Halo3CopyObserverView(observer, saved, false))
+        {
+            // Fail open to the previous behavior: the view stays headset-owned
+            // and no unverified write is made.
+            if (userIndex == 0)
+                g_halo3CamEffectBypass.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
+        g_origObserverCameraEffect(userIndex);
+        float after[9];
+        const bool moved = Halo3CopyObserverView(observer, after, false) &&
+            memcmp(after, saved, sizeof(saved)) != 0;
+        Halo3CopyObserverView(observer, saved, true);
+        g_halo3CamEffectRuns.fetch_add(1, std::memory_order_relaxed);
+        if (moved)
+            g_halo3CamEffectMoved.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    // Proof-of-life. A silent log here means the stage is not running at all,
+    // not "maybe not running" - the failure mode that made the previous
+    // Cortana candidate impossible to judge from its log.
+    void LogHalo3CameraEffectIfNew()
+    {
+        static bool announced = false;
+        static bool bypassAnnounced = false;
+        static uint32_t lastRuns = 0;
+        static uint32_t lastMoved = 0;
+        static uint64_t nextMs = 0;
+        const uint32_t bypass =
+            g_halo3CamEffectBypass.load(std::memory_order_relaxed);
+        if (bypass && !bypassAnnounced)
+        {
+            bypassAnnounced = true;
+            LOG("H3 camera effect: observer record unreadable; Halo's camera "
+                "effect stage stays bypassed (previous behavior)");
+        }
+        const uint32_t runs =
+            g_halo3CamEffectRuns.load(std::memory_order_relaxed);
+        if (!runs)
+            return;
+        if (!announced)
+        {
+            announced = true;
+            LOG("H3 camera effect: Halo's own effect stage now runs under the "
+                "headset; its view contribution is reverted every frame");
+        }
+        const uint64_t nowMs = GetTickCount64();
+        if (nowMs < nextMs)
+            return;
+        nextMs = nowMs + 1000;
+        const uint32_t moved =
+            g_halo3CamEffectMoved.load(std::memory_order_relaxed);
+        if (moved != lastMoved)
+            LOG("H3 camera effect: authored effect ACTIVE - %u stage frames, "
+                "%u moved the camera, in the last second",
+                runs - lastRuns, moved - lastMoved);
+        lastRuns = runs;
+        lastMoved = moved;
     }
 
     bool BuildRightHandScopeCamera(char* camera, const unsigned char* saved)
@@ -21232,6 +21369,7 @@ namespace
             LogOdstFpLayoutSelfCheckIfNew(); // emit FP weapon-layout self-check
             LogOdstNativeHudRouteOnce();    // bounded in-place CHUD route result
             LogHalo3VehicleProbeIfNew();   // live H3 feature status/fallback
+            LogHalo3CameraEffectIfNew();   // H3 authored camera-effect transaction
             if constexpr (kEnableRetiredHalo3Diagnostics)
             {
                 LogHalo3ObserverIfDriving();   // H3 observer focus-field analysis
@@ -21242,6 +21380,7 @@ namespace
             Sleep(50);
 #else
             LogHalo3VehicleProbeIfNew();   // live H3 feature status/fallback
+            LogHalo3CameraEffectIfNew();   // H3 authored camera-effect transaction
             if constexpr (kEnableRetiredHalo3Diagnostics)
             {
                 LogHalo3ObserverIfDriving();   // H3 observer focus-field analysis
