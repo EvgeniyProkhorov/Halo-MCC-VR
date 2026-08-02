@@ -1003,92 +1003,6 @@ inline constexpr uint8_t ReachPatchyFogRestoredFlags(
         (original & kReachPatchyFogSkipMask));
 }
 
-// Reach's ATMOSPHERIC fog, which is a different system from the screen-aligned
-// patchy fog above and stays enabled when patchy fog is skipped.
-//
-// Official HREK names both, in one place: `bin/debug_menu_init.txt` ships a
-// "Fog and Weather" menu whose entries are
-//     command "enable render atmosphere fog"  -> `render_atmosphere_fog 1`
-//     command "disable render atmosphere fog" -> `render_atmosphere_fog 0`
-//     global  "render rain"                   -> `render_rain`
-// so atmosphere fog is a debug COMMAND and rain is a debug GLOBAL. That
-// distinction is load-bearing. A command carries no value slot, and in the
-// pinned retail image `render_atmosphere_fog`'s descriptor (0x00A0FEB8) has
-// type word 0 with a "value" pointer of 0x00198F2C - which is inside `.text`.
-// Resolving this name through the float debug-var path would hand back CODE,
-// so the atmosphere control is bound from its gate instead, never by name.
-//
-// The command handler is retail 0x001B4CF4 and does exactly one thing:
-//     mov  edx, [0x00C17B18]   ; render TLS index
-//     mov  rcx, gs:[0x58]
-//     mov  r8d, 0x168
-//     mov  rcx, [rcx + rdx*8]  ; this thread's render TLS block
-//     mov  rdx, [r8 + rcx]     ; block + 0x168 -> the render flags byte
-//     or   cl, 4  /  and cl, 0xFB
-//     mov  [rdx], cl
-// i.e. bit 0x04 of `*(renderTls + 0x168)`; a nonzero argument SETS it.
-//
-// Its consumer is the atmosphere helper retail 0x0026D5B4, called from
-// player_view_render at 0x0026CC54 - the call immediately before the patchy-fog
-// gate above. The helper opens with the identical TLS walk and then
-//     0x0026D5F3  test byte ptr [rax], 4
-//     0x0026D5F6  je   0x0026D645        ; skip the whole atmosphere fog upload
-// so a CLEAR bit means "no atmospheric fog", exactly matching the menu labels.
-//
-// **Polarity is the opposite of the patchy-fog byte**, where a SET bit means
-// skip. These are two different structures - one a module global, one reached
-// through per-thread TLS - and must never be treated as the same flags word.
-inline constexpr uintptr_t kReachAtmosphereFogHelperRva = 0x0026D5B4;
-inline constexpr uintptr_t kReachAtmosphereFogHelperCallRva = 0x0026CC54;
-inline constexpr uintptr_t kReachAtmosphereFogTlsIndexLoadRva = 0x0026D5DF;
-inline constexpr uintptr_t kReachAtmosphereFogTlsIndexRva = 0x00C17B18;
-inline constexpr uintptr_t kReachAtmosphereFogSlotLoadRva = 0x0026D5E5;
-inline constexpr uintptr_t kReachAtmosphereFogGateTestRva = 0x0026D5F3;
-inline constexpr uintptr_t kReachAtmosphereFogSkipJumpRva = 0x0026D5F6;
-inline constexpr uintptr_t kReachAtmosphereFogFlagsSlotOffset = 0x168;
-inline constexpr uint8_t kReachAtmosphereFogEnableMask = 0x04;
-// The same bound the ODST cinematic TLS proof uses; a static TLS slot this far
-// out is a decoded-wrong index, not a real one.
-inline constexpr uint32_t kReachRenderTlsIndexLimit = 256;
-
-inline constexpr uint8_t ReachAtmosphereFogSuppressedFlags(
-    uint8_t flags) noexcept
-{
-    return static_cast<uint8_t>(
-        flags & static_cast<uint8_t>(~kReachAtmosphereFogEnableMask));
-}
-
-inline constexpr uint8_t ReachAtmosphereFogRestoredFlags(
-    uint8_t current) noexcept
-{
-    return static_cast<uint8_t>(current | kReachAtmosphereFogEnableMask);
-}
-
-// Reach's rain master switch. `render_rain` is a type-5 (boolean) debug var:
-// descriptor 0x00B40FF0, name string 0x009EB110, value BYTE at 0x00B4444C. It
-// is resolved BY NAME at runtime; the RVA below only cross-checks that result
-// against the pinned image, exactly as the motion-blur slots do.
-//
-// The value is one byte and 0x00B4444D holds a different boolean, so this must
-// be written a byte at a time. A four-byte float store would clobber the
-// neighbour.
-//
-// It has exactly five readers in the pinned image, every one of them a
-// `cmp byte ptr [render_rain], 0` gate:
-//     0x00259A1C, 0x0025E339, 0x0026CC92, 0x0026E822, 0x0026E978.
-// 0x0026CC92 is the one inside player_view_render, and the call it skips is
-// 0x00288D60 - kReachRainParticleRenderRva, the same renderer the view-
-// decoupling detour below wraps. Clearing the byte removes the rain draw
-// outright, and that detour simply stops being reached.
-//
-// Every other rain sub-toggle HREK's menu lists (`render_rain_particles`,
-// `render_light_volume_rain_particles`, `render_light_volume_rain_sheets`)
-// resolves to a NULL backing global in retail and gives no leverage; measured
-// 2026-07-27 and re-measured here. `render_rain` is the only live one.
-inline constexpr uint64_t kReachDebugVarTypeBoolean = 5;
-inline constexpr uintptr_t kReachRenderRainValueRva = 0x00B4444C;
-inline constexpr uintptr_t kReachRenderRainGateRva = 0x0026CC92;
-
 // Official HREK model_definitions.cpp exposes the engine-wide
 // "If sky attaches to camera" model flag (bit 6) and "Sky parallax percent".
 // Its model-to-object-property conversion is uniquely homologous in the pinned
@@ -2334,21 +2248,6 @@ inline bool ReachMotionBlurSlotsMatchPinnedImage(
                moduleBase, moduleSize,
                kReachMotionBlurMaxValueRva, expectedMax) &&
         scaleSlot == expectedScale && maxSlot == expectedMax;
-}
-
-// Cross-check the BY-NAME `render_rain` resolution against the pinned image,
-// the same way the motion-blur slots are checked. The name scan is what binds
-// the control; this only refuses a result that disagrees with the exact module
-// the rest of the Reach core is pinned to.
-inline bool ReachRenderRainSlotMatchesPinnedImage(
-    uintptr_t moduleBase, size_t moduleSize, uintptr_t rainSlot) noexcept
-{
-    if (moduleSize != kReachRetailImageSize)
-        return false;
-    uintptr_t expected = 0;
-    return ReachAddressFromRva(
-               moduleBase, moduleSize, kReachRenderRainValueRva, expected) &&
-        rainSlot == expected;
 }
 
 inline bool ReachMotionBlurScaleUsable(float scale) noexcept

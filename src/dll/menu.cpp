@@ -1183,18 +1183,6 @@ namespace
                             "you, culling distant terrain/objects (skybox goes first). Most levels\n"
                             "only start culling below ~0.25; the lowest settings clip near geometry\n"
                             "(hard pop-in) for the most frames. Live, all three games.");
-        ImGui::Spacing();
-        ImGui::Separator();
-        ImGui::Text("Weather (Halo: Reach honours these today)");
-        changed |= ImGui::Checkbox("Rain", &g_config.rain);
-        ImGui::TextDisabled("The rain streaks the game draws across your view. Off by default:\n"
-                            "in a headset they read as noise over the whole image. Live -- flip\n"
-                            "this while it's raining and you'll see it change immediately.");
-        changed |= ImGui::Checkbox("Atmospheric fog", &g_config.atmospheric_fog);
-        ImGui::TextDisabled("The distance haze that greys out far terrain and flattens contrast.\n"
-                            "Off by default and the bigger clarity win of the two. This is the\n"
-                            "game's own fog switch, so hazy levels see much further. Live.\n"
-                            "A game with no proven switch is left alone and says so in the log.");
         }
 
         if (g_activeCategory == Cat_Desktop)

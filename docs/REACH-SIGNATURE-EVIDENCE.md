@@ -219,83 +219,45 @@ blur constants, matrices/history, eye order, projection, CHUD, and capture order
 are unchanged. Source `b0710dc0` and its exact DLL passed this narrow headset
 gate: the opposite-moving translucent layer was gone and the image looked good.
 
-### Atmospheric fog and rain: the player-facing weather switches
+### WITHDRAWN: atmosphere-fog and rain switches (`860cbd6`, reverted unrun)
 
-Reported 2026-08-02: Reach reads soft and washed out in the headset, blamed by
-the user on rain and fog. The screen-aligned patchy fog above was already
-suppressed per eye, so it is not the fog being seen. These are the other two.
+2026-08-02. The user reported Reach as blurry and named rain and fog. `860cbd6`
+bound the two switches below and was reverted at the user's direction before it
+was ever run — the newest preserved log is still source `5e47b64`, so **nothing
+here was disproven by a headset result and nothing here is a cause.** The
+measured facts are kept only so they are not re-derived; the behavior is gone.
 
-**Official HREK names both, in one file.** `HREK/bin/debug_menu_init.txt` ships
-a `Fog and Weather` menu:
-
-| Entry | Kind | Variable |
-| --- | --- | --- |
-| `enable render atmosphere fog` | command | `render_atmosphere_fog 1` |
-| `disable render atmosphere fog` | command | `render_atmosphere_fog 0` |
-| `render rain` | global | `render_rain` |
-| `render rain particles` | global | `render_rain_particles` |
-| `render rain light volumes` | global | `render_light_volume_rain_particles` |
-| `render rain sheets` | global | `render_light_volume_rain_sheets` |
-
-The command/global distinction is load-bearing and measured in the pinned
-retail image. `render_rain`'s descriptor at `0x00B40FF0` has type word `5`
-(boolean) and value byte `0x00B4444C`. The three other rain globals resolve to a
-NULL backing value (`0x00B41008`, `0x00B41020`, `0x00B40F90`), which reconfirms
-the 2026-07-27 measurement that only `render_rain` is live. But
-`render_atmosphere_fog`'s descriptor at `0x00A0FEB8` has type word `0` and a
-"value" pointer of `0x00198F2C` — **inside `.text`**. The name-scan debug-var
-path returns that pointer without complaint, so resolving a debug COMMAND that
-way hands back CODE. `render_depth_of_field_enable` and `render_depth_of_field`
-share the same trap and the same `0x00198F2C`. Production therefore requires the
-exact type word and proves the slot is committed, writable, non-executable
-memory before returning it.
-
-**Atmospheric fog is a TLS-reached flag bit, not a module global.** The command
-handler is `0x001B4CF4` and does one thing: `mov edx, [0x00C17B18]` (the render
-TLS index), `mov rcx, gs:[0x58]`, `mov r8d, 0x168`, `mov rcx, [rcx+rdx*8]`,
-`mov rdx, [r8+rcx]`, then `or cl, 4` / `and cl, 0xFB` and `mov [rdx], cl`. So it
-writes bit `0x04` of `*(renderTls + 0x168)`, and a nonzero argument SETS it.
-
-The consumer is the atmosphere helper `0x0026D5B4`, called from
-`player_view_render` at `0x0026CC54` — the call immediately before the patchy-fog
-gate above. It opens with the identical TLS walk and then, at `0x0026D5F3`,
-`test byte ptr [rax], 4` with `je 0x0026D645` skipping the whole atmosphere fog
-upload. A CLEAR bit therefore means "no atmospheric fog", matching the menu
-labels exactly. **This is the opposite polarity to the patchy-fog byte, where a
-SET bit means skip**; they are different structures — one a module global, one
-per-thread TLS — and must never be treated as one flags word.
-
-**Rain has five readers, every one a gate.** `render_rain` is read at
-`0x00259A1C`, `0x0025E339`, `0x0026CC92`, `0x0026E822` and `0x0026E978`, each as
-`cmp byte ptr [render_rain], 0`. The `0x0026CC92` gate is inside
-`player_view_render` and the call it skips is `0x00288D60`, i.e.
-`kReachRainParticleRenderRva` — the same renderer the accepted view-decoupling
-detour wraps. Clearing the byte removes the rain draw outright and that detour
-simply stops being reached.
-
-**The render-pass disable mask, recorded because it was mapped on the way.**
-`0x00CA0240` is a dword of skip bits, every reader shaped `test <bit>; jne skip`:
-bit `0x02` at `0x0028BDC5`, `0x04` at `0x0027809D`, `0x08` at `0x0026C1B4` and
-`0x0026CC59` (patchy fog), `0x10` at `0x00166DB2`/`0x00167E7F`/`0x00168119`,
-`0x20` at `0x002A1404` (inside native SSAO), `0x40` at `0x0026C96C`, and `0x100`
-at `0x0026CC9B`/`0x002897F4`/`0x002898CB`. Bit `0x100` is a second, independent
-way to skip rain. Production uses the by-name `render_rain` boolean instead, so
-that the binding carries no hardcoded address; the RVA is only cross-checked
-against the pinned image, exactly as the motion-blur slots are.
-
-**What production does.** Both controls are asserted at the top of every owned
-VR eye render, before the original `player_view_render`. This is deliberately an
-assert rather than the patchy-fog save/suppress/restore scope: patchy fog must
-stay on for the title's own authored views and is wrong only inside our stereo
-eyes, whereas these two are a player preference that should hold wherever the
-player looks. Turning a setting back on writes the title's own value back on the
-next eye, which also makes the control self-healing against the tag loader that
-rewrites render globals on level load. Each control is independently fail-open:
-an unproven or unwritable one leaves that single effect stock, is counted, and is
-reported by the worker every ten seconds; it never drops an eye or blocks the
-camera core. The rain suppression is handed back at teardown because it is a
-module global; the fog bit is not, because it lives in per-thread render TLS that
-only the render thread can reach, and a title-module reload re-initialises it.
+- **`HREK/bin/debug_menu_init.txt` lists the engine's entire debug menu by
+  name**, including a `Fog and Weather` section (`render_atmosphere_fog` as a
+  *command*; `render_rain`, `render_rain_particles`,
+  `render_light_volume_rain_particles`, `render_light_volume_rain_sheets` as
+  *globals*), plus Depth of Field, Shadows, Display Tweak and Perf menus. Read
+  it before proposing a probe for any "can this be turned off" question.
+- **A debug COMMAND is not a global, and resolving one by name returns code.**
+  The table entry is `{name_ptr, type, value_ptr, help_ptr}`. Globals carry type
+  5 (bool) or 6 (float); a command carries type 0 and stores its *handler* where
+  a global stores its value. `render_atmosphere_fog`,
+  `render_depth_of_field_enable` and `render_depth_of_field` all resolve to
+  `0x00198F2C`, inside `.text`. `FindDebugVarFloat` does not check the type, so
+  it would return that pointer. Any future by-name resolution of an unproven
+  name must check the type word and that the slot is writable non-code memory.
+- `render_rain` is the only live rain global (descriptor `0x00B40FF0`, value byte
+  `0x00B4444C`); the other three resolve to a NULL backing value, reconfirming
+  the 2026-07-27 measurement. Its five readers are all `cmp byte,0` gates:
+  `0x00259A1C`, `0x0025E339`, `0x0026CC92`, `0x0026E822`, `0x0026E978`. The
+  `0x0026CC92` one skips `0x00288D60`, `kReachRainParticleRenderRva`.
+- Atmospheric fog is bit `0x04` of `*(renderTls + 0x168)`, written by command
+  handler `0x001B4CF4` and tested by helper `0x0026D5B4` at `0x0026D5F3`
+  (`test byte ptr [rax], 4`, `je` skips the upload); the helper is called from
+  `player_view_render` at `0x0026CC54`. **Opposite polarity to the patchy-fog
+  byte**: set means enabled, not skip. Different structure — per-thread TLS, not
+  the module global `0x00CA0240`.
+- The render-pass skip mask `0x00CA0240`, mapped in passing, all readers shaped
+  `test <bit>; jne skip`: `0x02` at `0x0028BDC5`; `0x04` at `0x0027809D`; `0x08`
+  at `0x0026C1B4` and `0x0026CC59` (patchy fog); `0x10` at `0x00166DB2`,
+  `0x00167E7F`, `0x00168119`; `0x20` at `0x002A1404` (native SSAO); `0x40` at
+  `0x0026C96C`; `0x100` at `0x0026CC9B`, `0x002897F4`, `0x002898CB` (a second,
+  independent rain skip).
 
 This document records Reach-specific facts for the cumulative Halo 3 + ODST +
 Reach line. Halo 3 and ODST offsets, layouts, bones, markers, and tag meanings

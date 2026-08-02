@@ -422,28 +422,6 @@ struct Config
     // Halo 3, ODST, and Reach all honor it. Takes effect immediately, no restart.
     float draw_distance = 1.0f;
 
-    // Weather, off by default because both effects read as a soft, washed-out
-    // image in a headset. Each drives the engine's own switch for that effect,
-    // asserted at the top of every VR eye render; turning a setting back on
-    // restores the title's stock value live, with no restart.
-    //
-    // Universal settings, like every key here, but only Halo: Reach binds them
-    // today - that is where the effects were reported and where the evidence is
-    // (HREK's own "Fog and Weather" debug menu plus the pinned haloreach.dll
-    // gates; see src/common/reach_render_logic.h). A title with no proven
-    // binding stays stock for that effect and says so in the log, exactly as an
-    // unresolved draw-distance var does.
-    //
-    // Rain drives Reach's `render_rain` boolean, resolved by name. Clearing it
-    // gates out the rain particle renderer that draws streaks across the view.
-    bool rain = false;
-    // Atmospheric fog drives bit 0x04 of Reach's render flags - the exact bit
-    // HREK's `render_atmosphere_fog` command writes. Clearing it skips the
-    // atmosphere fog upload, which is the distance haze that flattens contrast
-    // on far terrain. This is NOT the screen-aligned patchy fog, which the mod
-    // has always suppressed per eye.
-    bool atmospheric_fog = false;
-
     // (The 0x2EEFC8 placement-slider experiment is retired: measured 2026-07-19,
     // that struct holds colors/alpha/animation only — Halo's HUD has no position
     // data to edit. The HUD panel below is the real fix.)
