@@ -587,11 +587,7 @@ namespace
     // the implementation available for a future targeted investigation, but
     // compile its render-thread producers and worker consumer out of normal
     // builds. The independent wait-pipeline fault reporting remains active.
-    // PSVR2 / SteamVR reports an evenly paced 120-to-60 cadence drop while
-    // utilization stays low. Enable the existing fixed-storage trace for this
-    // one diagnostic candidate so the transition can be attributed before any
-    // pacing behavior is changed.
-    constexpr bool kEnableFramePacingTransitionCapture = true;
+    constexpr bool kEnableFramePacingTransitionCapture = false;
     // The raster-order trace produced its discovery evidence. Keep the bounded
     // implementation dormant without leaving atomics or logging in render hooks.
     constexpr bool kEnableRetiredRasterTrace = false;
@@ -4886,7 +4882,15 @@ float4 ps_scope_linearize(VSOut i):SV_Target { return paint(i.uv,true); }
         // last crosshair the player could actually see instead of the blank
         // the engine just handed us.
         ID3D11Texture2D* source = g_authoredReticleTexture;
-        if (g_authoredReticleProbeUsable && g_authoredReticleGoodTexture)
+        // Reach alone needs the pixel-coverage guard: its five authored
+        // crosshair widgets can bloom completely out of the capture crop while
+        // their identity remains valid. Halo 3 has no such piece path; its
+        // captured key is admitted only when it contains authored art, so the
+        // synchronous mip readback would only create a periodic frame stall.
+        const bool guardAuthoredPixels =
+            TitleAdapter_GetActiveTitle() == GameTitle::HaloReach;
+        if (guardAuthoredPixels && g_authoredReticleProbeUsable &&
+            g_authoredReticleGoodTexture)
         {
             const uint32_t ink = MeasureAuthoredReticleCoverage();
             g_authoredReticleLastCoverage = ink;
