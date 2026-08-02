@@ -190,6 +190,54 @@ int main()
         Check(ShouldUploadAuthoredReticle(
                   AuthoredReticleRefreshPolicy::BoundedAnimation,
                   true, true, 7, 0, 230, 1, state), "bounded title cadence");
+        // GitHub #70: Reach's crosshair vanished for a moment when the player
+        // took damage. The preserved 74e1477 log shows the published art key
+        // flipping to one weapon-independent value and back inside ~50 ms,
+        // over and over during combat, while the quad stayed SUBMITTED with
+        // held art - so a momentary alternate class-2 widget set was being
+        // published straight over good art. A different identity must now
+        // settle first; the identity already on the quad still republishes on
+        // the bounded cadence, which is what keeps the animation live.
+        AuthoredReticleRefreshState flickerState{};
+        Check(ShouldUploadAuthoredReticle(
+                  AuthoredReticleRefreshPolicy::BoundedAnimation,
+                  true, true, 0xABC, 0, 500, 1, flickerState),
+              "bounded first art publishes immediately");
+        MarkAuthoredReticleUploaded(flickerState, 0xABC, 0, 500);
+        Check(ShouldUploadAuthoredReticle(
+                  AuthoredReticleRefreshPolicy::BoundedAnimation,
+                  true, true, 0xABC, 0, 506, 1, flickerState),
+              "bounded animation republishes the same identity");
+        MarkAuthoredReticleUploaded(flickerState, 0xABC, 0, 506);
+        // The ~50 ms transient: six frames of a different identity, then back.
+        for (uint64_t frame = 512; frame < 518; ++frame)
+        {
+            Check(!ShouldUploadAuthoredReticle(
+                      AuthoredReticleRefreshPolicy::BoundedAnimation,
+                      true, true, 0xDEF, 0, frame, 1, flickerState),
+                  "bounded transient identity never publishes");
+        }
+        Check(flickerState.lastPublishedKey == 0xABC,
+              "bounded transient leaves the held art alone");
+        Check(ShouldUploadAuthoredReticle(
+                  AuthoredReticleRefreshPolicy::BoundedAnimation,
+                  true, true, 0xABC, 0, 518, 1, flickerState),
+              "bounded animation resumes after the transient");
+        MarkAuthoredReticleUploaded(flickerState, 0xABC, 0, 518);
+        // A real weapon swap still gets through: the same identity held for
+        // the settle window publishes.
+        Check(!ShouldUploadAuthoredReticle(
+                  AuthoredReticleRefreshPolicy::BoundedAnimation,
+                  true, true, 0xF00, 0, 600, 1, flickerState),
+              "bounded new identity settles");
+        Check(!ShouldUploadAuthoredReticle(
+                  AuthoredReticleRefreshPolicy::BoundedAnimation,
+                  true, true, 0xF00, 0, 623, 1, flickerState),
+              "bounded new identity still settling");
+        Check(ShouldUploadAuthoredReticle(
+                  AuthoredReticleRefreshPolicy::BoundedAnimation,
+                  true, true, 0xF00, 0, 624, 1, flickerState),
+              "bounded new identity publishes once settled");
         AuthoredReticleRefreshState immediateState{};
         Check(ShouldUploadAuthoredReticle(
                   AuthoredReticleRefreshPolicy::IdentityImmediate,

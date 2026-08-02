@@ -65,6 +65,46 @@ inline void ResetAuthoredReticleRefreshState(
     state.ownerEpoch = ownerEpoch;
 }
 
+// A captured art identity must persist before it is allowed to replace art
+// already on the quad. Two independent reasons, one mechanism:
+//
+// - A new identity can precede visible pixels during a level or weapon
+//   transition, so publishing it on sight replaces good art with a blank
+//   capture.
+// - Reach emits a SHORT-LIVED alternate class-2 widget set during combat. The
+//   preserved accepted Reach run
+//   `out/test-runs/74e1477-reach-outer-camera-commit-pass-20260729-112718`
+//   records the published key flipping to one and the same weapon-independent
+//   value and back within ~50 ms, repeatedly (11:24:12.173/.224,
+//   13.491/.542, 16.136/.187, 16.237/.288, 28.548/.599, 36.782/.834,
+//   50.010/.061, 54.432/.484, 11:25:06.629/.680, 07.446/.496). The same
+//   transient value appears against two different steady weapon keys, so it
+//   is not the held weapon changing. Across every one of those flips the quad
+//   heartbeat still reads `SUBMITTED ... chain=1 heldArt=1`, which proves the
+//   quad and the swapchain were never the problem - the ART was replaced.
+//
+// Official HREK CHUD tag exports independently rule out the engine hiding the
+// crosshair on damage: no collection whose scripting class is `crosshair`
+// carries any damage-driven state, and the `<player> taking damage` condition
+// is defined in the globals enum but used by no widget in any of the 63
+// exported definitions.
+inline constexpr uint64_t kAuthoredIdentitySettleFrames = 24;
+
+inline bool AuthoredReticleIdentitySettled(
+    uint64_t capturedKey, uint64_t frameSerial,
+    AuthoredReticleRefreshState& state)
+{
+    if (capturedKey != state.settlingKey ||
+        frameSerial < state.settlingSinceFrame)
+    {
+        state.settlingKey = capturedKey;
+        state.settlingSinceFrame = frameSerial;
+        return false;
+    }
+    return frameSerial - state.settlingSinceFrame >=
+        kAuthoredIdentitySettleFrames;
+}
+
 inline bool ShouldUploadAuthoredReticle(
     AuthoredReticleRefreshPolicy policy,
     bool capturedThisFrame,
@@ -86,7 +126,23 @@ inline bool ShouldUploadAuthoredReticle(
         return false;
 
     if (policy == AuthoredReticleRefreshPolicy::BoundedAnimation)
-        return true;
+    {
+        // Republishing the identity ALREADY on the quad is the animation
+        // itself - the crosshair kicks on fire and tints on a target without
+        // changing which widgets drew - so it keeps the unconditional bounded
+        // cadence and this change costs it nothing.
+        if (capturedKey == state.lastPublishedKey)
+            return true;
+        // Nothing published yet (first arm, or an owner reset): the crosshair
+        // must appear immediately rather than waiting out a settle window.
+        if (state.lastPublishedKey == 0)
+            return true;
+        // A DIFFERENT identity must prove it is not a momentary flicker before
+        // it replaces good held art. This is the same protection Halo 3's
+        // identity policy below already had, which the bounded-animation path
+        // was returning above.
+        return AuthoredReticleIdentitySettled(capturedKey, frameSerial, state);
+    }
     if (policy == AuthoredReticleRefreshPolicy::IdentityImmediate)
         return capturedKey != state.lastPublishedKey;
 
@@ -103,15 +159,7 @@ inline bool ShouldUploadAuthoredReticle(
     // A new widget identity can precede visible pixels during level/weapon
     // transitions. Settle that identity before its first publish so a blank
     // capture cannot replace good held art.
-    constexpr uint64_t kHalo3IdentitySettleFrames = 24;
-    if (capturedKey != state.settlingKey || frameSerial < state.settlingSinceFrame)
-    {
-        state.settlingKey = capturedKey;
-        state.settlingSinceFrame = frameSerial;
-        return false;
-    }
-    return frameSerial - state.settlingSinceFrame >=
-        kHalo3IdentitySettleFrames;
+    return AuthoredReticleIdentitySettled(capturedKey, frameSerial, state);
 }
 
 inline void MarkAuthoredReticleUploaded(
