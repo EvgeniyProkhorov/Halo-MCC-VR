@@ -1,23 +1,17 @@
-https://discord.gg/rfq4z8tpNG -- Join for Help, tips, live dev updates and more!
-
-
-
-<img width="1280" height="640" alt="heromxall" src="https://github.com/user-attachments/assets/fc1a542c-2a3d-4d44-bbc2-68b2f9626ca2" />
-
 ### REACH/3/ODST Now Playable in VR 
-### Work on HALO 4 will begin SOON after these hotfixes release. Yes Halo 1/2 will be in the collection eventually!
+### Halo 3 first-person vehicles are here. Reach and ODST first-person vehicles are up next.
 
-## 🆕 What's new in 0.3.1
+## 🆕 What's new in 0.3.2
 
-1. **Microsoft Store / Xbox App (Game Pass) support** — the same download now
-   works on both MCC editions, and you do not rename any game file.
-2. **ALVR / Virtual Desktop (VDXR) / Meta Link support fixed** — the doubled,
-   overlapping image some streaming setups showed is gone.
-3. **3D Cutscene Theatre Mode** — cutscenes play on a room-fixed screen with
-   real stereo depth instead of riding your head, with a depth slider in the
-   F1 menu (`cutscene_theater_depth`).
-4. **New launch page and a rebuilt F1 menu** — a one-time welcome page, plus a
-   sidebar-organized, locked F1 panel with a grab handle.
+1. **Halo 3 first-person vehicles** — sit in the vehicle instead of floating
+   behind it, with stable vehicle-relative hands, a hidden body, seat
+   recentering, and comfort controls in `halomccvr.cfg`.
+2. **Vehicle view follow** — optionally follow ground-vehicle yaw and pitch for
+   a more connected ride; aircraft remain yaw-only.
+3. **Halo 3 animated crosshair restored** — native authored reticle animation
+   is back without sacrificing the tested capture cadence.
+4. **Reach damage-bloom crosshair fix** — the crosshair stays visible when a
+   damage reaction would otherwise push the captured art out of frame.
 
 ## 🚧 What I'm working on RN
 | Feature                                            | Status         |
@@ -27,6 +21,9 @@ https://discord.gg/rfq4z8tpNG -- Join for Help, tips, live dev updates and more!
 | Cutscene 3d Theater Mode                           | ✅ Added in 0.3.1 |
 | Complete F1 Menu UI Restructure and Reorganization | ✅ Added in 0.3.1 |
 | Reach: black-world fix on sniper                   | ✅ Fixed in 0.3.1 |
+| Halo 3 first-person vehicles                       | ✅ Added in 0.3.2 |
+| Reach first-person vehicles                        | 🟡 Up next |
+| ODST first-person vehicles                         | 🟡 Up next |
 | SMAA T2X Support                                   | not possilbe atm |
 | Gamepad support/Head-Aiming Mode                   | 🟡 In Progress |
 | Scopes and weapon zoom fixes                       | 🟡 In Progress |
@@ -66,13 +63,14 @@ A native OpenXR VR mod for Halo 3, Halo 3: ODST and Halo: Reach in Halo: The
 Master Chief Collection — both the Steam edition and the Microsoft Store / Xbox
 app (Game Pass) edition.
 
-The current known-good release is
-[MCC VR Alpha 0.3.1](https://github.com/pancreations/Halo-MCC-VR/releases/tag/MCC_VR_ALPHA_0.3.1),
-a hotfixes update over 0.3.0 that adds **Microsoft Store / Xbox app (Game Pass)
-support**, fixes **double vision on ALVR**, adds a **room-fixed 3D cutscene
-theatre** to all three games, and fixes Halo: Reach's sniper-triggered
-black-world bug. It is an alpha: use it at your own risk, launch only without
-anti-cheat, and expect incomplete hardware and gameplay coverage.
+The current release is
+[Halo 3 Vehicle Update — MCC VR Alpha 0.3.2](https://github.com/pancreations/Halo-MCC-VR/releases/tag/MCC_VR_ALPHA_0.3.2).
+It adds **first-person Halo 3 vehicles** with vehicle-relative hands, body
+hiding, seat recentering, optional view follow, and comfort tuning. It also
+restores Halo 3's animated authored crosshair and fixes the Reach crosshair
+disappearing during damage bloom. It is an alpha: use it at your own risk,
+launch only without anti-cheat, and expect incomplete hardware and gameplay
+coverage.
 
 ## What works
 
@@ -83,6 +81,9 @@ anti-cheat, and expect incomplete hardware and gameplay coverage.
   comfort controls, and a shared F1 configuration menu.
 - Halo 3 campaign behavior, including cutscenes, pause/resume, death/respawn,
   and mission transitions.
+- Halo 3 first-person vehicles: a cockpit-style seat view, stable
+  vehicle-relative hands, optional body hiding, seat recentering, and an
+  optional ground-vehicle view-follow mode. New in 0.3.2.
 - ODST stereo, controls, weapons/hands, native HUD, cutscenes, vibration,
   death/respawn recovery, and one tested drivable car.
 - Halo: Reach stereo, controls, weapon aim, hands/gun, HUD, cutscenes and
@@ -115,8 +116,9 @@ Known limitations:
 - The right stick still turns you while the F1 menu is open.
 - **Microsoft Store / Game Pass only: MCC freezes for about nine seconds on the
   first loading screen. It has not crashed — wait it out.** See below.
-- Broader ODST and Reach weapon, turret, passenger-gun, vehicle, co-op, headset,
-  and long-session coverage is still needed.
+- First-person vehicles for Reach and ODST are upcoming. Broader ODST and Reach
+  weapon, turret, passenger-gun, vehicle, co-op, headset, and long-session
+  coverage is still needed.
 
 ### Game Pass: the nine-second freeze on the first loading screen
 
@@ -154,7 +156,7 @@ There is no installer script. Both the Steam copy of MCC and the Microsoft Store
 needs any game file renamed.
 
 1. Download the binary asset
-   `MCC_VR_ALPHA_0.3.1.zip` from the official `0.3.1` release page.
+   `MCC_VR_ALPHA_0.3.2.zip` from the official `0.3.2` release page.
 2. Open MCC's main game folder — the one that contains the `MCC` folder.
    - **Steam:** **Manage > Browse local files**.
    - **Microsoft Store / Game Pass:** in the Xbox app, **... > Manage > Files >
@@ -186,7 +188,7 @@ If you previously renamed `MCCWinStore-Win64-Shipping.exe` to the Steam name to
 force an older build to launch, rename it back. The launcher records the edition
 it detected in `halo3xr_launcher.log`.
 
-### Updating to 0.3.1 — replace your config
+### Updating to 0.3.2 — replace your config
 
 **Replace `halomccvr.cfg` with the one in the ZIP. Do not keep your old one.**
 This is different from updates before 0.3.0, which told you to keep it.
@@ -207,12 +209,12 @@ OpenXR runtime, fully close every MCC process before relaunching, compare the
 installed hashes below, and compare `halomccvr.cfg`. Do not use a repository
 build folder as an installation source.
 
-Release `0.3.1` hashes:
+Release `0.3.2` hashes:
 
 ```text
-ZIP      D139C7E7D507E114EB8F54A10D4FD1DAAC797D4722D9E5C29ADB969DBBB9B2AF
-DLL      5B4A852C3175021AD433373BACB825BCC5D0EDFC52AF620A26C8A2C55F00BA64
-Launcher 9F510506981B882BD571E892B88AD26951CA08948C7DADB031088060E918824A
+ZIP      A7702E2EBEFB42F30B73D684712476FA5E808256EE32A45BE77F08FFA3C81BD6
+DLL      B5B5CAC121BB934213DB82536CB3580F1A5592C58466B5495227A10ABF22A369
+Launcher D0EBE57BBE7CD5092AEDF052DCE3C4F283E16795CBCDA715566ED4D23A15DFF0
 ```
 
 Windows security software may flag or quarantine unsigned injection-based VR
@@ -224,7 +226,7 @@ security software globally.
 
 | Setting | Value |
 | --- | --- |
-| Video > Max Frame Rate | unlimited |
+| Video > Max Frame Rate | 120 |
 | Video > V-Sync | Off |
 | Halo 3 > Field of View | 120 |
 | ODST > Look Sensitivity | Maximum |
