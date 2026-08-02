@@ -640,6 +640,11 @@ namespace
     // a static crosshair costs no swapchain work at all.
     std::atomic<uint64_t> g_authoredCrosshairKey{0};
     thread_local uint64_t g_authoredCrosshairKeyAccum = 0;
+    // How many class-2 widget pieces reached the capture surface this frame.
+    // Populated by Reach only; 0 means "no count available" and leaves the
+    // completeness guard inert, which is how Halo 3 and ODST keep their
+    // accepted publish behavior exactly.
+    std::atomic<uint32_t> g_authoredCrosshairDraws{0};
     std::atomic<uint32_t> g_authoredCrosshairColorState{0};
     thread_local uint32_t g_authoredCrosshairColorStateAccum = 0;
 
@@ -13157,6 +13162,14 @@ namespace
         // which collection, which widgets. Static art produces the same key
         // every frame, which is what lets the per-frame upload be skipped.
         uint64_t captureKey = 0;
+        // How many class-2 widget pieces actually reached the capture surface
+        // this eye. Reach's crosshair does not stop cleanly - the preserved
+        // c2d9149 log shows its class-2 draws THINNING (a two-second window
+        // uploading 19 instead of 30) before reaching zero - so a frame can
+        // legitimately capture only part of the reticle. Publishing that part
+        // replaces good art with a fragment, which is what the player sees as
+        // the crosshair disappearing.
+        uint32_t captureDraws = 0;
         uint32_t generation = 0;
         uint32_t eye = 0;
         uint64_t preparedSerial = 0;
@@ -14500,9 +14513,13 @@ namespace
                             g_reachFpCameraEyeScope;
                         scope.captureKey = FoldAuthoredCrosshairKey(
                             scope.captureKey, widgetIndex, useAlternatePath);
+                        if (scope.captureDraws != 0xFFFFFFFFu)
+                            ++scope.captureDraws;
                         g_authoredCrosshairKeyAccum = scope.captureKey;
                         g_authoredCrosshairKey.store(
                             scope.captureKey, std::memory_order_release);
+                        g_authoredCrosshairDraws.store(
+                            scope.captureDraws, std::memory_order_release);
                     }
                 }
                 else
@@ -16077,6 +16094,7 @@ namespace
                 fpCameraScope.chudClass2Seen = false;
                 fpCameraScope.authoredCrosshairCaptured = false;
                 fpCameraScope.captureKey = 0;
+                fpCameraScope.captureDraws = 0;
                 memcpy(fpCameraScope.compact, compact,
                        sizeof(fpCameraScope.compact));
                 memcpy(fpCameraScope.derived, primaryDerived,
@@ -21365,6 +21383,10 @@ uint64_t Game_GetAuthoredCrosshairKey()
 {
     return g_authoredCrosshairKey.load(std::memory_order_acquire);
 }
+uint32_t Game_GetAuthoredCrosshairDrawCount()
+{
+    return g_authoredCrosshairDraws.load(std::memory_order_acquire);
+}
 uint32_t Game_GetAuthoredCrosshairColorState()
 {
     return g_authoredCrosshairColorState.load(std::memory_order_acquire);
@@ -21374,6 +21396,7 @@ void Game_ResetAuthoredCrosshairKey()
 {
     g_authoredCrosshairKeyAccum = 0;
     g_authoredCrosshairKey.store(0, std::memory_order_release);
+    g_authoredCrosshairDraws.store(0, std::memory_order_release);
     g_authoredCrosshairColorStateAccum = 0;
     g_authoredCrosshairColorState.store(0, std::memory_order_release);
 }

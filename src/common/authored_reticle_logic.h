@@ -56,6 +56,7 @@ struct AuthoredReticleRefreshState
     uint64_t settlingKey = 0;
     uint64_t settlingSinceFrame = 0;
     uint32_t lastPublishedColorState = 0;
+    uint32_t lastPublishedDraws = 0;
 };
 
 inline void ResetAuthoredReticleRefreshState(
@@ -111,6 +112,7 @@ inline bool ShouldUploadAuthoredReticle(
     bool uploadAdmitted,
     uint64_t capturedKey,
     uint32_t capturedColorState,
+    uint32_t capturedDraws,
     uint64_t frameSerial,
     uint64_t ownerEpoch,
     AuthoredReticleRefreshState& state)
@@ -127,20 +129,33 @@ inline bool ShouldUploadAuthoredReticle(
 
     if (policy == AuthoredReticleRefreshPolicy::BoundedAnimation)
     {
+        // A capture that painted FEWER widget pieces than the art already on
+        // the quad is the crosshair on its way OUT, not a new crosshair.
+        // Reach's class-2 draws thin out before they stop (preserved c2d9149
+        // log: a window uploading 19 where the steady rate was 30), so a
+        // frame can capture a fragment of the reticle, and publishing that
+        // fragment is what the player sees as the crosshair disappearing.
+        // A count of 0 means the title supplies no count, which leaves this
+        // inert - that is how Halo 3 and ODST keep their accepted behavior.
+        const bool thinnerThanPublished =
+            capturedDraws != 0 && state.lastPublishedDraws != 0 &&
+            capturedDraws < state.lastPublishedDraws;
         // Republishing the identity ALREADY on the quad is the animation
         // itself - the crosshair kicks on fire and tints on a target without
         // changing which widgets drew - so it keeps the unconditional bounded
         // cadence and this change costs it nothing.
-        if (capturedKey == state.lastPublishedKey)
+        if (capturedKey == state.lastPublishedKey && !thinnerThanPublished)
             return true;
         // Nothing published yet (first arm, or an owner reset): the crosshair
         // must appear immediately rather than waiting out a settle window.
         if (state.lastPublishedKey == 0)
             return true;
-        // A DIFFERENT identity must prove it is not a momentary flicker before
-        // it replaces good held art. This is the same protection Halo 3's
-        // identity policy below already had, which the bounded-animation path
-        // was returning above.
+        // A DIFFERENT or THINNER capture must prove it is not a momentary
+        // flicker before it replaces good held art. This is the same
+        // protection Halo 3's identity policy below already had, which the
+        // bounded-animation path was returning above. A crosshair that really
+        // has changed - or really has fewer pieces from now on - still
+        // publishes once the window passes, so nothing is permanently stuck.
         return AuthoredReticleIdentitySettled(capturedKey, frameSerial, state);
     }
     if (policy == AuthoredReticleRefreshPolicy::IdentityImmediate)
@@ -166,10 +181,12 @@ inline void MarkAuthoredReticleUploaded(
     AuthoredReticleRefreshState& state,
     uint64_t capturedKey,
     uint32_t capturedColorState,
+    uint32_t capturedDraws,
     uint64_t frameSerial)
 {
     state.lastPublishedKey = capturedKey;
     state.lastPublishedColorState = capturedColorState;
+    state.lastPublishedDraws = capturedDraws;
     state.lastUploadFrame = frameSerial;
     state.settlingKey = 0;
     state.settlingSinceFrame = 0;

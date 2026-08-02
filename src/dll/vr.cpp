@@ -7404,6 +7404,8 @@ float4 ps_scope_linearize(VSOut i):SV_Target { return paint(i.uv,true); }
                             titleCapturesArt ? Game_GetAuthoredCrosshairKey() : 0;
                         const uint32_t authoredColorState = titleCapturesArt
                             ? Game_GetAuthoredCrosshairColorState() : 0;
+                        const uint32_t authoredCrosshairDraws = titleCapturesArt
+                            ? Game_GetAuthoredCrosshairDrawCount() : 0;
                         const GameTitle reticleTitle =
                             TitleAdapter_GetActiveTitle();
                         const bool halo3AnimatesReticle =
@@ -7441,6 +7443,7 @@ float4 ps_scope_linearize(VSOut i):SV_Target { return paint(i.uv,true); }
                                 reticleUploadAdmitted,
                                 authoredCrosshairKey,
                                 authoredColorState,
+                                authoredCrosshairDraws,
                                 g_preparedFrame.serial,
                                 reticleOwnerEpoch,
                                 s_refreshState);
@@ -7453,7 +7456,8 @@ float4 ps_scope_linearize(VSOut i):SV_Target { return paint(i.uv,true); }
                         {
                             MarkAuthoredReticleUploaded(
                                 s_refreshState, authoredCrosshairKey,
-                                authoredColorState, g_preparedFrame.serial);
+                                authoredColorState, authoredCrosshairDraws,
+                                g_preparedFrame.serial);
                             ++s_uploadsDone;
                         }
                         else if (shouldUploadAuthoredReticle)
@@ -7485,15 +7489,22 @@ float4 ps_scope_linearize(VSOut i):SV_Target { return paint(i.uv,true); }
                             if (nowMs - s_lastUploadLogMs >= 2000)
                             {
                                 s_lastUploadLogMs = nowMs;
+                                // `pieces` is what makes a "the crosshair
+                                // vanished" report actionable: held < pieces
+                                // means the capture thinned out and the
+                                // completeness guard held the good art.
                                 LOG("%s reticle upload: %llu uploaded, %llu "
-                                    "skipped in the last window (key %llX)",
+                                    "skipped in the last window (key %llX, "
+                                    "pieces %u, held %u)",
                                     reachTitle ? "Reach" : "Halo 3",
                                     static_cast<unsigned long long>(
                                         s_uploadsDone),
                                     static_cast<unsigned long long>(
                                         s_uploadsSkipped),
                                     static_cast<unsigned long long>(
-                                        authoredCrosshairKey));
+                                        authoredCrosshairKey),
+                                    authoredCrosshairDraws,
+                                    s_refreshState.lastPublishedDraws);
                                 s_uploadsDone = 0;
                                 s_uploadsSkipped = 0;
                             }

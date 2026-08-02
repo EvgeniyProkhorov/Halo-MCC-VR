@@ -160,36 +160,36 @@ int main()
         AuthoredReticleRefreshState state{};
         Check(!ShouldUploadAuthoredReticle(
                   AuthoredReticleRefreshPolicy::IdentityAndColorState,
-                  true, true, 7, 2, 100, 1, state), "reticle settle starts");
+                  true, true, 7, 2, 0, 100, 1, state), "reticle settle starts");
         Check(!ShouldUploadAuthoredReticle(
                   AuthoredReticleRefreshPolicy::IdentityAndColorState,
-                  true, true, 7, 2, 123, 1, state), "reticle still settling");
+                  true, true, 7, 2, 0, 123, 1, state), "reticle still settling");
         Check(ShouldUploadAuthoredReticle(
                   AuthoredReticleRefreshPolicy::IdentityAndColorState,
-                  true, true, 7, 2, 124, 1, state), "reticle settled publish");
-        MarkAuthoredReticleUploaded(state, 7, 2, 124);
+                  true, true, 7, 2, 0, 124, 1, state), "reticle settled publish");
+        MarkAuthoredReticleUploaded(state, 7, 2, 0, 124);
         Check(!ShouldUploadAuthoredReticle(
                   AuthoredReticleRefreshPolicy::IdentityAndColorState,
-                  true, true, 7, 2, 130, 1, state), "same colour skipped");
+                  true, true, 7, 2, 0, 130, 1, state), "same colour skipped");
         Check(ShouldUploadAuthoredReticle(
                   AuthoredReticleRefreshPolicy::IdentityAndColorState,
-                  true, true, 7, 4, 130, 1, state), "colour edge publish");
-        MarkAuthoredReticleUploaded(state, 7, 4, 130);
+                  true, true, 7, 4, 0, 130, 1, state), "colour edge publish");
+        MarkAuthoredReticleUploaded(state, 7, 4, 0, 130);
         Check(!ShouldUploadAuthoredReticle(
                   AuthoredReticleRefreshPolicy::IdentityAndColorState,
-                  true, true, 7, 8, 133, 1, state), "colour edge throttled");
+                  true, true, 7, 8, 0, 133, 1, state), "colour edge throttled");
         Check(ShouldUploadAuthoredReticle(
                   AuthoredReticleRefreshPolicy::IdentityAndColorState,
-                  true, true, 7, 8, 136, 1, state), "colour edge after gap");
+                  true, true, 7, 8, 0, 136, 1, state), "colour edge after gap");
         Check(!ShouldUploadAuthoredReticle(
                   AuthoredReticleRefreshPolicy::IdentityAndColorState,
-                  true, true, 8, 8, 200, 1, state), "new identity settles");
+                  true, true, 8, 8, 0, 200, 1, state), "new identity settles");
         Check(ShouldUploadAuthoredReticle(
                   AuthoredReticleRefreshPolicy::IdentityAndColorState,
-                  true, true, 8, 8, 224, 1, state), "new identity publishes");
+                  true, true, 8, 8, 0, 224, 1, state), "new identity publishes");
         Check(ShouldUploadAuthoredReticle(
                   AuthoredReticleRefreshPolicy::BoundedAnimation,
-                  true, true, 7, 0, 230, 1, state), "bounded title cadence");
+                  true, true, 7, 0, 0, 230, 1, state), "bounded title cadence");
         // GitHub #70: Reach's crosshair vanished for a moment when the player
         // took damage. The preserved 74e1477 log shows the published art key
         // flipping to one weapon-independent value and back inside ~50 ms,
@@ -201,78 +201,126 @@ int main()
         AuthoredReticleRefreshState flickerState{};
         Check(ShouldUploadAuthoredReticle(
                   AuthoredReticleRefreshPolicy::BoundedAnimation,
-                  true, true, 0xABC, 0, 500, 1, flickerState),
+                  true, true, 0xABC, 0, 0, 500, 1, flickerState),
               "bounded first art publishes immediately");
-        MarkAuthoredReticleUploaded(flickerState, 0xABC, 0, 500);
+        MarkAuthoredReticleUploaded(flickerState, 0xABC, 0, 0, 500);
         Check(ShouldUploadAuthoredReticle(
                   AuthoredReticleRefreshPolicy::BoundedAnimation,
-                  true, true, 0xABC, 0, 506, 1, flickerState),
+                  true, true, 0xABC, 0, 0, 506, 1, flickerState),
               "bounded animation republishes the same identity");
-        MarkAuthoredReticleUploaded(flickerState, 0xABC, 0, 506);
+        MarkAuthoredReticleUploaded(flickerState, 0xABC, 0, 0, 506);
         // The ~50 ms transient: six frames of a different identity, then back.
         for (uint64_t frame = 512; frame < 518; ++frame)
         {
             Check(!ShouldUploadAuthoredReticle(
                       AuthoredReticleRefreshPolicy::BoundedAnimation,
-                      true, true, 0xDEF, 0, frame, 1, flickerState),
+                      true, true, 0xDEF, 0, 0, frame, 1, flickerState),
                   "bounded transient identity never publishes");
         }
         Check(flickerState.lastPublishedKey == 0xABC,
               "bounded transient leaves the held art alone");
         Check(ShouldUploadAuthoredReticle(
                   AuthoredReticleRefreshPolicy::BoundedAnimation,
-                  true, true, 0xABC, 0, 518, 1, flickerState),
+                  true, true, 0xABC, 0, 0, 518, 1, flickerState),
               "bounded animation resumes after the transient");
-        MarkAuthoredReticleUploaded(flickerState, 0xABC, 0, 518);
+        MarkAuthoredReticleUploaded(flickerState, 0xABC, 0, 0, 518);
         // A real weapon swap still gets through: the same identity held for
         // the settle window publishes.
         Check(!ShouldUploadAuthoredReticle(
                   AuthoredReticleRefreshPolicy::BoundedAnimation,
-                  true, true, 0xF00, 0, 600, 1, flickerState),
+                  true, true, 0xF00, 0, 0, 600, 1, flickerState),
               "bounded new identity settles");
         Check(!ShouldUploadAuthoredReticle(
                   AuthoredReticleRefreshPolicy::BoundedAnimation,
-                  true, true, 0xF00, 0, 623, 1, flickerState),
+                  true, true, 0xF00, 0, 0, 623, 1, flickerState),
               "bounded new identity still settling");
         Check(ShouldUploadAuthoredReticle(
                   AuthoredReticleRefreshPolicy::BoundedAnimation,
-                  true, true, 0xF00, 0, 624, 1, flickerState),
+                  true, true, 0xF00, 0, 0, 624, 1, flickerState),
               "bounded new identity publishes once settled");
+        // GitHub #70, the harder half: Reach's crosshair THINS OUT before it
+        // stops. The preserved c2d9149 log shows a two-second window uploading
+        // 19 where the steady rate was 30, so frames capture a fragment of the
+        // reticle under the SAME identity key. Publishing that fragment is
+        // what the player sees as the crosshair disappearing when hit.
+        AuthoredReticleRefreshState thinState{};
+        Check(ShouldUploadAuthoredReticle(
+                  AuthoredReticleRefreshPolicy::BoundedAnimation,
+                  true, true, 0xABC, 0, 5, 700, 1, thinState),
+              "bounded full capture publishes");
+        MarkAuthoredReticleUploaded(thinState, 0xABC, 0, 5, 700);
+        Check(thinState.lastPublishedDraws == 5, "published piece count kept");
+        for (uint64_t frame = 706; frame < 724; ++frame)
+        {
+            Check(!ShouldUploadAuthoredReticle(
+                      AuthoredReticleRefreshPolicy::BoundedAnimation,
+                      true, true, 0xABC, 0, 1, frame, 1, thinState),
+                  "thinned capture never replaces good art");
+        }
+        Check(thinState.lastPublishedDraws == 5,
+              "thinned capture leaves the held art alone");
+        // The full crosshair coming back publishes at once - no settle debt.
+        Check(ShouldUploadAuthoredReticle(
+                  AuthoredReticleRefreshPolicy::BoundedAnimation,
+                  true, true, 0xABC, 0, 5, 724, 1, thinState),
+              "full capture returns immediately");
+        MarkAuthoredReticleUploaded(thinState, 0xABC, 0, 5, 724);
+        // A permanently simpler crosshair is not held hostage: once the lower
+        // piece count persists past the settle window it publishes.
+        Check(!ShouldUploadAuthoredReticle(
+                  AuthoredReticleRefreshPolicy::BoundedAnimation,
+                  true, true, 0xABC, 0, 2, 800, 1, thinState),
+              "sustained thinner capture starts settling");
+        Check(ShouldUploadAuthoredReticle(
+                  AuthoredReticleRefreshPolicy::BoundedAnimation,
+                  true, true, 0xABC, 0, 2, 824, 1, thinState),
+              "sustained thinner capture eventually publishes");
+        // A title that supplies no piece count (Halo 3, ODST) is unaffected.
+        AuthoredReticleRefreshState noCountState{};
+        Check(ShouldUploadAuthoredReticle(
+                  AuthoredReticleRefreshPolicy::BoundedAnimation,
+                  true, true, 0xABC, 0, 0, 900, 1, noCountState),
+              "no piece count publishes");
+        MarkAuthoredReticleUploaded(noCountState, 0xABC, 0, 0, 900);
+        Check(ShouldUploadAuthoredReticle(
+                  AuthoredReticleRefreshPolicy::BoundedAnimation,
+                  true, true, 0xABC, 0, 0, 906, 1, noCountState),
+              "no piece count leaves the guard inert");
         AuthoredReticleRefreshState immediateState{};
         Check(ShouldUploadAuthoredReticle(
                   AuthoredReticleRefreshPolicy::IdentityImmediate,
-                  true, true, 31, 0, 240, 1, immediateState), __func__);
-        MarkAuthoredReticleUploaded(immediateState, 31, 0, 240);
+                  true, true, 31, 0, 0, 240, 1, immediateState), __func__);
+        MarkAuthoredReticleUploaded(immediateState, 31, 0, 0, 240);
         Check(!ShouldUploadAuthoredReticle(
                   AuthoredReticleRefreshPolicy::IdentityImmediate,
-                  true, true, 31, 0, 270, 1, immediateState), __func__);
+                  true, true, 31, 0, 0, 270, 1, immediateState), __func__);
         Check(ShouldUploadAuthoredReticle(
                   AuthoredReticleRefreshPolicy::IdentityImmediate,
-                  true, true, 32, 0, 270, 1, immediateState), __func__);
+                  true, true, 32, 0, 0, 270, 1, immediateState), __func__);
         AuthoredReticleRefreshState odstState{};
         Check(!ShouldUploadAuthoredReticle(
                   AuthoredReticleRefreshPolicy::IdentityAndColorState,
-                  true, true, 21, 0, 300, 1, odstState), __func__);
+                  true, true, 21, 0, 0, 300, 1, odstState), __func__);
         Check(ShouldUploadAuthoredReticle(
                   AuthoredReticleRefreshPolicy::IdentityAndColorState,
-                  true, true, 21, 0, 324, 1, odstState), __func__);
-        MarkAuthoredReticleUploaded(odstState, 21, 0, 324);
+                  true, true, 21, 0, 0, 324, 1, odstState), __func__);
+        MarkAuthoredReticleUploaded(odstState, 21, 0, 0, 324);
         Check(!ShouldUploadAuthoredReticle(
                   AuthoredReticleRefreshPolicy::IdentityAndColorState,
-                  true, true, 21, 0, 400, 1, odstState), __func__);
+                  true, true, 21, 0, 0, 400, 1, odstState), __func__);
         Check(!ShouldUploadAuthoredReticle(
                   AuthoredReticleRefreshPolicy::IdentityAndColorState,
-                  true, true, 22, 0, 400, 1, odstState), __func__);
+                  true, true, 22, 0, 0, 400, 1, odstState), __func__);
         Check(ShouldUploadAuthoredReticle(
                   AuthoredReticleRefreshPolicy::IdentityAndColorState,
-                  true, true, 22, 0, 424, 1, odstState), __func__);
+                  true, true, 22, 0, 0, 424, 1, odstState), __func__);
         Check(!AuthoredReticleLayerHasContent(true, false) &&
                   AuthoredReticleLayerHasContent(true, true) &&
                   AuthoredReticleLayerHasContent(false, false),
               "held authored layer gate");
         Check(!ShouldUploadAuthoredReticle(
                   AuthoredReticleRefreshPolicy::IdentityAndColorState,
-                  true, true, 9, 2, 400, 2, state) &&
+                  true, true, 9, 2, 0, 400, 2, state) &&
                   state.ownerEpoch == 2 && state.lastPublishedKey == 0,
               "reticle owner reset");
     }
@@ -317,9 +365,9 @@ int main()
             // crosshair does not change which widgets drew.
             if (ShouldUploadAuthoredReticle(
                     AuthoredReticleRefreshPolicy::BoundedAnimation,
-                    true, true, 0xABCD, 0, serial, 1, animated))
+                    true, true, 0xABCD, 0, 0, serial, 1, animated))
             {
-                MarkAuthoredReticleUploaded(animated, 0xABCD, 0, serial);
+                MarkAuthoredReticleUploaded(animated, 0xABCD, 0, 0, serial);
                 ++published;
             }
         }
