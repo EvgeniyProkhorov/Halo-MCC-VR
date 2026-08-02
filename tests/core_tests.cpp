@@ -1184,6 +1184,62 @@ int main()
               kReachPatchyFogSkipMask == 0x08,
             "Reach VR patchy-fog policy sets and restores only the exact proven skip bit");
 
+        // Atmospheric fog is the OPPOSITE polarity to patchy fog above: the bit
+        // means "enabled", so suppression CLEARS it and restore SETS it. Both
+        // must leave every other bit in the shared render flags byte alone.
+        bool atmosphereFogPolicyExact = true;
+        for (unsigned original = 0; original <= 0xFFu; ++original)
+        {
+            const uint8_t originalByte = static_cast<uint8_t>(original);
+            const uint8_t suppressed =
+                ReachAtmosphereFogSuppressedFlags(originalByte);
+            const uint8_t restored =
+                ReachAtmosphereFogRestoredFlags(originalByte);
+            constexpr uint8_t kOther =
+                static_cast<uint8_t>(~kReachAtmosphereFogEnableMask);
+            atmosphereFogPolicyExact = atmosphereFogPolicyExact &&
+                (suppressed & kReachAtmosphereFogEnableMask) == 0 &&
+                (suppressed & kOther) == (originalByte & kOther) &&
+                (restored & kReachAtmosphereFogEnableMask) ==
+                    kReachAtmosphereFogEnableMask &&
+                (restored & kOther) == (originalByte & kOther) &&
+                // Suppress-then-restore returns the byte whenever the bit was
+                // set to begin with, which is the only case that suppresses.
+                (!(originalByte & kReachAtmosphereFogEnableMask) ||
+                 ReachAtmosphereFogRestoredFlags(suppressed) == originalByte);
+        }
+        Check(atmosphereFogPolicyExact &&
+              kReachAtmosphereFogHelperRva == 0x0026D5B4 &&
+              kReachAtmosphereFogHelperCallRva == 0x0026CC54 &&
+              kReachAtmosphereFogTlsIndexLoadRva == 0x0026D5DF &&
+              kReachAtmosphereFogTlsIndexRva == 0x00C17B18 &&
+              kReachAtmosphereFogSlotLoadRva == 0x0026D5E5 &&
+              kReachAtmosphereFogGateTestRva == 0x0026D5F3 &&
+              kReachAtmosphereFogSkipJumpRva == 0x0026D5F6 &&
+              kReachAtmosphereFogFlagsSlotOffset == 0x168 &&
+              kReachAtmosphereFogEnableMask == 0x04 &&
+              kReachRenderTlsIndexLimit == 256 &&
+              // The two fog systems are separate structures. Sharing a mask
+              // between them would silently make one control the other.
+              kReachAtmosphereFogEnableMask != kReachPatchyFogSkipMask,
+            "Reach atmospheric-fog policy clears and restores only the exact proven enable bit");
+
+        Check(kReachDebugVarTypeBoolean == 5 &&
+              kReachRenderRainValueRva == 0x00B4444C &&
+              kReachRenderRainGateRva == 0x0026CC92 &&
+              kReachRainParticleRenderRva == 0x00288D60 &&
+              ReachRenderRainSlotMatchesPinnedImage(
+                  0x180000000u, kReachRetailImageSize,
+                  0x180000000u + kReachRenderRainValueRva) &&
+              // A slot one byte away is the NEIGHBOURING boolean, not rain.
+              !ReachRenderRainSlotMatchesPinnedImage(
+                  0x180000000u, kReachRetailImageSize,
+                  0x180000000u + kReachRenderRainValueRva + 1) &&
+              !ReachRenderRainSlotMatchesPinnedImage(
+                  0x180000000u, kReachRetailImageSize - 1,
+                  0x180000000u + kReachRenderRainValueRva),
+            "Reach render_rain is a boolean debug var cross-checked against the pinned image");
+
         Check(kReachSkyParallaxSignatureRva == 0x0024B5C4 &&
               kReachSkyParallaxQuantizeRva == 0x0024B5DB &&
               kReachModelFlagsOffset == 0x015C &&
@@ -4170,6 +4226,7 @@ int main()
         "scope_screen_width_m", "scope_screen_right_m", "scope_screen_up_m",
         "scope_screen_forward_m", "scope_refresh_divisor", "game_brightness",
         "resolution_scale", "upscale_filter", "sharpness", "aa_mode",
+        "rain", "atmospheric_fog",
         "hud_size", "hud_aspect", "hud_curvature",
         "hud_vertical_offset", "motion_blur", "auto_vr", "two_handed_aim",
         "two_hand_toggle", "left_hand_forward_m", "two_hand_zone_right_m",

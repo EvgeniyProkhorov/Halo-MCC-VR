@@ -449,6 +449,10 @@ void ConfigLoad(const wchar_t* path)
             g_config.coop_probe = atoi(val) != 0;
         else if (!strcmp(key, "draw_distance"))
             g_config.draw_distance = (float)atof(val);
+        else if (!strcmp(key, "rain"))
+            g_config.rain = atoi(val) != 0;
+        else if (!strcmp(key, "atmospheric_fog"))
+            g_config.atmospheric_fog = atoi(val) != 0;
         else if (!strcmp(key, "upscale_filter"))
             g_config.upscale_filter = atoi(val);
         else if (!strcmp(key, "sharpness"))
@@ -975,6 +979,21 @@ void ConfigSave()
     fprintf(f, "# (default %.2f, range %.2f to %.2f)\n",
             d.draw_distance, kDrawDistanceMin, kDrawDistanceMax);
     fprintf(f, "draw_distance = %.2f\n\n", g_config.draw_distance);
+    fprintf(f, "# Weather. Both are OFF by default because they read as a soft,\n");
+    fprintf(f, "# washed-out picture in a headset. They drive the game's own switch\n");
+    fprintf(f, "# for each effect and apply live, no restart. Halo: Reach is the\n");
+    fprintf(f, "# game that honours these today; a game with no proven switch for an\n");
+    fprintf(f, "# effect just leaves it alone and says so in halo3xr.log.\n");
+    fprintf(f, "#\n");
+    fprintf(f, "# Rain: the streaks the rain renderer draws across your view.\n");
+    fprintf(f, "# 1 = the game's normal rain, 0 = no rain.\n");
+    fprintf(f, "# (default %d)\n", d.rain ? 1 : 0);
+    fprintf(f, "rain = %d\n\n", g_config.rain ? 1 : 0);
+    fprintf(f, "# Atmospheric fog: the distance haze that greys out far terrain and\n");
+    fprintf(f, "# flattens contrast. Turning it off is the bigger clarity win of the\n");
+    fprintf(f, "# two. 1 = the game's normal fog, 0 = no fog.\n");
+    fprintf(f, "# (default %d)\n", d.atmospheric_fog ? 1 : 0);
+    fprintf(f, "atmospheric_fog = %d\n\n", g_config.atmospheric_fog ? 1 : 0);
     fprintf(f, "# Upscale/resolve filter for the headset image: 0 = linear (old),\n");
     fprintf(f, "# 1 = sharp (strong bicubic). The game usually renders below your\n");
     fprintf(f, "# headset's per-eye resolution, so the mod upscales the difference;\n");
