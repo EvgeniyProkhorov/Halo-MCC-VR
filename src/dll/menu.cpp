@@ -416,7 +416,6 @@ namespace
             case VK_F2: Game_ToggleHeadTracking(); return 0;
             case VK_F3: Game_Recenter(); return 0;
             case VK_F6: Game_TogglePositional(); return 0;
-            case VK_F7: Game_ToggleManualTheater(); return 0;
             case VK_F8: Game_PitchTrim(-1); return 0;
             case VK_F9: Game_PitchTrim(+1); return 0;
             case VK_F10: VR_ToggleScreenFollow(); return 0;

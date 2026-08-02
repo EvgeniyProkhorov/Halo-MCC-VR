@@ -145,12 +145,6 @@ namespace
     constexpr int32_t kHalo3ChannelScene = -1000;
     constexpr int32_t kHalo3ChannelShot = -1000;
 
-    // F7: force the cutscene theatre by hand. The automatic channel latch above
-    // only fires if Halo's script actually requests the freeze; this gives the
-    // player the same theatre on demand, for any moment they want it, with no
-    // detection involved at all.
-    std::atomic<bool> g_manualTheater{false};
-
     bool Halo3FrozenChannelActive()
     {
         const uint32_t channel =
@@ -4926,8 +4920,7 @@ namespace
         // once on entry and once on exit instead of flapping, and the theatre
         // owns the view in between. Released automatically when the script
         // restores input or the runtime generation changes.
-        if (Halo3FrozenChannelActive() ||
-            g_manualTheater.load(std::memory_order_acquire))
+        if (Halo3FrozenChannelActive())
         {
             scene = kHalo3ChannelScene;
             shot = kHalo3ChannelShot;
@@ -22641,18 +22634,6 @@ void Game_ToggleVrAim()
     const bool on = !g_vrAim.load();
     g_vrAim = on;
     LOG("VR aim (right controller steers weapon) %s", on ? "ON" : "OFF");
-}
-
-void Game_ToggleManualTheater()
-{
-    const bool on = !g_manualTheater.load(std::memory_order_relaxed);
-    g_manualTheater.store(on, std::memory_order_release);
-    LOG("cutscene theatre forced %s by hand (F7)", on ? "ON" : "OFF");
-}
-
-bool Game_ManualTheaterActive()
-{
-    return g_manualTheater.load(std::memory_order_acquire);
 }
 
 // Reach reuses the shared closed-loop aim steering, but publishes no runtime
