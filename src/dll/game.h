@@ -98,6 +98,8 @@ void Game_PitchTrim(int dir);   // F8 (down) / F9 (up): nudge pitch offset
 void Game_LeanScale(int dir);   // PageDown / PageUp: leaning strength
 void Game_GunScale(int dir); // Home (bigger) / End (smaller): hand-anchored weapon mesh size
 void Game_ToggleVrAim();        // Insert: right controller steers the weapon aim
+void Game_ToggleManualTheater(); // F7: force the cutscene theatre on/off
+bool Game_ManualTheaterActive();
 
 // M3 VR aim: called by the XInput hook on the game's input thread. Returns
 // the right-stick deflection (-1..1) that turns the game's aim toward the
