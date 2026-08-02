@@ -854,8 +854,8 @@ namespace
         changed |= ImGui::Checkbox("View follows the vehicle",
                                    &g_config.vehicle_view_follow);
         ImGui::TextDisabled(
-            "ON (default) turns with the vehicle through hard impacts and\n"
-            "spins. OFF keeps the view locked to the world.");
+            "ON follows ground-vehicle yaw/pitch; aircraft stay yaw-only.\n"
+            "Roll stays stable. OFF is world-locked (default).");
         changed |= ImGui::Checkbox("Match the rendered vehicle motion",
                                    &g_config.vehicle_cam_smoothing);
         ImGui::TextDisabled(

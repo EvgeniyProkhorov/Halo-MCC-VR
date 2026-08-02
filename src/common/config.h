@@ -228,10 +228,9 @@ struct Config
     bool vehicle_cam_forward_set[kVehicleTrimSlots] = {};
     bool vehicle_cam_up_set[kVehicleTrimSlots] = {};
     bool vehicle_cam_right_set[kVehicleTrimSlots] = {};
-    // ON turns the view by every heading change from the same concrete vehicle
-    // seat. OFF keeps the world-locked view Alpha 0.3.1 shipped.
-    // Headset-tuned OFF by the maintainer on 2026-08-01 after driving every
-    // seat: the follow is available but is not what the vehicles ship as.
+    // Optional vehicle-frame view: ON follows ground-vehicle yaw and pitch
+    // while keeping roll out of the horizon; aircraft stay yaw-only. OFF keeps
+    // the world-locked view Alpha 0.3.1 shipped; it remains the default.
     bool vehicle_view_follow = false;
     // Use the same interpolated seat/attachment node the visible vehicle uses,
     // plus occupant-head motion relative to the settled pose in that seat.

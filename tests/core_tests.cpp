@@ -6137,6 +6137,48 @@ int main()
                 "invalid or degenerate samples");
         }
 
+        // C25: tracked poses compose inside roll-free vehicle yaw+pitch.
+        {
+            const auto approx = [](float a, float b) {
+                return std::fabs(a - b) <= 1.0e-4f;
+            };
+            const float hill = 20.0f / 57.2957795f;
+            float nose[3] = {std::cos(hill), 0.0f, std::sin(hill)};
+            float pitch = 0.0f;
+            float badNose[3] = {
+                std::numeric_limits<float>::quiet_NaN(), 0.0f, 0.0f};
+            const bool pitchSafe =
+                Halo3RollStablePitchFromForward(nose, pitch) &&
+                approx(pitch, hill) &&
+                !Halo3RollStablePitchFromForward(badNose, pitch);
+            float hillBasis[9], sideBasis[9];
+            const bool hillSafe =
+                Halo3ComposeRollStableFollowBasis(
+                    0.0f, hill, 0.0f, 0.0f, 0.0f, 0.0f, hillBasis) &&
+                approx(hillBasis[0], std::cos(hill)) &&
+                approx(hillBasis[2], std::sin(hill)) &&
+                approx(hillBasis[6], -std::sin(hill)) &&
+                approx(hillBasis[8], std::cos(hill));
+            // A 90-degree local look points across the hill, not uphill.
+            const bool sideSafe =
+                Halo3ComposeRollStableFollowBasis(
+                    0.0f, hill, 0.0f, 1.5707963268f, 0.0f, 0.0f,
+                    sideBasis) &&
+                approx(sideBasis[0], 0.0f) &&
+                approx(sideBasis[1], 1.0f) &&
+                approx(sideBasis[2], 0.0f);
+            const bool pitchSeatPolicy =
+                Halo3SeatFollowsPitch(Halo3VehicleId::Warthog, 0, false) &&
+                Halo3SeatFollowsPitch(Halo3VehicleId::Warthog, 1, false) &&
+                Halo3SeatFollowsPitch(Halo3VehicleId::Scorpion, 0, false) &&
+                !Halo3SeatFollowsPitch(Halo3VehicleId::Hornet, 1, false) &&
+                !Halo3SeatFollowsPitch(Halo3VehicleId::Banshee, 0, false) &&
+                !Halo3SeatFollowsPitch(Halo3VehicleId::Hornet, 0, false) &&
+                !Halo3SeatFollowsPitch(Halo3VehicleId::Unknown, 0, false);
+            Check(pitchSafe && hillSafe && sideSafe && pitchSeatPolicy,
+                  "Vehicle pitch follow is roll-stable and seat-safe");
+        }
+
         // C9 steering ownership. The seat that authors steering must be
         // exactly the seat where the hull-follow reference destroys the closed
         // loop's feedback: a look-steered vehicle's driver, and only while the
@@ -6206,11 +6248,27 @@ int main()
                 Halo3SeatFollowsHull(Halo3VehicleId::Warthog, 0, false) &&
                 Halo3SeatFollowsHull(Halo3VehicleId::Banshee, 0, false) &&
                 Halo3SeatFollowsHull(Halo3VehicleId::Chopper, 0, false);
+            const bool turnOwnership =
+                Halo3VrTurnOwnsStick(false, false) &&
+                Halo3VrTurnOwnsStick(false, true) &&
+                !Halo3VrTurnOwnsStick(true, false) &&
+                Halo3VrTurnOwnsStick(true, true);
+            bool snapLatched = false;
+            const bool heldTakeoverSafe =
+                !Halo3ConsumeSnapTurn(false, 0.9f, snapLatched) &&
+                snapLatched &&
+                !Halo3ConsumeSnapTurn(true, 0.9f, snapLatched);
+            const bool deliberateSnap =
+                !Halo3ConsumeSnapTurn(false, 0.0f, snapLatched) &&
+                !snapLatched &&
+                Halo3ConsumeSnapTurn(true, 0.9f, snapLatched) &&
+                !Halo3ConsumeSnapTurn(true, 0.9f, snapLatched);
             Check(drivers && families && wheelSeats && gate && follows &&
-                  consistent,
+                  consistent && turnOwnership && heldTakeoverSafe &&
+                  deliberateSnap,
                 "Only a look-steered vehicle's driver authors steering, only "
-                "while the view follows the hull, and the follow never "
-                "reaches a seat that aims the frame it would follow");
+                "while the view follows the hull; the wheel frees the turn "
+                "stick, and unsafe pitch-follow seats remain excluded");
         }
 
         // C20 first-person seat flag. The exact stock flag words come from the

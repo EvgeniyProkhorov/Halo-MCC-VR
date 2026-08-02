@@ -1910,3 +1910,59 @@ trim, leaves untuned vehicles bare, and that the follow ships off.
 
 **Status: C24 candidate — NOT HEADSET ACCEPTED.** C23's behavior was accepted on
 the Store edition; this candidate changes defaults and configuration only.
+
+## C25 - optional roll-stable pitch follow and wheel-active VR turn
+
+This candidate starts from source `be5abcf79d2fd5dc93be03db14c58cc5a977ab84`
+(the baseline named by the user) and bundles the two related vehicle-camera
+changes the user explicitly requested for the next build. They share one
+orientation/control contract, but remain separately observable in the headset.
+
+### The existing checkbox remains the only follow switch
+
+`vehicle_view_follow` still defaults to **false**, still round-trips through the
+same config key, and is still the F1 `View follows the vehicle` checkbox. OFF
+does not consume the C25 publication and reaches the established world-locked
+camera/controller/aim math. A missing, stale (over 100 ms), cross-generation,
+non-finite, or torn pitch publication fails only the new pitch component back
+to the accepted yaw-only follow; it cannot disarm the Halo 3 camera core. The
+50 ms worker logs Active, intentional YawOnly, and YawOnlyFallback transitions.
+
+ON now follows the rendered seat node's **yaw and pitch**, but deliberately not
+its roll. The live `rawFwd` vector already used by the accepted yaw path gives
+pitch as `atan2(z, length(xy))`. Suspension bank, a side impact, or a vehicle
+roll is therefore not copied into the player's horizon. Headset roll still
+works. This ground-vehicle candidate makes no new promise across a ground
+vehicle's extreme end-over-end projected-yaw singularity.
+
+The order is `Rvehicle(yaw,pitch,roll=0) * Rlocal(tracked pose)`, where local yaw
+contains the existing smooth/snap-turn offset. This order matters: on an uphill
+vehicle, looking 90 degrees sideways looks across the vehicle rather than
+remaining pitched uphill in every world direction. The same roll-free frame is
+used by the camera, both controller bases, head/controller room translation,
+and the parallax-corrected aim ray so every consumer uses the same coordinate
+contract. A controller pose reuses one exact publication for orientation and
+translation, and pitched frames cannot train the persistent gravity estimator.
+
+Every Banshee and Hornet seat remains on proven yaw-only follow. Their normal
+flight crosses vertical, where forward alone cannot choose a continuous
+roll-free up vector; driver pitch is also vertical aim feedback, so adding it
+would cancel feedback and turn a held hand angle into continuous climb/dive.
+A transported aircraft frame/yoke author is a separate behavior and candidate.
+
+### Smooth turn resumes only when the wheel owns steering
+
+In a look-steered ground driver seat, the right stick remains Halo's steering
+fallback while the virtual wheel is released, so consuming it for VR turn would
+still make one input both turn the view and swerve. Once the two-hand wheel is
+actively publishing steering, the stick is free and `ApplyVrTurn` resumes the
+user's existing `turn_smooth` or snap setting. Its performance-counter timestamp
+now advances even while steering owns the stick, preventing a one-frame turn
+jump when the wheel is taken. Releasing the wheel restores stick steering and
+suppresses VR turn again.
+
+Unit coverage fixes the hill composition order, invalid-sample fallback, full
+aircraft-family pitch exclusion, snap takeover re-arming, and the four-state
+steering/wheel turn-ownership truth table.
+
+**Status: C25 candidate - NOT HEADSET ACCEPTED.**

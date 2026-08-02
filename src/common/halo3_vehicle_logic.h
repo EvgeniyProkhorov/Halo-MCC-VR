@@ -1197,6 +1197,105 @@ inline float Halo3SeatYawDelta(Halo3SeatYaw& state, const float fwd[3],
     return step;
 }
 
+// Pitch for the roll-stable vehicle-follow frame. The live rendered seat node
+// supplies a complete basis, but vehicle roll is deliberately not consumed:
+// suspension bank, a collision, or a flip must not roll the player's horizon.
+// Forward gives the ground-vehicle elevation without consuming the node's up
+// vector. Aircraft are excluded below because normal flight crosses the Euler
+// vertical where a forward-only roll-free frame is not uniquely defined.
+inline bool Halo3RollStablePitchFromForward(const float fwd[3],
+                                             float& outPitch)
+{
+    if (!fwd || !std::isfinite(fwd[0]) || !std::isfinite(fwd[1]) ||
+        !std::isfinite(fwd[2]))
+        return false;
+    const float horizontal =
+        std::sqrt(fwd[0] * fwd[0] + fwd[1] * fwd[1]);
+    const float length = std::sqrt(horizontal * horizontal + fwd[2] * fwd[2]);
+    if (!std::isfinite(length) || length < 1.0e-4f)
+        return false;
+    outPitch = std::atan2(fwd[2], horizontal);
+    return std::isfinite(outPitch);
+}
+
+// Compose a tracked yaw/pitch/roll basis inside the vehicle's yaw+pitch frame.
+// `gameYawRef - hullYaw` is the player's artificial snap/smooth-turn offset.
+// Multiplication order is load-bearing: on a hill, looking 90 degrees sideways
+// must look along the vehicle's side rather than keep pitching every compass
+// direction uphill. At hullPitch == 0 this reduces to the pre-feature mapping
+// exactly. Columns are forward, left, up in Halo's game axes.
+inline bool Halo3ComposeRollStableFollowBasis(
+    float hullYaw, float hullPitch, float gameYawRef,
+    float trackedYawDelta, float trackedPitch, float trackedRoll,
+    float outBasis[9])
+{
+    if (!outBasis || !std::isfinite(hullYaw) ||
+        !std::isfinite(hullPitch) || !std::isfinite(gameYawRef) ||
+        !std::isfinite(trackedYawDelta) || !std::isfinite(trackedPitch) ||
+        !std::isfinite(trackedRoll))
+        return false;
+
+    auto basisFromAngles = [](float yaw, float pitch, float roll,
+                              float basis[9]) {
+        const float cp = std::cos(pitch), sp = std::sin(pitch);
+        const float cy = std::cos(yaw), sy = std::sin(yaw);
+        const float cr = std::cos(roll), sr = std::sin(roll);
+        basis[0] = cp * cy;
+        basis[1] = cp * sy;
+        basis[2] = sp;
+        basis[6] = (-sp * cy) * cr + sy * sr;
+        basis[7] = (-sp * sy) * cr - cy * sr;
+        basis[8] = cp * cr;
+        basis[3] = basis[7] * basis[2] - basis[8] * basis[1];
+        basis[4] = basis[8] * basis[0] - basis[6] * basis[2];
+        basis[5] = basis[6] * basis[1] - basis[7] * basis[0];
+    };
+
+    float hull[9], local[9];
+    basisFromAngles(hullYaw, hullPitch, 0.0f, hull);
+    const float localYaw = Halo3WrapPi(
+        Halo3WrapPi(gameYawRef - hullYaw) + trackedYawDelta);
+    basisFromAngles(localYaw, trackedPitch, trackedRoll, local);
+
+    for (int column = 0; column < 3; ++column)
+    {
+        const int c = column * 3;
+        for (int row = 0; row < 3; ++row)
+        {
+            outBasis[c + row] =
+                hull[row] * local[c] +
+                hull[3 + row] * local[c + 1] +
+                hull[6 + row] * local[c + 2];
+            if (!std::isfinite(outBasis[c + row]))
+                return false;
+        }
+    }
+    return true;
+}
+
+inline bool Halo3TransformBasisVector(const float basis[9],
+                                      const float local[3], float out[3])
+{
+    if (!basis || !local || !out)
+        return false;
+    for (int i = 0; i < 3; ++i)
+    {
+        if (!std::isfinite(local[i]))
+            return false;
+        for (int j = 0; j < 3; ++j)
+            if (!std::isfinite(basis[i * 3 + j]))
+                return false;
+    }
+    for (int row = 0; row < 3; ++row)
+    {
+        out[row] = basis[row] * local[0] + basis[3 + row] * local[1] +
+            basis[6 + row] * local[2];
+        if (!std::isfinite(out[row]))
+            return false;
+    }
+    return true;
+}
+
 
 // ---- Virtual steering wheel --------------------------------------------
 // Two gripped hands define a wheel by the line between them: its tilt out of
@@ -1626,6 +1725,19 @@ inline constexpr bool Halo3SeatFollowsHull(Halo3VehicleId id, int seatIndex,
     return Halo3FindSeatPoint(id, seatIndex, mountedTurret) != nullptr;
 }
 
+// Banshees/Hornets cross vertical in normal flight, where forward alone cannot
+// choose a continuous roll-free up vector. Their driver pitch is also flight
+// feedback. Keep every aircraft seat on the proven yaw-only path until a full
+// transported flight frame/yoke author exists. Ground/racing-wheel drivers,
+// passengers, gunners, and tanks consume the roll-stable pitch frame.
+inline constexpr bool Halo3SeatFollowsPitch(Halo3VehicleId id, int seatIndex,
+                                            bool mountedTurret)
+{
+    if (!Halo3SeatFollowsHull(id, seatIndex, mountedTurret))
+        return false;
+    return id != Halo3VehicleId::Banshee && id != Halo3VehicleId::Hornet;
+}
+
 // The one gate that hands a seat's steering to the wheel/stick author instead
 // of the closed-loop hand aim. It must switch on exactly the same condition
 // that makes the view follow the hull, which is why the follow toggle is an
@@ -1637,6 +1749,43 @@ inline constexpr bool Halo3SeatAuthorsSteering(Halo3VehicleId id, int seatIndex,
 {
     return followEnabled && Halo3SeatIsDriver(id, seatIndex, mountedTurret) &&
         Halo3VehicleIsLookSteered(id);
+}
+
+// The right stick is normally the steering fallback in an authored driver
+// seat, so VR turn must not consume it too. Once the two-hand wheel is actively
+// authoring steering, the stick is free and resumes the configured snap/smooth
+// view turn. Everywhere else VR turn retains its established ownership.
+inline constexpr bool Halo3VrTurnOwnsStick(bool seatAuthorsSteering,
+                                           bool wheelActive)
+{
+    return !seatAuthorsSteering || wheelActive;
+}
+
+// Keep snap-turn edge state coherent while the stick temporarily belongs to
+// steering. A deflected takeover must not snap immediately; after the player
+// recentres, the next deliberate deflection produces exactly one snap.
+inline bool Halo3ConsumeSnapTurn(bool turnOwnsStick, float stickX,
+                                 bool& latched)
+{
+    if (!std::isfinite(stickX))
+        return false;
+    const float magnitude = std::fabs(stickX);
+    if (!turnOwnsStick)
+    {
+        if (magnitude > 0.6f)
+            latched = true;
+        else if (magnitude < 0.3f)
+            latched = false;
+        return false;
+    }
+    if (!latched && magnitude > 0.6f)
+    {
+        latched = true;
+        return true;
+    }
+    if (magnitude < 0.3f)
+        latched = false;
+    return false;
 }
 
 // C4 transform probe: bounded float window of the seated DIRECT parent's

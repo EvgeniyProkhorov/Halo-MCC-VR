@@ -222,6 +222,120 @@ namespace
     float g_headYawRef = 0;
     float g_gameYawRef = 0;
     float g_headPosRef[3] = {0, 0, 0}; // headset position (m) captured at recenter
+    bool Halo3VehicleFpActive();
+
+    // C25 optional pitch follow. The camera thread publishes the current
+    // rendered hull yaw+pitch; camera, hands, room translation, and aim all
+    // consume the same roll-free transform contract. A short freshness bound
+    // makes a missing pitch sample retain the accepted yaw-only follow.
+    constexpr uint64_t kHalo3RollStableFollowFreshMs = 100;
+    struct Halo3RollStableFollowPublication
+    {
+        std::atomic<uint32_t> sequence{0}; // even = stable, odd = writer active
+        std::atomic<uint32_t> generation{0};
+        std::atomic<uint64_t> sampleMs{0};
+        std::atomic<float> hullYaw{0.0f};
+        std::atomic<float> hullPitch{0.0f};
+        bool writerHasValue = false; // camera-thread writer only
+    };
+    Halo3RollStableFollowPublication g_halo3RollStableFollow;
+    enum class Halo3PitchFollowState : uint8_t
+    {
+        Inactive = 0,
+        Active,
+        IntentionalYawOnly,
+        YawOnlyFallback,
+    };
+    std::atomic<uint8_t> g_halo3PitchFollowState{
+        static_cast<uint8_t>(Halo3PitchFollowState::Inactive)};
+    std::atomic<uint32_t> g_halo3PitchFollowSerial{0};
+
+    void Halo3SetPitchFollowState(Halo3PitchFollowState state)
+    {
+        // Single camera-thread writer; the worker logs transitions later.
+        static Halo3PitchFollowState previous =
+            Halo3PitchFollowState::Inactive;
+        if (state == previous)
+            return;
+        previous = state;
+        g_halo3PitchFollowState.store(static_cast<uint8_t>(state),
+                                      std::memory_order_relaxed);
+        g_halo3PitchFollowSerial.fetch_add(1, std::memory_order_release);
+    }
+
+    void Halo3PublishRollStableFollow(float hullYaw, float hullPitch)
+    {
+        const uint32_t generation =
+            g_halo3RuntimeGeneration.load(std::memory_order_relaxed);
+        if (!generation || !std::isfinite(hullYaw) ||
+            !std::isfinite(hullPitch))
+            return;
+        auto& published = g_halo3RollStableFollow;
+        published.sequence.fetch_add(1, std::memory_order_acq_rel);
+        published.generation.store(generation, std::memory_order_relaxed);
+        published.sampleMs.store(GetTickCount64(), std::memory_order_relaxed);
+        published.hullYaw.store(hullYaw, std::memory_order_relaxed);
+        published.hullPitch.store(hullPitch, std::memory_order_relaxed);
+        published.sequence.fetch_add(1, std::memory_order_release);
+        published.writerHasValue = true;
+    }
+
+    void Halo3ClearRollStableFollow()
+    {
+        auto& published = g_halo3RollStableFollow;
+        // OFF is the default and this runs in a camera hot hook. Once cleared,
+        // repeated OFF frames stay a plain camera-thread branch with no RMW.
+        if (!published.writerHasValue)
+            return;
+        published.sequence.fetch_add(1, std::memory_order_acq_rel);
+        published.writerHasValue = false;
+        published.generation.store(0, std::memory_order_relaxed);
+        published.sampleMs.store(0, std::memory_order_relaxed);
+        published.hullYaw.store(0.0f, std::memory_order_relaxed);
+        published.hullPitch.store(0.0f, std::memory_order_relaxed);
+        published.sequence.fetch_add(1, std::memory_order_release);
+    }
+
+    bool Halo3ReadRollStableFollow(float& hullYaw, float& hullPitch)
+    {
+        // The existing checkbox remains the master switch. OFF reaches none of
+        // the new transforms, preserving the shipped world-locked path.
+        if (!g_config.vehicle_first_person ||
+            !g_config.vehicle_view_follow || !Halo3VehicleFpActive())
+            return false;
+        const uint32_t generation =
+            g_halo3RuntimeGeneration.load(std::memory_order_acquire);
+        if (!generation)
+            return false;
+        const uint64_t nowMs = GetTickCount64();
+        auto& published = g_halo3RollStableFollow;
+        for (int attempt = 0; attempt < 2; ++attempt)
+        {
+            const uint32_t before =
+                published.sequence.load(std::memory_order_acquire);
+            if (!before || (before & 1u))
+                continue;
+            const uint32_t sampleGeneration =
+                published.generation.load(std::memory_order_relaxed);
+            const uint64_t sampleMs =
+                published.sampleMs.load(std::memory_order_relaxed);
+            const float sampleYaw =
+                published.hullYaw.load(std::memory_order_relaxed);
+            const float samplePitch =
+                published.hullPitch.load(std::memory_order_relaxed);
+            if (published.sequence.load(std::memory_order_acquire) != before)
+                continue;
+            if (sampleGeneration != generation || !sampleMs ||
+                nowMs < sampleMs ||
+                nowMs - sampleMs > kHalo3RollStableFollowFreshMs ||
+                !std::isfinite(sampleYaw) || !std::isfinite(samplePitch))
+                return false;
+            hullYaw = sampleYaw;
+            hullPitch = samplePitch;
+            return true;
+        }
+        return false;
+    }
 
     using CamCopyFn = void*(__fastcall*)(void* dst, void* src);
     CamCopyFn g_origCamCopy = nullptr;
@@ -2611,7 +2725,9 @@ namespace
     // a first-person vehicle seat owns the view. False everywhere else.
     bool Halo3ComputeSeatBodyAnchor(float out[3]);
 
-    void BuildTrackedGameBasis(const float q[4], bool head, float basis[9])
+    void BuildTrackedGameBasisFromFrame(const float q[4], bool head,
+                                        bool followValid, float hullYaw,
+                                        float hullPitch, float basis[9])
     {
         const float xrForward[3]={0,0,-1}, xrUp[3]={0,1,0};
         float f[3],u[3];
@@ -2628,6 +2744,23 @@ namespace
         rx/=rl; rz/=rl;
         const float nux=-f[1]*rz, nuy=rl, nuz=f[1]*rx;
         const float roll=atan2f(u[0]*rx+u[2]*rz,u[0]*nux+u[1]*nuy+u[2]*nuz);
+
+        if (followValid)
+        {
+            const float trackedYawDelta =
+                g_yawSign.load() * WrapPi(yaw - g_headYawRef);
+            const float trackedPitch = Clamp(
+                g_pitchSign.load() * pitch +
+                    (head ? g_pitchTrim.load() : 0.0f),
+                -1.5f, 1.5f);
+            if (Halo3ComposeRollStableFollowBasis(
+                    hullYaw, hullPitch, g_gameYawRef, trackedYawDelta,
+                    trackedPitch, roll, basis))
+                return;
+        }
+
+        // Exact established mapping when optional follow is off, stale, or
+        // invalid. That feature can fail without affecting controller poses.
         const float gy=g_gameYawRef+g_yawSign.load()*WrapPi(yaw-g_headYawRef);
         const float gp=Clamp(g_pitchSign.load()*pitch+(head?g_pitchTrim.load():0.0f),-1.5f,1.5f);
         const float cp=cosf(gp),sp=sinf(gp),cy=cosf(gy),sy=sinf(gy);
@@ -2640,6 +2773,15 @@ namespace
         memcpy(basis,forward,sizeof(forward));
         memcpy(basis+3,left,sizeof(left));
         memcpy(basis+6,up,sizeof(up));
+    }
+
+    void BuildTrackedGameBasis(const float q[4], bool head, float basis[9])
+    {
+        float hullYaw = 0.0f, hullPitch = 0.0f;
+        const bool followValid =
+            Halo3ReadRollStableFollow(hullYaw, hullPitch);
+        BuildTrackedGameBasisFromFrame(q, head, followValid, hullYaw,
+                                       hullPitch, basis);
     }
 
     // Basis columns (forward,left,up) from game-frame yaw/pitch/roll.
@@ -4679,7 +4821,11 @@ namespace
         // left hand uses its own controller for the support-arm IK target.
         if (left ? !VR_GetLeftControllerPose(cq, cp)
                  : !VR_GetAimPose(cq, cp)) return false;
-        BuildTrackedGameBasis(cq, false, basis); // controller basis, game world axes
+        float hullYaw = 0.0f, hullPitch = 0.0f;
+        const bool followValid =
+            Halo3ReadRollStableFollow(hullYaw, hullPitch);
+        BuildTrackedGameBasisFromFrame(cq, false, followValid, hullYaw,
+                                       hullPitch, basis);
         // Full controller displacement from the recentered room origin. The
         // old camera + (controller-currentHead) expression combined a camera
         // position containing an older head-lean sample with a fresh relative
@@ -4693,10 +4839,28 @@ namespace
         const float roomRight=dx*ch+dz*sh;
         const float cg=cosf(g_gameYawRef), sg=sinf(g_gameYawRef);
         const float s = g_worldScale.load();
-        const float off[3] = {
-            (cg*roomForward+sg*roomRight)*s,
-            (sg*roomForward-cg*roomRight)*s,
-            dy*s};
+        float off[3];
+        float followBasis[9], followLocal[3] = {roomForward, -roomRight, dy};
+        float followedOffset[3];
+        const bool positionFollows =
+            followValid &&
+            Halo3ComposeRollStableFollowBasis(
+                hullYaw, hullPitch, g_gameYawRef, 0.0f, 0.0f, 0.0f,
+                followBasis) &&
+            Halo3TransformBasisVector(followBasis, followLocal,
+                                      followedOffset);
+        if (positionFollows)
+        {
+            off[0] = followedOffset[0] * s;
+            off[1] = followedOffset[1] * s;
+            off[2] = followedOffset[2] * s;
+        }
+        else
+        {
+            off[0] = (cg*roomForward+sg*roomRight)*s;
+            off[1] = (sg*roomForward-cg*roomRight)*s;
+            off[2] = dy*s;
+        }
         float cam[3] = {g_baseCamX.load(),g_baseCamY.load(),g_baseCamZ.load()};
         // C21: in a first-person vehicle seat the engine camera source is the
         // occupant's own head marker, so using it here hangs the arms and gun
@@ -5017,14 +5181,14 @@ namespace
     void Halo3ApplySeatYawFollow();
     bool Halo3SeatAuthorsSteeringNow();
 
-    void ApplyHeadLook(void* src)
+    bool ApplyHeadLook(void* src)
     {
         if (!src)
-            return;
+            return false;
 
         float q[4], hpos[3];
         if (!VR_GetHeadPose(q, hpos))
-            return;
+            return false;
         // Head forward (OpenXR: -Z forward, +Y up).
         const float x = q[0], y = q[1], z = q[2], w = q[3];
         const float hfx = -2.0f * (w * y + x * z);
@@ -5079,7 +5243,7 @@ namespace
                 GetTickCount64());
         }
         if (cinematic && VR_IsCutsceneTheaterActive())
-            return; // authored camera + stereo eye offsets only in theatre
+            return false; // authored camera + stereo eye offsets only in theatre
         const bool cinematicBoundary =
             (cinematic && (!previousCinematic ||
                 cinematicScene != previousScene ||
@@ -5126,14 +5290,32 @@ namespace
         const float gp = Clamp(g_pitchSign.load() * hp + g_pitchTrim.load(), -1.5f, 1.5f);
         const float cgp = cosf(gp), sgp = sinf(gp), cgy = cosf(gy), sgy = sinf(gy);
 
-        fwd[0] = cgp * cgy; fwd[1] = cgp * sgy; fwd[2] = sgp;
-        if (g_writeUp.load())
+        float hullYaw = 0.0f, hullPitch = 0.0f, followBasis[9];
+        const bool rotationFollows =
+            Halo3ReadRollStableFollow(hullYaw, hullPitch) &&
+            Halo3ComposeRollStableFollowBasis(
+                hullYaw, hullPitch, g_gameYawRef,
+                g_yawSign.load() * WrapPi(hy - g_headYawRef), gp,
+                headRoll, followBasis);
+        if (rotationFollows)
         {
-            const float cr = cosf(headRoll), sr = sinf(headRoll);
-            // Horizon-level up plus roll toward the camera's right vector.
-            up[0] = (-sgp * cgy) * cr + sgy * sr;
-            up[1] = (-sgp * sgy) * cr - cgy * sr;
-            up[2] = cgp * cr;
+            memcpy(fwd, followBasis, sizeof(float) * 3);
+            if (g_writeUp.load())
+                memcpy(up, followBasis + 6, sizeof(float) * 3);
+        }
+        else
+        {
+            // Exact pre-C25 mapping: world-locked when the toggle is OFF, and
+            // accepted yaw-only follow when only the pitch sample is refused.
+            fwd[0] = cgp * cgy; fwd[1] = cgp * sgy; fwd[2] = sgp;
+            if (g_writeUp.load())
+            {
+                const float cr = cosf(headRoll), sr = sinf(headRoll);
+                // Horizon-level up plus roll toward the camera's right vector.
+                up[0] = (-sgp * cgy) * cr + sgy * sr;
+                up[1] = (-sgp * sgy) * cr - cgy * sr;
+                up[2] = cgp * cr;
+            }
         }
 
         // C17 native-seat ownership was headset-rejected: it shifted every
@@ -5165,9 +5347,30 @@ namespace
             const float fwdComp = dx * hfhx + dz * hfhz;       // room move along look dir
             const float rightComp = dx * (-hfhz) + dz * hfhx;  // room move to the right
             const float s = g_worldScale.load();
-            float ox = (cgy * fwdComp + sgy * rightComp) * s;  // game forward/right at gy
-            float oy = (sgy * fwdComp - cgy * rightComp) * s;
-            float oz = dy * s;
+            float ox, oy, oz;
+            float positionBasis[9];
+            const float positionLocal[3] = {fwdComp, -rightComp, dy};
+            float positionWorld[3];
+            const bool positionFollows =
+                rotationFollows &&
+                Halo3ComposeRollStableFollowBasis(
+                    hullYaw, hullPitch, g_gameYawRef,
+                    g_yawSign.load() * WrapPi(hy - g_headYawRef),
+                    0.0f, 0.0f, positionBasis) &&
+                Halo3TransformBasisVector(positionBasis, positionLocal,
+                                          positionWorld);
+            if (positionFollows)
+            {
+                ox = positionWorld[0] * s;
+                oy = positionWorld[1] * s;
+                oz = positionWorld[2] * s;
+            }
+            else
+            {
+                ox = (cgy * fwdComp + sgy * rightComp) * s;
+                oy = (sgy * fwdComp - cgy * rightComp) * s;
+                oz = dy * s;
+            }
             ox = Clamp(ox, -1.5f, 1.5f); oy = Clamp(oy, -1.5f, 1.5f); oz = Clamp(oz, -1.5f, 1.5f);
             pos[0] += ox; pos[1] += oy; pos[2] += oz;
         }
@@ -5179,6 +5382,7 @@ namespace
         // Per-eye separation is applied later by RenderViewHook to the compact
         // render-only camera. Keeping it out of the authoritative source avoids
         // feeding stereo offsets back into simulation or temporal history.
+        return rotationFollows;
     }
 
     // M3: snap/smooth turning from the right Sense stick. Rotating the yaw
@@ -5189,11 +5393,6 @@ namespace
         if (!g_vrAim.load())
             return;
         if (!pad.valid)
-            return;
-        // C9: in a seat whose steering this build authors, the turn stick IS
-        // the steering wheel's fallback. Snap/smooth turning must not consume
-        // it as well, or one flick would both spin the view and swerve.
-        if (Halo3SeatAuthorsSteeringNow())
             return;
         // Smooth turn needs a sub-frame timebase. GetTickCount only updates on
         // the ~15.6 ms system tick, but this runs several times per 11 ms (90 Hz)
@@ -5210,24 +5409,36 @@ namespace
                        : (float)(now.QuadPart - last.QuadPart) / (float)freq.QuadPart;
         last = now;
         if (dt > 0.1f) dt = 0.1f;
+
+        // The stick remains Halo's steering fallback in an authored driver
+        // seat. While the two-hand wheel is actively supplying steering, that
+        // stick is free and resumes the configured snap/smooth VR turn. Keep
+        // the QPC clock warm across both states so taking the wheel cannot
+        // inherit a capped 100 ms turn step.
         const float x = pad.turnX; // stick right = turn right = yaw decreases
+        const bool turnOwnsStick = Halo3VrTurnOwnsStick(
+            Halo3SeatAuthorsSteeringNow(), Game_Halo3VehicleWheelActive());
+        static bool snapLatched = false;
+        if (!turnOwnsStick)
+        {
+            Halo3ConsumeSnapTurn(false, x, snapLatched);
+            return;
+        }
         if (g_config.turn_smooth)
         {
+            // Track the held/centred state across a runtime mode switch too.
+            Halo3ConsumeSnapTurn(false, x, snapLatched);
             if (fabsf(x) > 0.15f)
                 g_gameYawRef = WrapPi(g_gameYawRef -
                     x * (g_config.turn_smooth_deg_s / 57.2958f) * dt);
         }
         else
         {
-            static bool latched = false; // one snap per stick flick
-            if (!latched && fabsf(x) > 0.6f)
+            if (Halo3ConsumeSnapTurn(true, x, snapLatched))
             {
                 g_gameYawRef = WrapPi(g_gameYawRef -
                     (x > 0 ? 1.0f : -1.0f) * g_config.turn_snap_deg / 57.2958f);
-                latched = true;
             }
-            else if (fabsf(x) < 0.3f)
-                latched = false;
         }
     }
 
@@ -7047,6 +7258,10 @@ namespace
             Halo3SeatFollowsHull(static_cast<Halo3VehicleId>(seat.identity),
                                  seat.seatIndex, seat.mounted);
         const bool followEnabled = g_config.vehicle_view_follow;
+        const bool pitchEligible =
+            active && Halo3SeatFollowsPitch(
+                static_cast<Halo3VehicleId>(seat.identity), seat.seatIndex,
+                seat.mounted);
 
         // Position-neutral and yaw-neutral are different transactions. Every
         // concrete authored seat gets a fresh OpenXR position zero exactly once,
@@ -7067,11 +7282,19 @@ namespace
             positionSeat = {};
             yawSeat = {};
             g_halo3SeatYaw = {};
+            Halo3ClearRollStableFollow();
         }
         else if (!followEnabled)
         {
             yawSeat = {};
             g_halo3SeatYaw = {};
+            Halo3ClearRollStableFollow();
+        }
+        else if (haveAuthoredSeat && !pitchEligible)
+        {
+            // Aircraft seats keep the proven yaw-only follow. This is
+            // a feature-local refusal; their view and controls remain live.
+            Halo3ClearRollStableFollow();
         }
         if (haveAuthoredSeat)
         {
@@ -7148,6 +7371,7 @@ namespace
                     generation, seat.parentHandle, seat.seatIndex,
                     seat.identity, seat.mounted))
             {
+                Halo3ClearRollStableFollow();
                 yawSeat.Set(generation, seat.parentHandle, seat.seatIndex,
                             seat.identity, seat.mounted);
                 g_halo3SeatYaw = {};
@@ -7156,9 +7380,35 @@ namespace
                 Halo3SeatYawDelta(g_halo3SeatYaw, seat.rawFwd, true);
             if (delta != 0.0f)
                 g_gameYawRef = WrapPi(g_gameYawRef + delta);
+
+            // The live rendered forward supplies pitch without consuming roll.
+            // A malformed frame keeps the last publication only until its
+            // freshness bound; the new feature then fails to the old mapping.
+            float hullPitch = 0.0f;
+            if (pitchEligible && g_halo3SeatYaw.armed &&
+                Halo3RollStablePitchFromForward(seat.rawFwd, hullPitch))
+                Halo3PublishRollStableFollow(g_halo3SeatYaw.lastYaw,
+                                             hullPitch);
         }
         g_halo3SeatYawTotal.store(g_halo3SeatYaw.total,
                                   std::memory_order_relaxed);
+        Halo3PitchFollowState pitchState = Halo3PitchFollowState::Inactive;
+        if (followEnabled && fpActive)
+        {
+            if (active && !pitchEligible)
+            {
+                pitchState = Halo3PitchFollowState::IntentionalYawOnly;
+            }
+            else
+            {
+                float publishedYaw = 0.0f, publishedPitch = 0.0f;
+                pitchState = Halo3ReadRollStableFollow(
+                    publishedYaw, publishedPitch)
+                    ? Halo3PitchFollowState::Active
+                    : Halo3PitchFollowState::YawOnlyFallback;
+            }
+        }
+        Halo3SetPitchFollowState(pitchState);
         // Steering ownership switches on exactly the condition that removes
         // the closed loop's feedback, so the two can never be out of step.
         const bool authors = followActive && Halo3SeatAuthorsSteering(
@@ -7366,6 +7616,28 @@ namespace
                     "bounce disabled, exact node anchor and camera core "
                     "unaffected");
             loggedHeadBinding = headBinding;
+        }
+
+        static uint32_t pitchFollowSerialLogged = 0;
+        const uint32_t pitchFollowSerial =
+            g_halo3PitchFollowSerial.load(std::memory_order_acquire);
+        if (pitchFollowSerial != pitchFollowSerialLogged)
+        {
+            const auto state = static_cast<Halo3PitchFollowState>(
+                g_halo3PitchFollowState.load(std::memory_order_relaxed));
+            if (state == Halo3PitchFollowState::Active)
+                LOG("H3 vehicle pitch follow: Active; view, hands and aim use "
+                    "the roll-stable vehicle pitch frame");
+            else if (state == Halo3PitchFollowState::IntentionalYawOnly)
+                LOG("H3 vehicle pitch follow: YawOnly; aircraft pitch is "
+                    "intentionally excluded for control and vertical safety");
+            else if (state == Halo3PitchFollowState::YawOnlyFallback)
+                LOG("H3 vehicle pitch follow: YawOnlyFallback; live finite "
+                    "seat pitch unavailable/stale, camera core unaffected");
+            else
+                LOG("H3 vehicle pitch follow: Inactive; optional toggle off "
+                    "or no first-person vehicle seat");
+            pitchFollowSerialLogged = pitchFollowSerial;
         }
 
         static uint32_t nativeSeatSerialLogged = 0;
@@ -7820,7 +8092,7 @@ namespace
             // first-person bone frame is head-camera-relative, and splitting
             // the two frames made the hand-anchored weapon visibly pick up
             // both head and aim motion. Do not scope this write again.
-            ApplyHeadLook(src);
+            const bool rollStableFollowApplied = ApplyHeadLook(src);
             if (src)
             {
                 // Post-head-look camera position (includes leaning): the
@@ -7843,14 +8115,17 @@ namespace
                 // level (camera-fwd within ~25 deg of horizontal), so staring up or
                 // down a slope for a while can't drag the estimate off vertical.
                 {
-                    if (!g_worldUpInit.load())
+                    // C25's camera up is deliberately vehicle-pitched. It is
+                    // not gravity and must never train this persistent world-up
+                    // estimator or the shoulder frame will tilt after a hill.
+                    if (!rollStableFollowApplied && !g_worldUpInit.load())
                     {
                         const float l=sqrtf(u[0]*u[0]+u[1]*u[1]+u[2]*u[2]);
                         if (l>1e-4f)
                             for (int j=0;j<3;++j) g_worldUp[j].store(u[j]/l);
                         g_worldUpInit.store(true);
                     }
-                    else
+                    else if (!rollStableFollowApplied)
                     {
                         float wu[3]={g_worldUp[0].load(),g_worldUp[1].load(),
                                      g_worldUp[2].load()};
@@ -22947,9 +23222,12 @@ void Game_Halo3UpdateVehicleWheel(const VrPadState& pad)
     const bool driving = posesOk && Halo3ComputeWheelSteer(
         g_halo3Wheel, lp, rp, headYaw, g_config.vehicle_wheel_max_deg,
         g_config.vehicle_wheel_deadzone_deg);
-    g_halo3WheelDriving.store(driving ? 1u : 0u, std::memory_order_release);
-    if (driving)
-        g_halo3SteerAxis.store(g_halo3Wheel.steer, std::memory_order_relaxed);
+    // Publish the payload before the release flag. Readers acquire the flag,
+    // then consume the matching steer value and can free the turn stick.
+    g_halo3SteerAxis.store(driving ? g_halo3Wheel.steer : 0.0f,
+                           std::memory_order_relaxed);
+    g_halo3WheelDriving.store(driving ? 1u : 0u,
+                              std::memory_order_release);
 }
 
 // The input hook withholds the grip buttons ONLY while both grips are down at
@@ -23069,8 +23347,23 @@ bool Game_ComputeAimStick(float& outRx, float& outRy)
     if (tl > 1e-3f) { tx /= tl; ty /= tl; tz /= tl; }
     const float cy = atan2f(tx, -tz);
     const float cp = asinf(Clamp(ty, -1.0f, 1.0f));
-    const float desiredYaw = g_gameYawRef + g_yawSign.load() * WrapPi(cy - g_headYawRef);
-    const float desiredPitch = Clamp(g_pitchSign.load() * cp, -1.45f, 1.45f);
+    float desiredYaw =
+        g_gameYawRef + g_yawSign.load() * WrapPi(cy - g_headYawRef);
+    float desiredPitch = Clamp(g_pitchSign.load() * cp, -1.45f, 1.45f);
+    float hullYaw = 0.0f, hullPitch = 0.0f, followedAim[9];
+    if (Halo3ReadRollStableFollow(hullYaw, hullPitch) &&
+        Halo3ComposeRollStableFollowBasis(
+            hullYaw, hullPitch, g_gameYawRef,
+            g_yawSign.load() * WrapPi(cy - g_headYawRef),
+            Clamp(g_pitchSign.load() * cp, -1.45f, 1.45f), 0.0f,
+            followedAim))
+    {
+        // Controller ray, reticle and bullets share the same pitched vehicle
+        // frame as the view and visible hands. Aircraft seats never publish
+        // this frame, retaining their proven independent pitch loop.
+        desiredYaw = atan2f(followedAim[1], followedAim[0]);
+        desiredPitch = asinf(Clamp(followedAim[2], -1.0f, 1.0f));
+    }
 
     const float ax = g_aimFwdX.load(), ay = g_aimFwdY.load(), az = g_aimFwdZ.load();
     const float aimYaw = atan2f(ay, ax);
@@ -23090,8 +23383,8 @@ bool Game_ComputeAimStick(float& outRx, float& outRy)
     // no feedback left there, and a fixed hand offset would become a constant
     // turn RATE instead of a heading. That seat's steering is authored openly
     // instead: the wheel while both hands hold it, and Halo's own turn stick
-    // when they do not. Pitch keeps the closed loop, because it never passed
-    // through the yaw reference, so a Banshee still climbs from the hand.
+    // when they do not. A Banshee/Hornet driver publishes no vehicle pitch
+    // frame, so its proven climb/dive loop still follows the aiming hand.
     if (Halo3SeatAuthorsSteeringNow())
     {
         if (Game_Halo3VehicleWheelActive())

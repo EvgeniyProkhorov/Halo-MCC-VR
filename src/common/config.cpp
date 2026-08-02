@@ -823,8 +823,9 @@ void ConfigSave()
                         g_config.vehicle_cam_right_v[i]);
         }
     fprintf(f, "\n");
-    fprintf(f, "# ON turns the view with every heading change from the same car,\n");
-    fprintf(f, "# including hard collisions and spins. OFF keeps it world-locked.\n");
+    fprintf(f, "# ON follows ground-vehicle yaw/pitch; aircraft stay yaw-only.\n");
+    fprintf(f, "# Vehicle roll stays horizon-stable.\n");
+    fprintf(f, "# OFF keeps the established world-locked view.\n");
     fprintf(f, "# (default %d)\n", d.vehicle_view_follow ? 1 : 0);
     fprintf(f, "vehicle_view_follow = %d\n\n",
             g_config.vehicle_view_follow ? 1 : 0);
