@@ -4894,11 +4894,21 @@ float4 ps_scope_linearize(VSOut i):SV_Target { return paint(i.uv,true); }
                 ? (g_authoredReticleGoodInk * kAuthoredReticleInkNumerator) /
                       kAuthoredReticleInkDenominator
                 : 0;
+            const bool hasAnyArt = ink >= kAuthoredReticleArtAlphaThreshold;
+            // The escape hatch below exists so a genuinely simpler crosshair
+            // (a weapon swap) is never held out forever. It must NEVER apply
+            // to a capture holding nothing at all: the 0dab3d7 log caught it
+            // doing exactly that - `art 0` with 6 and 7 uploads in the same
+            // window - so the guard held the good crosshair 24 times and then
+            // published the empty capture anyway, roughly three times a
+            // second. An empty capture is never a crosshair, however long it
+            // persists; while good art is held it is refused unconditionally.
+            const bool staleEnoughToAccept =
+                hasAnyArt && g_authoredReticleConsecutiveHolds >=
+                                 kAuthoredReticleMaxConsecutiveHolds;
             const bool hasArt =
-                ink >= kAuthoredReticleArtAlphaThreshold && ink >= required;
-            if (!hasArt && g_authoredReticleGoodValid &&
-                g_authoredReticleConsecutiveHolds <
-                    kAuthoredReticleMaxConsecutiveHolds)
+                hasAnyArt && (ink >= required || staleEnoughToAccept);
+            if (!hasArt && g_authoredReticleGoodValid)
             {
                 // Hold. This is NOT a failure: the crosshair has bloomed out
                 // of the crop, so the one the player is aiming with stays on
