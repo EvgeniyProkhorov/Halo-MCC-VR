@@ -189,15 +189,31 @@ namespace
     // ever fed from here, so a blank capture cannot become the held image.
     ID3D11Texture2D* g_authoredReticleGoodTexture = nullptr;
     bool g_authoredReticleGoodValid = false;
-    // 8x8 mip readback. A 1x1 average would round sparse line art away; the
-    // maximum over 8x8 blocks stays well clear of zero wherever the crosshair
-    // sits in frame.
+    // 8x8 mip readback, summed. HOW MUCH ink the capture holds is the measure
+    // that matters, not whether any survives: Reach's crosshair is five
+    // widgets - ar_reticule plus l/r/t/b_crosshair - and the four petals are
+    // animated by `weapon barrel error scale` (official HREK
+    // `ui\chud\*.chud_definition`: every one carries
+    // `external input B = weapon barrel error scale` and drives its `active`
+    // animation from `extern 2`). Taking a hit spikes barrel error, the petals
+    // bloom outward, and they leave the magnified centre crop this capture
+    // reads - while the centre reticle can stay. A "did anything survive"
+    // test would pass on that leftover dot and publish a crosshair with its
+    // petals missing, which is the same disappearance from the player's seat.
     ID3D11Texture2D* g_authoredReticleProbeStaging = nullptr;
     constexpr uint32_t kAuthoredReticleProbeSize = 8;
-    // Calibration is deliberately left to the log rather than assumed: the
-    // measured maximum is reported every two seconds beside the upload
-    // counters, so a wrong threshold is visible instead of silent.
+    // Absolute floor for "there is nothing here at all".
     constexpr uint32_t kAuthoredReticleArtAlphaThreshold = 2;
+    // A capture holding less than this fraction of the known-good ink is the
+    // crosshair blooming out of the crop, not a new crosshair.
+    constexpr uint32_t kAuthoredReticleInkNumerator = 1;
+    constexpr uint32_t kAuthoredReticleInkDenominator = 2;
+    // ...but a genuinely simpler crosshair (weapon swap) must not be held out
+    // forever. After this many consecutive refusals the capture is accepted
+    // and becomes the new reference.
+    constexpr uint32_t kAuthoredReticleMaxConsecutiveHolds = 24;
+    uint32_t g_authoredReticleGoodInk = 0;
+    uint32_t g_authoredReticleConsecutiveHolds = 0;
     uint32_t g_authoredReticleLastCoverage = 0;
     uint32_t g_authoredReticleBlankHeld = 0;
     bool g_authoredReticleProbeUsable = true;
@@ -4690,10 +4706,10 @@ float4 ps_scope_linearize(VSOut i):SV_Target { return paint(i.uv,true); }
         return true;
     }
 
-    // Does the capture actually contain visible crosshair pixels? Returns the
-    // maximum alpha found over the downsampled capture, or 0 when the check
-    // could not run. Only called on a frame that is about to pay the blocking
-    // swapchain upload anyway, so it never runs at frame rate.
+    // How much crosshair ink does the capture hold? Returns the summed alpha
+    // of the downsampled capture, or 0 when the check could not run. Only
+    // called on a frame that is about to pay the blocking swapchain upload
+    // anyway, so it never runs at frame rate.
     uint32_t MeasureAuthoredReticleCoverage()
     {
         if (!g_authoredReticleProbeUsable || !g_context ||
@@ -4726,19 +4742,16 @@ float4 ps_scope_linearize(VSOut i):SV_Target { return paint(i.uv,true); }
         {
             return 0;
         }
-        uint32_t maxAlpha = 0;
+        uint32_t ink = 0;
         const auto* rows = static_cast<const uint8_t*>(mapped.pData);
         for (uint32_t y = 0; y < kAuthoredReticleProbeSize; ++y)
         {
             const uint8_t* texel = rows + static_cast<size_t>(y) * mapped.RowPitch;
             for (uint32_t x = 0; x < kAuthoredReticleProbeSize; ++x, texel += 4)
-            {
-                if (texel[3] > maxAlpha)
-                    maxAlpha = texel[3];
-            }
+                ink += texel[3];
         }
         g_context->Unmap(g_authoredReticleProbeStaging, 0);
-        return maxAlpha;
+        return ink;
     }
 
     bool EnsureReticleChain()
@@ -4871,27 +4884,44 @@ float4 ps_scope_linearize(VSOut i):SV_Target { return paint(i.uv,true); }
         ID3D11Texture2D* source = g_authoredReticleTexture;
         if (g_authoredReticleProbeUsable && g_authoredReticleGoodTexture)
         {
-            const uint32_t coverage = MeasureAuthoredReticleCoverage();
-            g_authoredReticleLastCoverage = coverage;
-            const bool hasArt = coverage >= kAuthoredReticleArtAlphaThreshold;
-            if (!hasArt && g_authoredReticleGoodValid)
+            const uint32_t ink = MeasureAuthoredReticleCoverage();
+            g_authoredReticleLastCoverage = ink;
+            // The bar to clear: something at all, and at least half the ink of
+            // the crosshair currently on the quad. The second half is what
+            // catches the bloom - the petals leaving the crop takes most of
+            // the ink with them even when the centre reticle stays behind.
+            const uint32_t required = g_authoredReticleGoodValid
+                ? (g_authoredReticleGoodInk * kAuthoredReticleInkNumerator) /
+                      kAuthoredReticleInkDenominator
+                : 0;
+            const bool hasArt =
+                ink >= kAuthoredReticleArtAlphaThreshold && ink >= required;
+            if (!hasArt && g_authoredReticleGoodValid &&
+                g_authoredReticleConsecutiveHolds <
+                    kAuthoredReticleMaxConsecutiveHolds)
             {
-                // Hold. This is NOT a failure: the engine drew nothing
-                // visible this frame, so the crosshair the player is aiming
-                // with stays on the quad untouched. The caller must not treat
-                // it as a lost upload and repaint the chain.
+                // Hold. This is NOT a failure: the crosshair has bloomed out
+                // of the crop, so the one the player is aiming with stays on
+                // the quad untouched. The caller must not treat it as a lost
+                // upload and repaint the chain.
+                ++g_authoredReticleConsecutiveHolds;
                 ++g_authoredReticleBlankHeld;
                 g_authoredReticleHeldBlank = true;
                 return false;
             }
-            // Either the capture has art, or nothing good has ever been
-            // measured and showing this is still better than showing none.
-            // Mip 0 only: the capture carries a mip chain for the check and
-            // the swapchain image does not.
+            // Publish: the capture is good, or nothing good has ever been
+            // measured, or the reduction has persisted long enough to be a
+            // real change rather than a bloom. Mip 0 only: the capture carries
+            // a mip chain for the check and the swapchain image does not.
             g_context->CopySubresourceRegion(
                 g_authoredReticleGoodTexture, 0, 0, 0, 0,
                 g_authoredReticleTexture, 0, nullptr);
-            g_authoredReticleGoodValid = g_authoredReticleGoodValid || hasArt;
+            g_authoredReticleConsecutiveHolds = 0;
+            if (ink >= kAuthoredReticleArtAlphaThreshold)
+            {
+                g_authoredReticleGoodValid = true;
+                g_authoredReticleGoodInk = ink;
+            }
             source = g_authoredReticleGoodTexture;
         }
 
@@ -8843,6 +8873,8 @@ void VR_DetachGamePresentation()
     // measure its own before anything is held on its behalf.
     g_authoredReticleGoodValid = false;
     g_authoredReticleHeldBlank = false;
+    g_authoredReticleGoodInk = 0;
+    g_authoredReticleConsecutiveHolds = 0;
     g_reticlePaintedOpacity = -1.0f;
     Game_ResetAuthoredCrosshairKey();
     g_reticleOwnerEpoch.fetch_add(1, std::memory_order_acq_rel);
