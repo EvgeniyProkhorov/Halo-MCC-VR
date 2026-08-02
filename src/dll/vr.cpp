@@ -587,7 +587,11 @@ namespace
     // the implementation available for a future targeted investigation, but
     // compile its render-thread producers and worker consumer out of normal
     // builds. The independent wait-pipeline fault reporting remains active.
-    constexpr bool kEnableFramePacingTransitionCapture = false;
+    // PSVR2 / SteamVR reports an evenly paced 120-to-60 cadence drop while
+    // utilization stays low. Enable the existing fixed-storage trace for this
+    // one diagnostic candidate so the transition can be attributed before any
+    // pacing behavior is changed.
+    constexpr bool kEnableFramePacingTransitionCapture = true;
     // The raster-order trace produced its discovery evidence. Keep the bounded
     // implementation dormant without leaving atomics or logging in render hooks.
     constexpr bool kEnableRetiredRasterTrace = false;
