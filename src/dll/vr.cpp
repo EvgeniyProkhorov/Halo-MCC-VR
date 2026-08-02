@@ -201,6 +201,12 @@ namespace
     // test would pass on that leftover dot and publish a crosshair with its
     // petals missing, which is the same disappearance from the player's seat.
     ID3D11Texture2D* g_authoredReticleProbeStaging = nullptr;
+    // The probe is deliberately pipelined. A refresh queues its tiny readback;
+    // later frames poll this fence without flushing or waiting, while the last
+    // known-good crosshair stays on the quad.
+    ID3D11Query* g_authoredReticleProbeFence = nullptr;
+    bool g_authoredReticleProbePending = false;
+    constexpr uint32_t kAuthoredReticleCoveragePending = UINT32_MAX;
     constexpr uint32_t kAuthoredReticleProbeSize = 8;
     // Absolute floor for "there is nothing here at all".
     constexpr uint32_t kAuthoredReticleArtAlphaThreshold = 2;
@@ -4596,6 +4602,12 @@ float4 ps_scope_linearize(VSOut i):SV_Target { return paint(i.uv,true); }
             g_authoredReticleProbeStaging->Release();
             g_authoredReticleProbeStaging = nullptr;
         }
+        if (g_authoredReticleProbeFence)
+        {
+            g_authoredReticleProbeFence->Release();
+            g_authoredReticleProbeFence = nullptr;
+        }
+        g_authoredReticleProbePending = false;
         g_authoredReticleGoodValid = false;
     }
 
@@ -4660,13 +4672,17 @@ float4 ps_scope_linearize(VSOut i):SV_Target { return paint(i.uv,true); }
         probeDesc.SampleDesc.Count = 1;
         probeDesc.Usage = D3D11_USAGE_STAGING;
         probeDesc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        D3D11_QUERY_DESC probeQueryDesc{};
+        probeQueryDesc.Query = D3D11_QUERY_EVENT;
         g_authoredReticleProbeUsable =
             SUCCEEDED(g_device->CreateShaderResourceView(
                 g_authoredReticleTexture, nullptr, &g_authoredReticleSrv)) &&
             SUCCEEDED(g_device->CreateTexture2D(
                 &goodDesc, nullptr, &g_authoredReticleGoodTexture)) &&
             SUCCEEDED(g_device->CreateTexture2D(
-                &probeDesc, nullptr, &g_authoredReticleProbeStaging));
+                &probeDesc, nullptr, &g_authoredReticleProbeStaging)) &&
+            SUCCEEDED(g_device->CreateQuery(
+                &probeQueryDesc, &g_authoredReticleProbeFence));
         g_authoredReticleGoodValid = false;
 
         if (!g_authoredReticleProbeUsable)
@@ -4707,14 +4723,14 @@ float4 ps_scope_linearize(VSOut i):SV_Target { return paint(i.uv,true); }
     }
 
     // How much crosshair ink does the capture hold? Returns the summed alpha
-    // of the downsampled capture, or 0 when the check could not run. Only
-    // called on a frame that is about to pay the blocking swapchain upload
-    // anyway, so it never runs at frame rate.
+    // of the downsampled capture. Once a valid image is held, the readback is
+    // enqueued then polled on later frames: this returns the explicit pending
+    // sentinel instead of ever stalling the headset render thread.
     uint32_t MeasureAuthoredReticleCoverage()
     {
         if (!g_authoredReticleProbeUsable || !g_context ||
             !g_authoredReticleSrv || !g_authoredReticleProbeStaging ||
-            !g_authoredReticleTexture)
+            !g_authoredReticleProbeFence || !g_authoredReticleTexture)
         {
             return 0;
         }
@@ -4731,10 +4747,38 @@ float4 ps_scope_linearize(VSOut i):SV_Target { return paint(i.uv,true); }
         if (width != kAuthoredReticleProbeSize)
             return 0;
 
-        g_context->GenerateMips(g_authoredReticleSrv);
-        g_context->CopySubresourceRegion(
-            g_authoredReticleProbeStaging, 0, 0, 0, 0,
-            g_authoredReticleTexture, probeMip, nullptr);
+        if (g_authoredReticleGoodValid)
+        {
+            if (!g_authoredReticleProbePending)
+            {
+                g_context->GenerateMips(g_authoredReticleSrv);
+                g_context->CopySubresourceRegion(
+                    g_authoredReticleProbeStaging, 0, 0, 0, 0,
+                    g_authoredReticleTexture, probeMip, nullptr);
+                g_context->End(g_authoredReticleProbeFence);
+                g_authoredReticleProbePending = true;
+                return kAuthoredReticleCoveragePending;
+            }
+
+            BOOL complete = FALSE;
+            if (g_context->GetData(g_authoredReticleProbeFence, &complete,
+                                   sizeof(complete),
+                                   D3D11_ASYNC_GETDATA_DONOTFLUSH) != S_OK ||
+                !complete)
+            {
+                return kAuthoredReticleCoveragePending;
+            }
+            g_authoredReticleProbePending = false;
+        }
+        else
+        {
+            // Bootstrap once so the player receives art before the defer policy
+            // has a known-good image to hold.
+            g_context->GenerateMips(g_authoredReticleSrv);
+            g_context->CopySubresourceRegion(
+                g_authoredReticleProbeStaging, 0, 0, 0, 0,
+                g_authoredReticleTexture, probeMip, nullptr);
+        }
 
         D3D11_MAPPED_SUBRESOURCE mapped{};
         if (FAILED(g_context->Map(g_authoredReticleProbeStaging, 0,
@@ -4753,7 +4797,6 @@ float4 ps_scope_linearize(VSOut i):SV_Target { return paint(i.uv,true); }
         g_context->Unmap(g_authoredReticleProbeStaging, 0);
         return ink;
     }
-
     bool EnsureReticleChain()
     {
         if (g_reticleChainFailed.load(std::memory_order_acquire))
@@ -4867,13 +4910,15 @@ float4 ps_scope_linearize(VSOut i):SV_Target { return paint(i.uv,true); }
 
     bool UploadAuthoredReticle(bool requireSuccessfulRelease)
     {
-        if (!g_authoredReticleReady ||
-            g_authoredReticleSerial != g_preparedFrame.serial ||
+        const bool probePending = g_authoredReticleProbePending;
+        if ((!probePending && (!g_authoredReticleReady ||
+                               g_authoredReticleSerial != g_preparedFrame.serial)) ||
             !g_authoredReticleTexture ||
             g_reticleChain == XR_NULL_HANDLE)
             return false;
         g_authoredReticleHeldBlank = false;
-        if (g_authoredReticleUploadedSerial == g_authoredReticleSerial)
+        if (!probePending &&
+            g_authoredReticleUploadedSerial == g_authoredReticleSerial)
             return true;
 
         // Decide what this upload is allowed to publish BEFORE touching the
@@ -4885,6 +4930,13 @@ float4 ps_scope_linearize(VSOut i):SV_Target { return paint(i.uv,true); }
         if (g_authoredReticleProbeUsable && g_authoredReticleGoodTexture)
         {
             const uint32_t ink = MeasureAuthoredReticleCoverage();
+            if (ink == kAuthoredReticleCoveragePending)
+            {
+                // The released known-good image remains visible. Defer is not a
+                // failure and must never let a blank capture replace it.
+                g_authoredReticleHeldBlank = true;
+                return false;
+            }
             g_authoredReticleLastCoverage = ink;
             // The bar to clear: something at all, and at least half the ink of
             // the crosshair currently on the quad. The second half is what
@@ -7693,17 +7745,22 @@ float4 ps_scope_linearize(VSOut i):SV_Target { return paint(i.uv,true); }
                         const bool authoredArtAlreadyPublished =
                             authoredReticleThisFrame && reticleUploadAdmitted &&
                             !shouldUploadAuthoredReticle;
+                        const bool reticleProbePending =
+                            g_authoredReticleProbePending;
                         bool authoredUploadFailed = false;
-                        if (shouldUploadAuthoredReticle &&
+                        if ((shouldUploadAuthoredReticle || reticleProbePending) &&
                             UploadAuthoredReticle(false))
                         {
-                            MarkAuthoredReticleUploaded(
-                                s_refreshState, authoredCrosshairKey,
-                                authoredColorState, authoredCrosshairDraws,
-                                g_preparedFrame.serial);
+                            if (authoredCrosshairKey != 0)
+                            {
+                                MarkAuthoredReticleUploaded(
+                                    s_refreshState, authoredCrosshairKey,
+                                    authoredColorState, authoredCrosshairDraws,
+                                    g_preparedFrame.serial);
+                            }
                             ++s_uploadsDone;
                         }
-                        else if (shouldUploadAuthoredReticle &&
+                        else if ((shouldUploadAuthoredReticle || reticleProbePending) &&
                                  !g_authoredReticleHeldBlank)
                         {
                             // Never expose stale or undefined swapchain
@@ -8882,6 +8939,7 @@ void VR_DetachGamePresentation()
     // Known-good art belongs to the title that captured it; a new title must
     // measure its own before anything is held on its behalf.
     g_authoredReticleGoodValid = false;
+    g_authoredReticleProbePending = false;
     g_authoredReticleHeldBlank = false;
     g_authoredReticleGoodInk = 0;
     g_authoredReticleConsecutiveHolds = 0;
@@ -9723,6 +9781,11 @@ bool VR_ShouldCaptureAuthoredReticleThisFrame()
     // Until valid art is held there is nothing to fall back on, so never skip.
     if (!g_reticleContainsAuthored)
         return true;
+
+    // Do not overwrite the captured source while its prior coverage request is
+    // in flight; SubmitPreparedFrame will poll it without blocking.
+    if (g_authoredReticleProbePending)
+        return false;
 
     // ODST's captured quad is static between weapon and state changes, so it
     // samples only often enough to notice one. Halo 3's authored crosshair
