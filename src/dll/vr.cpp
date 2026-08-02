@@ -174,6 +174,37 @@ namespace
     // artwork is uploaded to the existing controller-ray OpenXR quad.
     ID3D11Texture2D* g_authoredReticleTexture = nullptr;
     ID3D11RenderTargetView* g_authoredReticleRtv = nullptr;
+    // GitHub #70. Two candidates guarded the capture's IDENTITY and its PIECE
+    // COUNT, and the runtime log proved both inert: across a whole combat
+    // session the key never left 8E28E5B60B57DCA3 and the count never left
+    // `pieces 5, held 5`, while the quad read SUBMITTED with held art
+    // throughout - and the player still lost the crosshair on every hit. The
+    // same five widgets kept drawing, so what changed can only be the PIXELS
+    // they produced. Measure that directly instead of guessing which engine
+    // state did it: a capture that painted nothing visible must never reach
+    // the quad. This also covers the crosshair being kicked outside the
+    // magnified centre crop, which no identity or count can see either.
+    ID3D11ShaderResourceView* g_authoredReticleSrv = nullptr;
+    // Last capture measured to actually contain art. The swapchain is only
+    // ever fed from here, so a blank capture cannot become the held image.
+    ID3D11Texture2D* g_authoredReticleGoodTexture = nullptr;
+    bool g_authoredReticleGoodValid = false;
+    // 8x8 mip readback. A 1x1 average would round sparse line art away; the
+    // maximum over 8x8 blocks stays well clear of zero wherever the crosshair
+    // sits in frame.
+    ID3D11Texture2D* g_authoredReticleProbeStaging = nullptr;
+    constexpr uint32_t kAuthoredReticleProbeSize = 8;
+    // Calibration is deliberately left to the log rather than assumed: the
+    // measured maximum is reported every two seconds beside the upload
+    // counters, so a wrong threshold is visible instead of silent.
+    constexpr uint32_t kAuthoredReticleArtAlphaThreshold = 2;
+    uint32_t g_authoredReticleLastCoverage = 0;
+    uint32_t g_authoredReticleBlankHeld = 0;
+    bool g_authoredReticleProbeUsable = true;
+    // Set when an upload was deliberately withheld because the capture had no
+    // visible art. The caller must tell this apart from a real upload failure,
+    // which repaints the chain and would erase the crosshair itself.
+    bool g_authoredReticleHeldBlank = false;
     bool g_authoredReticleReady = false;
     uint64_t g_authoredReticleSerial = 0;
     uint64_t g_authoredReticleUploadedSerial = 0;
@@ -4532,6 +4563,26 @@ float4 ps_scope_linearize(VSOut i):SV_Target { return paint(i.uv,true); }
         return true;
     }
 
+    void ReleaseAuthoredReticleProbe()
+    {
+        if (g_authoredReticleSrv)
+        {
+            g_authoredReticleSrv->Release();
+            g_authoredReticleSrv = nullptr;
+        }
+        if (g_authoredReticleGoodTexture)
+        {
+            g_authoredReticleGoodTexture->Release();
+            g_authoredReticleGoodTexture = nullptr;
+        }
+        if (g_authoredReticleProbeStaging)
+        {
+            g_authoredReticleProbeStaging->Release();
+            g_authoredReticleProbeStaging = nullptr;
+        }
+        g_authoredReticleGoodValid = false;
+    }
+
     bool EnsureAuthoredReticleTexture()
     {
         if (g_authoredReticleTexture && g_authoredReticleRtv)
@@ -4540,18 +4591,25 @@ float4 ps_scope_linearize(VSOut i):SV_Target { return paint(i.uv,true); }
             return false;
 
         D3D11_TEXTURE2D_DESC desc{};
+        desc.MiscFlags = D3D11_RESOURCE_MISC_GENERATE_MIPS;
         desc.Width = kReticleSize;
         desc.Height = kReticleSize;
-        desc.MipLevels = 1;
+        // A full mip chain is what makes the content check cheap: the engine
+        // downsamples the capture for us and we read one tiny level.
+        desc.MipLevels = 0;
         desc.ArraySize = 1;
         desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
         desc.SampleDesc.Count = 1;
         desc.Usage = D3D11_USAGE_DEFAULT;
         desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+        D3D11_RENDER_TARGET_VIEW_DESC rtvDesc{};
+        rtvDesc.Format = desc.Format;
+        rtvDesc.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
+        rtvDesc.Texture2D.MipSlice = 0;
         if (FAILED(g_device->CreateTexture2D(&desc, nullptr,
                                              &g_authoredReticleTexture)) ||
             FAILED(g_device->CreateRenderTargetView(g_authoredReticleTexture,
-                                                     nullptr,
+                                                     &rtvDesc,
                                                      &g_authoredReticleRtv)))
         {
             if (g_authoredReticleRtv)
@@ -4566,9 +4624,121 @@ float4 ps_scope_linearize(VSOut i):SV_Target { return paint(i.uv,true); }
             }
             return false;
         }
-        LOG("M3: authored crosshair capture target ready (%ux%u)",
-            kReticleSize, kReticleSize);
+
+        // The content check and the known-good copy are OPTIONAL. If any of
+        // them cannot be created, the mip-chained capture target is torn back
+        // down and rebuilt exactly as it was before this candidate - the
+        // swapchain copy requires matching mip counts, so a half-built guard
+        // must not be left in place. A diagnostic must never be able to take
+        // the crosshair down (AGENTS.md failure isolation).
+        D3D11_TEXTURE2D_DESC goodDesc = desc;
+        goodDesc.MipLevels = 1;
+        goodDesc.MiscFlags = 0;
+        goodDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        D3D11_TEXTURE2D_DESC probeDesc{};
+        probeDesc.Width = kAuthoredReticleProbeSize;
+        probeDesc.Height = kAuthoredReticleProbeSize;
+        probeDesc.MipLevels = 1;
+        probeDesc.ArraySize = 1;
+        probeDesc.Format = desc.Format;
+        probeDesc.SampleDesc.Count = 1;
+        probeDesc.Usage = D3D11_USAGE_STAGING;
+        probeDesc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        g_authoredReticleProbeUsable =
+            SUCCEEDED(g_device->CreateShaderResourceView(
+                g_authoredReticleTexture, nullptr, &g_authoredReticleSrv)) &&
+            SUCCEEDED(g_device->CreateTexture2D(
+                &goodDesc, nullptr, &g_authoredReticleGoodTexture)) &&
+            SUCCEEDED(g_device->CreateTexture2D(
+                &probeDesc, nullptr, &g_authoredReticleProbeStaging));
+        g_authoredReticleGoodValid = false;
+
+        if (!g_authoredReticleProbeUsable)
+        {
+            ReleaseAuthoredReticleProbe();
+            g_authoredReticleRtv->Release();
+            g_authoredReticleRtv = nullptr;
+            g_authoredReticleTexture->Release();
+            g_authoredReticleTexture = nullptr;
+            desc.MipLevels = 1;
+            desc.MiscFlags = 0;
+            if (FAILED(g_device->CreateTexture2D(&desc, nullptr,
+                                                 &g_authoredReticleTexture)) ||
+                FAILED(g_device->CreateRenderTargetView(
+                    g_authoredReticleTexture, nullptr,
+                    &g_authoredReticleRtv)))
+            {
+                if (g_authoredReticleRtv)
+                {
+                    g_authoredReticleRtv->Release();
+                    g_authoredReticleRtv = nullptr;
+                }
+                if (g_authoredReticleTexture)
+                {
+                    g_authoredReticleTexture->Release();
+                    g_authoredReticleTexture = nullptr;
+                }
+                return false;
+            }
+        }
+        LOG("M3: authored crosshair capture target ready (%ux%u); blank-art "
+            "guard %s",
+            kReticleSize, kReticleSize,
+            g_authoredReticleProbeUsable
+                ? "armed"
+                : "UNAVAILABLE - crosshair keeps its previous behavior");
         return true;
+    }
+
+    // Does the capture actually contain visible crosshair pixels? Returns the
+    // maximum alpha found over the downsampled capture, or 0 when the check
+    // could not run. Only called on a frame that is about to pay the blocking
+    // swapchain upload anyway, so it never runs at frame rate.
+    uint32_t MeasureAuthoredReticleCoverage()
+    {
+        if (!g_authoredReticleProbeUsable || !g_context ||
+            !g_authoredReticleSrv || !g_authoredReticleProbeStaging ||
+            !g_authoredReticleTexture)
+        {
+            return 0;
+        }
+
+        D3D11_TEXTURE2D_DESC desc{};
+        g_authoredReticleTexture->GetDesc(&desc);
+        uint32_t probeMip = 0;
+        uint32_t width = desc.Width;
+        while (width > kAuthoredReticleProbeSize && probeMip + 1 < desc.MipLevels)
+        {
+            width >>= 1;
+            ++probeMip;
+        }
+        if (width != kAuthoredReticleProbeSize)
+            return 0;
+
+        g_context->GenerateMips(g_authoredReticleSrv);
+        g_context->CopySubresourceRegion(
+            g_authoredReticleProbeStaging, 0, 0, 0, 0,
+            g_authoredReticleTexture, probeMip, nullptr);
+
+        D3D11_MAPPED_SUBRESOURCE mapped{};
+        if (FAILED(g_context->Map(g_authoredReticleProbeStaging, 0,
+                                  D3D11_MAP_READ, 0, &mapped)))
+        {
+            return 0;
+        }
+        uint32_t maxAlpha = 0;
+        const auto* rows = static_cast<const uint8_t*>(mapped.pData);
+        for (uint32_t y = 0; y < kAuthoredReticleProbeSize; ++y)
+        {
+            const uint8_t* texel = rows + static_cast<size_t>(y) * mapped.RowPitch;
+            for (uint32_t x = 0; x < kAuthoredReticleProbeSize; ++x, texel += 4)
+            {
+                if (texel[3] > maxAlpha)
+                    maxAlpha = texel[3];
+            }
+        }
+        g_context->Unmap(g_authoredReticleProbeStaging, 0);
+        return maxAlpha;
     }
 
     bool EnsureReticleChain()
@@ -4689,8 +4859,41 @@ float4 ps_scope_linearize(VSOut i):SV_Target { return paint(i.uv,true); }
             !g_authoredReticleTexture ||
             g_reticleChain == XR_NULL_HANDLE)
             return false;
+        g_authoredReticleHeldBlank = false;
         if (g_authoredReticleUploadedSerial == g_authoredReticleSerial)
             return true;
+
+        // Decide what this upload is allowed to publish BEFORE touching the
+        // swapchain. A capture with visible pixels becomes the new known-good
+        // art; one without is refused outright, so the quad keeps showing the
+        // last crosshair the player could actually see instead of the blank
+        // the engine just handed us.
+        ID3D11Texture2D* source = g_authoredReticleTexture;
+        if (g_authoredReticleProbeUsable && g_authoredReticleGoodTexture)
+        {
+            const uint32_t coverage = MeasureAuthoredReticleCoverage();
+            g_authoredReticleLastCoverage = coverage;
+            const bool hasArt = coverage >= kAuthoredReticleArtAlphaThreshold;
+            if (!hasArt && g_authoredReticleGoodValid)
+            {
+                // Hold. This is NOT a failure: the engine drew nothing
+                // visible this frame, so the crosshair the player is aiming
+                // with stays on the quad untouched. The caller must not treat
+                // it as a lost upload and repaint the chain.
+                ++g_authoredReticleBlankHeld;
+                g_authoredReticleHeldBlank = true;
+                return false;
+            }
+            // Either the capture has art, or nothing good has ever been
+            // measured and showing this is still better than showing none.
+            // Mip 0 only: the capture carries a mip chain for the check and
+            // the swapchain image does not.
+            g_context->CopySubresourceRegion(
+                g_authoredReticleGoodTexture, 0, 0, 0, 0,
+                g_authoredReticleTexture, 0, nullptr);
+            g_authoredReticleGoodValid = g_authoredReticleGoodValid || hasArt;
+            source = g_authoredReticleGoodTexture;
+        }
 
         uint32_t index = 0;
         XrSwapchainImageAcquireInfo acquire{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
@@ -4726,8 +4929,8 @@ float4 ps_scope_linearize(VSOut i):SV_Target { return paint(i.uv,true); }
             return false;
 
         D3D11_TEXTURE2D_DESC sourceDesc{};
-        g_authoredReticleTexture->GetDesc(&sourceDesc);
-        const bool copied = Blit(g_authoredReticleTexture, sourceDesc,
+        source->GetDesc(&sourceDesc);
+        const bool copied = Blit(source, sourceDesc,
                                  g_reticleImages[index], kReticleSize,
                                  kReticleSize,
                                  GetRtv(g_reticleImages, g_reticleRtvs, index));
@@ -7460,7 +7663,8 @@ float4 ps_scope_linearize(VSOut i):SV_Target { return paint(i.uv,true); }
                                 g_preparedFrame.serial);
                             ++s_uploadsDone;
                         }
-                        else if (shouldUploadAuthoredReticle)
+                        else if (shouldUploadAuthoredReticle &&
+                                 !g_authoredReticleHeldBlank)
                         {
                             // Never expose stale or undefined swapchain
                             // contents: repaint the chain, exactly as the
@@ -7493,9 +7697,15 @@ float4 ps_scope_linearize(VSOut i):SV_Target { return paint(i.uv,true); }
                                 // vanished" report actionable: held < pieces
                                 // means the capture thinned out and the
                                 // completeness guard held the good art.
+                                // `art` is the measured maximum alpha of the
+                                // capture and `blankHeld` counts the publishes
+                                // refused because it had none. Together they
+                                // say, without another round trip, whether the
+                                // engine stopped painting a visible crosshair
+                                // and whether the guard caught it.
                                 LOG("%s reticle upload: %llu uploaded, %llu "
                                     "skipped in the last window (key %llX, "
-                                    "pieces %u, held %u)",
+                                    "pieces %u, held %u, art %u, blankHeld %u)",
                                     reachTitle ? "Reach" : "Halo 3",
                                     static_cast<unsigned long long>(
                                         s_uploadsDone),
@@ -7504,7 +7714,10 @@ float4 ps_scope_linearize(VSOut i):SV_Target { return paint(i.uv,true); }
                                     static_cast<unsigned long long>(
                                         authoredCrosshairKey),
                                     authoredCrosshairDraws,
-                                    s_refreshState.lastPublishedDraws);
+                                    s_refreshState.lastPublishedDraws,
+                                    g_authoredReticleLastCoverage,
+                                    g_authoredReticleBlankHeld);
+                                g_authoredReticleBlankHeld = 0;
                                 s_uploadsDone = 0;
                                 s_uploadsSkipped = 0;
                             }
@@ -8626,6 +8839,10 @@ void VR_DetachGamePresentation()
     g_authoredReticleSerial = 0;
     g_authoredReticleUploadedSerial = 0;
     g_reticleContainsAuthored = false;
+    // Known-good art belongs to the title that captured it; a new title must
+    // measure its own before anything is held on its behalf.
+    g_authoredReticleGoodValid = false;
+    g_authoredReticleHeldBlank = false;
     g_reticlePaintedOpacity = -1.0f;
     Game_ResetAuthoredCrosshairKey();
     g_reticleOwnerEpoch.fetch_add(1, std::memory_order_acq_rel);
