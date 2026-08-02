@@ -119,7 +119,7 @@ namespace
         const bool wheelGesture = Game_Halo3VehicleSwallowsGrips();
 
         MenuChordResult pauseChord{};
-        if (Game_AllowsPauseToggleInput())
+        if (g_config.y_b_start_chord && Game_AllowsPauseToggleInput())
         {
             pauseChord =
                 g_pauseChord.Update(GetTickCount64(), pad.y, pad.b);

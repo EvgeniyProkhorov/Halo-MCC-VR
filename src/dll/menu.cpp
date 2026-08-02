@@ -729,6 +729,11 @@ namespace
             changed |= ImGui::SliderFloat("Snap increment (deg)", &g_config.turn_snap_deg, 5.0f, 90.0f, "%.0f");
 
         ImGui::Spacing();
+        changed |= ImGui::Checkbox("Y + B sends Start (pause / resume)",
+                                   &g_config.y_b_start_chord);
+        ImGui::TextDisabled("On by default. Turn it off if you prefer Y and B to stay separate.");
+
+        ImGui::Spacing();
         ImGui::Text("D-pad gesture (hold controller next to head)");
         if (ImGui::RadioButton("Left controller", g_config.dpad_hand == 0))
         {

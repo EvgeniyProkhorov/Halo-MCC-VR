@@ -4212,7 +4212,7 @@ int main()
         "cutscene_theater_enabled", "cutscene_theater_depth",
         "cutscene_theater_flip_depth", "cutscene_theater_width_m",
         "cutscene_theater_distance_m",
-        "turn_smooth", "turn_snap_deg", "turn_smooth_deg_s", "dpad_hand",
+        "turn_smooth", "turn_snap_deg", "turn_smooth_deg_s", "y_b_start_chord", "dpad_hand",
         "vehicle_first_person", "vehicle_cam_forward_m", "vehicle_cam_up_m",
         "vehicle_cam_right_m",
         "vehicle_view_follow", "vehicle_cam_smoothing",
@@ -4269,6 +4269,20 @@ int main()
               g_config.cutscene_theater_width_m == 6.0f &&
               g_config.cutscene_theater_distance_m == 4.0f,
         "legacy configs inherit the enabled cutscene-theatre defaults");
+    Check(g_config.y_b_start_chord,
+        "legacy configs inherit the enabled Y+B Start chord default");
+
+    {
+        std::ofstream file(primary);
+        file << "y_b_start_chord = 0\n";
+    }
+    ConfigLoad(primary.c_str());
+    Check(!g_config.y_b_start_chord,
+        "The Y+B Start chord can be disabled in the config");
+    ConfigSave();
+    ConfigLoad(primary.c_str());
+    Check(!g_config.y_b_start_chord,
+        "The Y+B Start chord setting survives a save/load round trip");
 
     // C13 per-SEAT trim. An override exists only for the axis and SEAT
     // actually written; every other axis, seat, vehicle and on-foot read

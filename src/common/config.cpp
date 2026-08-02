@@ -316,6 +316,8 @@ void ConfigLoad(const wchar_t* path)
             g_config.turn_snap_deg = (float)atof(val);
         else if (!strcmp(key, "turn_smooth_deg_s"))
             g_config.turn_smooth_deg_s = (float)atof(val);
+        else if (!strcmp(key, "y_b_start_chord"))
+            g_config.y_b_start_chord = atoi(val) != 0;
         else if (!strcmp(key, "ghost_fix") || !strcmp(key, "stereo_alternate_order") ||
                  !strcmp(key, "stereo_warmup_pass") || !strcmp(key, "per_eye_history") ||
                  !strcmp(key, "stereo_sun_shafts") || !strcmp(key, "gun_length_scale") ||
@@ -702,6 +704,9 @@ void ConfigSave()
     fprintf(f, "# Smooth turn speed in degrees per second.\n");
     fprintf(f, "# (default %.0f, range 30 to 360)\n", d.turn_smooth_deg_s);
     fprintf(f, "turn_smooth_deg_s = %.0f\n\n", g_config.turn_smooth_deg_s);
+    fprintf(f, "# Press Y+B together to send Start (pause/resume) in supported titles.\n");
+    fprintf(f, "# (default %d)\n", d.y_b_start_chord ? 1 : 0);
+    fprintf(f, "y_b_start_chord = %d\n\n", g_config.y_b_start_chord ? 1 : 0);
     fprintf(f, "# Hold this controller next to your head to use the left stick as D-pad:\n");
     fprintf(f, "# 0 = left controller, 1 = right controller.\n");
     fprintf(f, "# While held, clicking the left stick presses the controller's\n");

@@ -203,6 +203,10 @@ struct Config
     float turn_snap_deg = 30.0f;       // degrees per snap
     float turn_smooth_deg_s = 120.0f;  // smooth turn speed, degrees/second
 
+    // Send Start when Y and B are pressed together. This is the pause fallback
+    // for titles whose controller Menu button is reserved by the OpenXR runtime.
+    bool y_b_start_chord = true;
+
     // Which controller, held next to the head, turns the left stick into the
     // D-pad (UEVR-style gesture): 0 = left controller, 1 = right controller.
     int dpad_hand = 0;
