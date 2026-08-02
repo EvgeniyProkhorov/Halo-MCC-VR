@@ -429,6 +429,17 @@ namespace
     std::atomic<int32_t> g_cinematicRebaseScene{-1};
     std::atomic<int32_t> g_cinematicRebaseShot{-1};
     std::atomic<uint32_t> g_cinematicRebaseSerial{0};
+
+    // Shortest gap that can separate two genuine authored camera cuts. Halo 3
+    // cinematic shots run for seconds; anything faster is the Cortana channel's
+    // looping cinematic state, not a cut.
+    constexpr uint64_t kCinematicRebaseGuardMs = 400;
+    // Counters only; ApplyHeadLook stays log/alloc/lock free. The 50 ms worker
+    // turns these into the log lines that judge this candidate.
+    std::atomic<uint32_t> g_cinematicBoundaryCount{0};
+    std::atomic<uint32_t> g_cinematicBoundarySuppressed{0};
+    std::atomic<int32_t> g_cinematicBoundaryScene{-1};
+    std::atomic<int32_t> g_cinematicBoundaryShot{-1};
     unsigned char** g_animationTagData = nullptr;
     // Halo real_matrix4x3: uniform scale, then forward/left/up basis vectors,
     // then translation. The first headset build incorrectly put scale last,
@@ -5019,8 +5030,41 @@ namespace
         previousScene = cinematic ? cinematicScene : -1;
         previousShot = cinematic ? cinematicShot : -1;
 
+        // A real authored cut is seconds apart. Halo 3's Cortana/Gravemind
+        // channel drives a LOOPING cinematic effect, and every flip of its
+        // scene/shot state reads here as another "cut". Rebasing on each one
+        // re-pins the yaw reference continuously, so the player can never hold
+        // a heading - the headset report is that Chief spins and cannot be
+        // faced where the player wants, with the FOV changing (the cinematic
+        // FOV policy) throughout. Accept the first boundary and ignore any
+        // that follow within the guard window; a genuine cut is unaffected.
+        // Manual recenter (F3 / L3+R3) is never rate limited.
+        static thread_local uint64_t lastCinematicRebaseMs = 0;
+        bool cinematicRebase = cinematicBoundary;
+        if (cinematicBoundary)
+        {
+            const uint64_t rebaseNowMs = GetTickCount64();
+            g_cinematicBoundaryCount.fetch_add(1, std::memory_order_relaxed);
+            g_cinematicBoundaryScene.store(cinematicScene,
+                                           std::memory_order_relaxed);
+            g_cinematicBoundaryShot.store(cinematicShot,
+                                          std::memory_order_relaxed);
+            if (lastCinematicRebaseMs &&
+                rebaseNowMs - lastCinematicRebaseMs <
+                    kCinematicRebaseGuardMs)
+            {
+                cinematicRebase = false;
+                g_cinematicBoundarySuppressed.fetch_add(
+                    1, std::memory_order_relaxed);
+            }
+            else
+            {
+                lastCinematicRebaseMs = rebaseNowMs;
+            }
+        }
+
         const bool manualRecenter = g_needRecenter.exchange(false);
-        if (manualRecenter || cinematicBoundary)
+        if (manualRecenter || cinematicRebase)
         {
             g_gameYawRef = atan2f(fwd[1], fwd[0]); // align current head to current heading
             g_headYawRef = hy;
@@ -5032,7 +5076,7 @@ namespace
                 LOG("head tracking recentered (game yaw %.1f deg)",
                     g_gameYawRef * 57.2958f);
             }
-            if (cinematicBoundary)
+            if (cinematicRebase)
             {
                 g_cinematicRebaseScene.store(
                     cinematic ? cinematicScene : -1,
@@ -7397,6 +7441,35 @@ namespace
     // analyse the captured observer window once per second: the chase model
     // position = focus - forward * distance should name the focus fields.
     // A raw float dump every 5 s preserves the full window for offline work.
+    // Judges this candidate from the log alone. A boundary storm (many
+    // boundaries per second, nearly all suppressed) is the Cortana-channel
+    // rebase loop. Steady silence, or isolated boundaries with 0 suppressed,
+    // means ordinary cutscene behavior and that this is NOT the mechanism.
+    void LogHalo3CinematicRebaseIfNew()
+    {
+        static uint32_t lastCount = 0;
+        static uint32_t lastSuppressed = 0;
+        static uint64_t nextMs = 0;
+        const uint32_t count =
+            g_cinematicBoundaryCount.load(std::memory_order_relaxed);
+        const uint64_t nowMs = GetTickCount64();
+        if (count == lastCount)
+            return;
+        if (nowMs < nextMs)
+            return;
+        nextMs = nowMs + 1000;
+        const uint32_t suppressed =
+            g_cinematicBoundarySuppressed.load(std::memory_order_relaxed);
+        LOG("H3 cinematic yaw: %u authored boundaries in the last second, %u "
+            "suppressed by the %llu ms cut guard (scene %d shot %d)",
+            count - lastCount, suppressed - lastSuppressed,
+            (unsigned long long)kCinematicRebaseGuardMs,
+            g_cinematicBoundaryScene.load(std::memory_order_relaxed),
+            g_cinematicBoundaryShot.load(std::memory_order_relaxed));
+        lastCount = count;
+        lastSuppressed = suppressed;
+    }
+
     void LogHalo3ObserverIfDriving()
     {
         static uint64_t nextAnalysisMs = 0;
@@ -21232,6 +21305,7 @@ namespace
             LogOdstFpLayoutSelfCheckIfNew(); // emit FP weapon-layout self-check
             LogOdstNativeHudRouteOnce();    // bounded in-place CHUD route result
             LogHalo3VehicleProbeIfNew();   // live H3 feature status/fallback
+            LogHalo3CinematicRebaseIfNew(); // H3 authored cut-boundary rate
             if constexpr (kEnableRetiredHalo3Diagnostics)
             {
                 LogHalo3ObserverIfDriving();   // H3 observer focus-field analysis
@@ -21242,6 +21316,7 @@ namespace
             Sleep(50);
 #else
             LogHalo3VehicleProbeIfNew();   // live H3 feature status/fallback
+            LogHalo3CinematicRebaseIfNew(); // H3 authored cut-boundary rate
             if constexpr (kEnableRetiredHalo3Diagnostics)
             {
                 LogHalo3ObserverIfDriving();   // H3 observer focus-field analysis
