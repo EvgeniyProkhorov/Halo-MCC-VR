@@ -1056,6 +1056,71 @@ namespace
         return nullptr;
     }
 
+    // The same debug-var table as FindDebugVarFloat, for a caller that knows
+    // which TYPE it wants. An entry is {name_ptr, type, value_ptr, help_ptr}:
+    // globals carry type 5 (boolean) or 6 (float), while a debug COMMAND
+    // carries type 0 and stores its HANDLER where a global stores its value.
+    //
+    // FindDebugVarFloat ignores the type word, which is safe only because every
+    // name it is asked for is a real global. It is not safe in general - Reach's
+    // `render_atmosphere_fog` is a command whose entry "value" is 0x00198F2C,
+    // inside .text - so resolving a command name that way would hand back a
+    // pointer to code. Requiring the exact type and proving the slot is
+    // committed, writable, non-executable memory turns that class of
+    // mis-resolution into a null result instead of a write into code.
+    void* FindDebugVarSlot(uintptr_t base, size_t size, const char* name,
+                           uint64_t expectedType)
+    {
+        const size_t nameLen = strlen(name);
+        const uint8_t* module = reinterpret_cast<const uint8_t*>(base);
+        uintptr_t nameVa = 0;
+        for (size_t i = 1; i + nameLen + 1 < size; ++i)
+        {
+            if (module[i] == static_cast<uint8_t>(name[0]) &&
+                module[i - 1] == 0 && module[i + nameLen] == 0 &&
+                !memcmp(module + i, name, nameLen))
+            {
+                nameVa = base + i;
+                break;
+            }
+        }
+        if (!nameVa) return nullptr;
+        for (size_t i = 0; i + 24 <= size; i += 8)
+        {
+            if (*reinterpret_cast<const uintptr_t*>(module + i) != nameVa)
+                continue;
+            if (*reinterpret_cast<const uint64_t*>(module + i + 8) !=
+                expectedType)
+            {
+                continue;
+            }
+            const uintptr_t value =
+                *reinterpret_cast<const uintptr_t*>(module + i + 16);
+            if (value <= base || value >= base + size)
+                continue;
+            MEMORY_BASIC_INFORMATION info{};
+            if (VirtualQuery(reinterpret_cast<void*>(value), &info,
+                             sizeof(info)) != sizeof(info) ||
+                info.State != MEM_COMMIT)
+            {
+                continue;
+            }
+            // PAGE_* protections are distinct bits in the low byte; the
+            // modifiers (GUARD/NOCACHE/WRITECOMBINE) sit above it.
+            const DWORD protection = info.Protect & 0xFFu;
+            constexpr DWORD kExecutable = PAGE_EXECUTE | PAGE_EXECUTE_READ |
+                PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
+            constexpr DWORD kWritable = PAGE_READWRITE | PAGE_WRITECOPY;
+            if ((info.Protect & PAGE_GUARD) || (protection & kExecutable) ||
+                !(protection & kWritable))
+            {
+                continue;
+            }
+            return reinterpret_cast<void*>(value);
+        }
+        return nullptr;
+    }
+
     void ResolveMotionBlurVars(uintptr_t base, size_t size)
     {
         static const char* kNames[4] = {
@@ -13201,6 +13266,17 @@ namespace
         bool motionBlurResolved = false;
         bool motionBlurSuppressed = false;
         uint8_t* patchyFogFlags = nullptr;
+        // Player-facing Reach weather controls, asserted at the top of every
+        // owned eye render. `renderRainSlot` is the title's own `render_rain`
+        // boolean, resolved by name; `atmosphereFogTlsIndex` is the module
+        // global holding the render TLS index the atmosphere helper walks to
+        // reach its flags byte. Both suppression bits are touched only on the
+        // render thread inside that assert.
+        uint8_t* renderRainSlot = nullptr;
+        uint8_t renderRainOriginal = 1;
+        bool renderRainSuppressed = false;
+        const uint32_t* atmosphereFogTlsIndex = nullptr;
+        bool atmosphereFogSuppressed = false;
         // Live `render_lightmap_shadows` boolean. The owned-eye scope saves,
         // clears, and restores it around player_view_render to isolate Reach's
         // proven object-caster -> static-lightmap receiver pass.
@@ -13228,6 +13304,13 @@ namespace
     // thread from combining a new generation with an old vehicle result.
     std::atomic<uint64_t> g_reachVehicleInputSnapshot{0};
     std::atomic<uint32_t> g_reachVehicleInputFaults{0};
+    // Weather-control telemetry. A report is only usable if it can say whether
+    // each control was actually asserted, so these are reported every window
+    // rather than only on change.
+    std::atomic<uint32_t> g_reachRainSuppressedEyes{0};
+    std::atomic<uint32_t> g_reachFogSuppressedEyes{0};
+    std::atomic<uint32_t> g_reachWeatherWriteFailures{0};
+    std::atomic<uint32_t> g_reachFogFlagsUnresolved{0};
     std::atomic<uint32_t> g_reachLightmapShadowSuppressedEyes{0};
     std::atomic<uint32_t> g_reachLightmapShadowAlreadyDisabledEyes{0};
     std::atomic<uint32_t> g_reachLightmapShadowWriteFailures{0};
@@ -13311,6 +13394,197 @@ namespace
         }
         __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
         return 1;
+    }
+
+    // Bind Reach's atmospheric-fog control from its own gate rather than by
+    // name: `render_atmosphere_fog` is a debug COMMAND whose table slot points
+    // into .text (see reach_render_logic.h). This decodes, out of the already
+    // hash-pinned image, the helper call edge, the TLS-index load, the +0x168
+    // slot offset, and the exact test/branch. Any changed opcode, index, offset,
+    // mask or branch leaves only this one feature stock.
+    bool ReachVerifyAtmosphereFogGate(
+        uintptr_t base, size_t size, const uint32_t*& tlsIndex)
+    {
+        tlsIndex = nullptr;
+        const auto fits = [size](uintptr_t rva, size_t bytes)
+        {
+            return rva < size && bytes <= size - rva;
+        };
+        if (!fits(kReachAtmosphereFogTlsIndexLoadRva, 6) ||
+            !fits(kReachAtmosphereFogSlotLoadRva, 6) ||
+            !fits(kReachAtmosphereFogGateTestRva, 5) ||
+            !fits(kReachAtmosphereFogTlsIndexRva, sizeof(uint32_t)) ||
+            !ReachVerifyRel32Call(
+                base, kReachAtmosphereFogHelperCallRva,
+                kReachAtmosphereFogHelperRva))
+        {
+            return false;
+        }
+
+        // mov edx, dword ptr [rip + rel32]  -> the render TLS index global
+        const uint8_t* const load = reinterpret_cast<const uint8_t*>(
+            base + kReachAtmosphereFogTlsIndexLoadRva);
+        if (load[0] != 0x8B || load[1] != 0x15)
+            return false;
+        int32_t displacement = 0;
+        memcpy(&displacement, load + 2, sizeof(displacement));
+        const uintptr_t next = base + kReachAtmosphereFogTlsIndexLoadRva + 6;
+        if (static_cast<uintptr_t>(
+                static_cast<intptr_t>(next) + displacement) !=
+            base + kReachAtmosphereFogTlsIndexRva)
+        {
+            return false;
+        }
+
+        // mov r14d, 0x168   then   test byte ptr [rax], 4   then   je
+        const uint8_t* const slot = reinterpret_cast<const uint8_t*>(
+            base + kReachAtmosphereFogSlotLoadRva);
+        uint32_t slotOffset = 0;
+        memcpy(&slotOffset, slot + 2, sizeof(slotOffset));
+        const uint8_t* const gate = reinterpret_cast<const uint8_t*>(
+            base + kReachAtmosphereFogGateTestRva);
+        if (slot[0] != 0x41 || slot[1] != 0xBE ||
+            slotOffset != kReachAtmosphereFogFlagsSlotOffset ||
+            gate[0] != 0xF6 || gate[1] != 0x00 ||
+            gate[2] != kReachAtmosphereFogEnableMask || gate[3] != 0x74 ||
+            kReachAtmosphereFogSkipJumpRva !=
+                kReachAtmosphereFogGateTestRva + 3)
+        {
+            return false;
+        }
+
+        const auto* const resolved = reinterpret_cast<const uint32_t*>(
+            base + kReachAtmosphereFogTlsIndexRva);
+        uint32_t index = 0;
+        if (!SafeReadU32(resolved, &index) ||
+            index >= kReachRenderTlsIndexLimit)
+        {
+            return false;
+        }
+        tlsIndex = resolved;
+        return true;
+    }
+
+    // Walk the engine's own path to the render flags byte: module TLS index ->
+    // this thread's TLS block -> the render-globals pointer at +0x168. Three
+    // loads, allocation-free, and only ever run on the render thread inside an
+    // owned eye - which is the thread whose flags the atmosphere helper reads.
+    uint8_t* ReachResolveAtmosphereFogFlags() noexcept
+    {
+        const uint32_t* const indexSlot = g_reachCamera.atmosphereFogTlsIndex;
+        if (!indexSlot)
+            return nullptr;
+        __try
+        {
+            const uint32_t index = *indexSlot;
+            if (index >= kReachRenderTlsIndexLimit)
+                return nullptr;
+            auto** slots = reinterpret_cast<void**>(__readgsqword(0x58));
+            if (!slots)
+                return nullptr;
+            auto* block = reinterpret_cast<unsigned char*>(slots[index]);
+            if (!block)
+                return nullptr;
+            return *reinterpret_cast<uint8_t**>(
+                block + kReachAtmosphereFogFlagsSlotOffset);
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            return nullptr;
+        }
+    }
+
+    // Assert the player's weather choice at the top of every owned eye render.
+    //
+    // Deliberately an ASSERT rather than the save/suppress/restore scope patchy
+    // fog uses. Patchy fog has to stay on for the title's own authored views and
+    // is only wrong inside our stereo eyes; these two are a player preference
+    // that should hold wherever the player is looking, so the control converges
+    // on the setting instead - turning a setting back on writes the title's own
+    // value back on the very next eye. That also makes it self-healing against
+    // Reach's tag loader, which rewrites render globals on level load exactly as
+    // it does the motion-blur ones.
+    //
+    // Failure is per-feature and never touches the render result: an unresolved
+    // or unwritable control leaves that one effect stock and is counted for the
+    // worker to report. It must not drop the eye.
+    void ReachApplyWeatherControls() noexcept
+    {
+        if (uint8_t* const rain = g_reachCamera.renderRainSlot)
+        {
+            uint8_t current = 0;
+            if (!SafeReadByte(rain, &current))
+            {
+                g_reachWeatherWriteFailures.fetch_add(
+                    1, std::memory_order_relaxed);
+            }
+            else if (!g_config.rain)
+            {
+                if (current != 0)
+                {
+                    // Only a value we did not write can define "stock".
+                    if (!g_reachCamera.renderRainSuppressed)
+                        g_reachCamera.renderRainOriginal = current;
+                    if (SafeWriteByte(rain, 0))
+                        g_reachCamera.renderRainSuppressed = true;
+                    else
+                        g_reachWeatherWriteFailures.fetch_add(
+                            1, std::memory_order_relaxed);
+                }
+                g_reachRainSuppressedEyes.fetch_add(
+                    1, std::memory_order_relaxed);
+            }
+            else if (g_reachCamera.renderRainSuppressed)
+            {
+                if (SafeWriteByte(rain, g_reachCamera.renderRainOriginal))
+                    g_reachCamera.renderRainSuppressed = false;
+                else
+                    g_reachWeatherWriteFailures.fetch_add(
+                        1, std::memory_order_relaxed);
+            }
+        }
+
+        if (!g_reachCamera.atmosphereFogTlsIndex)
+            return;
+        uint8_t* const fog = ReachResolveAtmosphereFogFlags();
+        if (!fog)
+        {
+            // The render globals are allocated on demand; before they exist
+            // there is no fog to suppress and nothing is wrong.
+            g_reachFogFlagsUnresolved.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
+        uint8_t flags = 0;
+        if (!SafeReadByte(fog, &flags))
+        {
+            g_reachWeatherWriteFailures.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
+        if (!g_config.atmospheric_fog)
+        {
+            if (flags & kReachAtmosphereFogEnableMask)
+            {
+                if (SafeWriteByte(
+                        fog, ReachAtmosphereFogSuppressedFlags(flags)))
+                {
+                    g_reachCamera.atmosphereFogSuppressed = true;
+                }
+                else
+                {
+                    g_reachWeatherWriteFailures.fetch_add(
+                        1, std::memory_order_relaxed);
+                }
+            }
+            g_reachFogSuppressedEyes.fetch_add(1, std::memory_order_relaxed);
+        }
+        else if (g_reachCamera.atmosphereFogSuppressed)
+        {
+            if (SafeWriteByte(fog, ReachAtmosphereFogRestoredFlags(flags)))
+                g_reachCamera.atmosphereFogSuppressed = false;
+            else
+                g_reachWeatherWriteFailures.fetch_add(
+                    1, std::memory_order_relaxed);
+        }
     }
 
     // Reach's own resolution, decoded from 0x2DA68A-0x2DA6EC. See
@@ -14736,6 +15010,13 @@ namespace
                 1, std::memory_order_relaxed);
             return false;
         }
+
+        // Player weather preference, asserted before the eye renders. Kept out
+        // of the __try/__finally below on purpose: it owns no scoped write, so
+        // it has nothing to unwind, and its outcome must never influence
+        // whether this eye is submitted.
+        ReachApplyWeatherControls();
+
         __try
         {
             uint8_t* const lightmap =
@@ -18141,6 +18422,22 @@ namespace
         g_reachCamera.motionBlurResolved = false;
         g_reachCamera.motionBlurSuppressed = false;
         g_reachCamera.patchyFogFlags = nullptr;
+        // render_rain is a plain module global, so a suppression can be handed
+        // back from any thread once the hooks are quiescent. The atmospheric-fog
+        // bit deliberately is NOT restored here: it lives in per-thread render
+        // TLS, so only the render thread can reach the right copy, and teardown
+        // does not run there. Turning the setting back on restores it on the
+        // next eye, and a title-module reload re-initialises the byte anyway.
+        if (g_reachCamera.renderRainSuppressed && g_reachCamera.renderRainSlot)
+        {
+            SafeWriteByte(
+                g_reachCamera.renderRainSlot, g_reachCamera.renderRainOriginal);
+        }
+        g_reachCamera.renderRainSlot = nullptr;
+        g_reachCamera.renderRainOriginal = 1;
+        g_reachCamera.renderRainSuppressed = false;
+        g_reachCamera.atmosphereFogTlsIndex = nullptr;
+        g_reachCamera.atmosphereFogSuppressed = false;
         g_reachCamera.lightmapShadowsEnabled = nullptr;
         g_reachLightmapShadowOutstandingValue.store(
             0, std::memory_order_relaxed);
@@ -19257,6 +19554,32 @@ namespace
             return false;
         }
 
+        // Optional player weather controls. Both are fail-open per feature:
+        // an unproven control leaves that ONE effect stock and never blocks the
+        // camera core, so a future retail build that moves either one costs the
+        // clarity toggle and nothing else.
+        auto* const reachRenderRain = static_cast<uint8_t*>(FindDebugVarSlot(
+            base, size, "render_rain", kReachDebugVarTypeBoolean));
+        uint8_t reachRenderRainOriginal = 0;
+        const bool reachRainResolved = reachRenderRain &&
+            ReachRenderRainSlotMatchesPinnedImage(
+                base, size, reinterpret_cast<uintptr_t>(reachRenderRain)) &&
+            SafeReadByte(reachRenderRain, &reachRenderRainOriginal);
+        if (!reachRainResolved)
+        {
+            LOG("Reach weather: the title's render_rain boolean did not resolve "
+                "by name against the pinned image; the rain setting stays stock "
+                "and the Reach camera core continues");
+        }
+
+        const uint32_t* reachAtmosphereFogTlsIndex = nullptr;
+        if (!ReachVerifyAtmosphereFogGate(
+                base, size, reachAtmosphereFogTlsIndex))
+        {
+            LOG("Reach weather: the atmospheric-fog gate proof failed; the fog "
+                "setting stays stock and the Reach camera core continues");
+        }
+
         HMODULE moduleReference = nullptr;
         if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
                                 reinterpret_cast<LPCWSTR>(base),
@@ -19631,6 +19954,24 @@ namespace
         g_reachCamera.motionBlurResolved = true;
         g_reachCamera.motionBlurSuppressed = false;
         g_reachCamera.patchyFogFlags = reachPatchyFogFlags;
+        g_reachCamera.renderRainSlot =
+            reachRainResolved ? reachRenderRain : nullptr;
+        g_reachCamera.renderRainOriginal =
+            reachRainResolved ? reachRenderRainOriginal : 1;
+        g_reachCamera.renderRainSuppressed = false;
+        g_reachCamera.atmosphereFogTlsIndex = reachAtmosphereFogTlsIndex;
+        g_reachCamera.atmosphereFogSuppressed = false;
+        g_reachRainSuppressedEyes.store(0, std::memory_order_relaxed);
+        g_reachFogSuppressedEyes.store(0, std::memory_order_relaxed);
+        g_reachWeatherWriteFailures.store(0, std::memory_order_relaxed);
+        g_reachFogFlagsUnresolved.store(0, std::memory_order_relaxed);
+        LOG("Reach weather controls: rain %s, atmospheric fog %s "
+            "(settings: rain %s, fog %s)",
+            reachRainResolved ? "bound by name" : "STOCK (unproven)",
+            reachAtmosphereFogTlsIndex ? "bound at its gate"
+                                       : "STOCK (unproven)",
+            g_config.rain ? "on" : "off",
+            g_config.atmospheric_fog ? "on" : "off");
         g_reachCamera.lightmapShadowsEnabled =
             reachLightmapShadowsEnabled;
         g_reachLightmapShadowSuppressedEyes.store(
@@ -20102,6 +20443,43 @@ namespace
             "write-failures=%u, restore-failures=%u",
             generation, suppressed, alreadyDisabled, writeFailures,
             restoreFailures);
+    }
+
+    // Worker-side only; the hot path just bumps atomics. This reports on a
+    // plain 10-second period rather than only when the numbers move, because
+    // the observer-camera site table taught the opposite lesson: a report that
+    // prints only on change printed once, 57 ms after arming, and could never
+    // show whether the behavior was working. A headset result is only usable
+    // beside the achieved counts.
+    void ReachWeatherLogTick()
+    {
+        static uint64_t lastReportMs = 0;
+        if (!g_reachCamera.installed.load(std::memory_order_acquire) ||
+            !g_reachCamera.armed.load(std::memory_order_acquire))
+        {
+            lastReportMs = 0;
+            return;
+        }
+        if (!g_reachCamera.renderRainSlot &&
+            !g_reachCamera.atmosphereFogTlsIndex)
+        {
+            return; // Neither control was proven; nothing to report.
+        }
+        const uint64_t now = GetTickCount64();
+        if (lastReportMs != 0 && now - lastReportMs < 10000)
+            return;
+        lastReportMs = now;
+        LOG("Reach weather: rain %s (setting %s, held-off eyes=%u), "
+            "atmospheric fog %s (setting %s, held-off eyes=%u), "
+            "flags-unresolved=%u, write-failures=%u",
+            g_reachCamera.renderRainSlot ? "bound" : "stock",
+            g_config.rain ? "on" : "off",
+            g_reachRainSuppressedEyes.exchange(0, std::memory_order_relaxed),
+            g_reachCamera.atmosphereFogTlsIndex ? "bound" : "stock",
+            g_config.atmospheric_fog ? "on" : "off",
+            g_reachFogSuppressedEyes.exchange(0, std::memory_order_relaxed),
+            g_reachFogFlagsUnresolved.exchange(0, std::memory_order_relaxed),
+            g_reachWeatherWriteFailures.load(std::memory_order_relaxed));
     }
 
     // Worker-side proof that the behavioral candidate actually executed. The
@@ -20751,6 +21129,7 @@ namespace
         ReachPauseColdPoll(base, size, generation, soleReachTitle);
         ReachMuzzleRetargetTick(base, size, generation, soleReachTitle);
         ReachLightmapShadowLogTick();
+        ReachWeatherLogTick();
         ReachSsaoLogTick();
         ReachObserverCameraLogTick();
         ReachMuzzleLogTick();
