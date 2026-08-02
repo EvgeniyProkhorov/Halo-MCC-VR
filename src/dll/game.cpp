@@ -116,42 +116,6 @@ namespace
 
     std::atomic<bool> g_hooked{false};
     std::atomic<uint32_t> g_halo3RuntimeGeneration{0};
-
-    // Halo 3's Cortana/Gravemind channel. Its script freezes the player by
-    // scaling ALL player input to 15% (H3EK gs_cortana_header /
-    // gs_gravemind_header), but it is not an authored cinematic, so the
-    // cutscene theatre never engaged and the player was left in immersive VR
-    // while Chief was driven around under a head-owned camera. Treat the whole
-    // channel as one authored shot so the theatre owns the view for its
-    // duration and hands back when the script restores input.
-    //
-    // The latch stores the runtime GENERATION it belongs to rather than a
-    // bool. Every camera-core teardown zeroes that generation, so a channel
-    // that never gets its restoring 1.0 - death mid-channel, a checkpoint
-    // reload, quitting to the menu - cannot leave the theatre stuck on.
-    using Halo3ScaleAllInputFn = void(__fastcall*)(float, float);
-    Halo3ScaleAllInputFn g_realHalo3ScaleAllInput = nullptr;
-    std::atomic<uint32_t> g_halo3FrozenChannelGeneration{0};
-    std::atomic<uint32_t> g_halo3FrozenChannelSerial{0};
-    // Authored channel scales, from H3EK. 0.15 is the only value the official
-    // scripts use for a channel; 1.0 is its restore. Other authored scales in
-    // the kit (0.25, 0.775) must be left alone.
-    constexpr float kHalo3ChannelFreezeScale = 0.15f;
-    constexpr float kHalo3ChannelRestoreScale = 1.0f;
-    constexpr float kHalo3ChannelScaleTolerance = 0.001f;
-    // Stable synthetic shot IDs held for the whole channel, so the cinematic
-    // boundary fires exactly once on entry and once on exit. Real scene/shot
-    // IDs are non-negative; -1 already means "not cinematic".
-    constexpr int32_t kHalo3ChannelScene = -1000;
-    constexpr int32_t kHalo3ChannelShot = -1000;
-
-    bool Halo3FrozenChannelActive()
-    {
-        const uint32_t channel =
-            g_halo3FrozenChannelGeneration.load(std::memory_order_acquire);
-        return channel != 0 &&
-            channel == g_halo3RuntimeGeneration.load(std::memory_order_relaxed);
-    }
     std::atomic<bool> g_renderHooked{false};
     // True only when both halves of the visible-palette path are live:
     // 0x184B08 identifies the interpolated slot, and 0x2C561C consumes a
@@ -4874,58 +4838,8 @@ namespace
             v[i] = v[i] * cosA + c[i] * sinA + axis[i] * d * (1.0f - cosA);
     }
 
-    // Halo's own engine callback for player_control_scale_all_input. It runs
-    // Halo's function first and unchanged; the only thing this adds is a
-    // latch, so an unarmed or faulting VR path can never alter the script.
-    void __fastcall Halo3ScaleAllInputHook(float targetScale,
-                                           float durationSeconds)
-    {
-        const Halo3ScaleAllInputFn original = g_realHalo3ScaleAllInput;
-        if (!original)
-            return;
-        original(targetScale, durationSeconds);
-        if (!isfinite(targetScale))
-            return;
-        const uint32_t generation =
-            g_halo3RuntimeGeneration.load(std::memory_order_relaxed);
-        if (!generation)
-            return; // no armed camera core; nothing to hand to the theatre
-        uint32_t next = g_halo3FrozenChannelGeneration.load(
-            std::memory_order_relaxed);
-        if (fabsf(targetScale - kHalo3ChannelFreezeScale) <=
-            kHalo3ChannelScaleTolerance)
-        {
-            next = generation;
-        }
-        else if (fabsf(targetScale - kHalo3ChannelRestoreScale) <=
-                 kHalo3ChannelScaleTolerance)
-        {
-            next = 0;
-        }
-        else
-        {
-            return; // an unrelated authored scale; not a channel edge
-        }
-        const uint32_t previous =
-            g_halo3FrozenChannelGeneration.exchange(
-                next, std::memory_order_release);
-        if (previous != next)
-            g_halo3FrozenChannelSerial.fetch_add(1, std::memory_order_relaxed);
-    }
-
     CinematicControlState ReadCinematicControl(int32_t& scene, int32_t& shot)
     {
-        // The frozen channel is presented as one stable authored shot. Held
-        // for the channel's whole duration, so the cinematic boundary fires
-        // once on entry and once on exit instead of flapping, and the theatre
-        // owns the view in between. Released automatically when the script
-        // restores input or the runtime generation changes.
-        if (Halo3FrozenChannelActive())
-        {
-            scene = kHalo3ChannelScene;
-            shot = kHalo3ChannelShot;
-            return CinematicControlState::AuthoredLocked;
-        }
         if (!g_cinematicTlsIndex)
             return CinematicControlState::Unknown;
         __try
@@ -7477,24 +7391,6 @@ namespace
         g_halo3VehicleProbeLoggedSeq.store(seq, std::memory_order_relaxed);
         if (state == static_cast<uint32_t>(Halo3VehicleState::Vehicle))
             LogHalo3DefinitionProbe(defIndex, directType);
-    }
-
-    // Channel entry/exit, emitted from the worker so the engine callback stays
-    // log/alloc/lock free. Silence means no channel was ever seen.
-    void LogHalo3FrozenChannelIfNew()
-    {
-        static uint32_t lastSerial = 0;
-        const uint32_t serial =
-            g_halo3FrozenChannelSerial.load(std::memory_order_acquire);
-        if (serial == lastSerial)
-            return;
-        lastSerial = serial;
-        if (Halo3FrozenChannelActive())
-            LOG("H3 frozen channel: player input frozen by script; handing the "
-                "view to the cutscene theatre");
-        else
-            LOG("H3 frozen channel: script restored player input; returning to "
-                "the normal VR view");
     }
 
     // Called from the 50 ms worker. While the probe reports a seated state,
@@ -10559,52 +10455,6 @@ namespace
             else
                 LOG("VR comfort: camera-effect signature missing/ambiguous or "
                     "hook failed; native camera recoil/shake remains active");
-        }
-
-        // Halo 3's Cortana/Gravemind channel -> cutscene theatre. H3EK names
-        // and defines player_control_scale_all_input, and its channel headers
-        // are the only official script path requesting target 0.15. This
-        // complete entry/TLS shape has exactly one match in the pinned retail
-        // module at +0xF9304. Observed only: Halo's function runs unchanged.
-        {
-            const uintptr_t expectedRva = 0xF9304;
-            const char* kScaleAllInputSig =
-                "48 8B C4 48 89 58 08 57 48 83 EC 70 8B 0D ?? ?? ?? ?? "
-                "0F 28 E1 0F 29 70 E8 0F 29 78 D8 44 0F 29 40 C8 44 0F "
-                "28 C0 65 48 8B 04 25 58 00 00 00 48 8B 1C C8 48 8D 4C "
-                "24 28 B8 10 00 00 00 48 8B 04 18";
-            uintptr_t hit = sig::Find(base, size, kScaleAllInputSig);
-            const bool unique = hit &&
-                !sig::Find(hit + 1, base + size - hit - 1, kScaleAllInputSig);
-            bool hooked = false;
-            if (unique && (hit - base) == expectedRva)
-            {
-                const MH_STATUS createStatus = MH_CreateHook(
-                    reinterpret_cast<void*>(hit),
-                    reinterpret_cast<void*>(&Halo3ScaleAllInputHook),
-                    reinterpret_cast<void**>(&g_realHalo3ScaleAllInput));
-                if (createStatus == MH_OK)
-                    hooked =
-                        MH_EnableHook(reinterpret_cast<void*>(hit)) == MH_OK;
-                if (hooked)
-                    RememberInstalledGameHook(reinterpret_cast<void*>(hit));
-                else if (createStatus == MH_OK)
-                {
-                    MH_RemoveHook(reinterpret_cast<void*>(hit));
-                    g_realHalo3ScaleAllInput = nullptr;
-                }
-            }
-            g_halo3FrozenChannelGeneration.store(0, std::memory_order_release);
-            if (hooked)
-                LOG("H3 frozen channel: observing player_control_scale_all_input "
-                    "at halo3.dll+0x%llX; a Cortana/Gravemind channel will play "
-                    "in the cutscene theatre", (unsigned long long)(hit - base));
-            else
-                LOG("H3 frozen channel: signature missing/ambiguous/moved "
-                    "(found 0x%llX, expected 0x%llX); Cortana channels stay in "
-                    "immersive VR exactly as before",
-                    (unsigned long long)(hit ? hit - base : 0),
-                    (unsigned long long)expectedRva);
         }
 
         // Halo 3 vehicle-camera transactions. The three established vehicle
@@ -21382,7 +21232,6 @@ namespace
             LogOdstFpLayoutSelfCheckIfNew(); // emit FP weapon-layout self-check
             LogOdstNativeHudRouteOnce();    // bounded in-place CHUD route result
             LogHalo3VehicleProbeIfNew();   // live H3 feature status/fallback
-            LogHalo3FrozenChannelIfNew();  // H3 Cortana/Gravemind channel -> theatre
             if constexpr (kEnableRetiredHalo3Diagnostics)
             {
                 LogHalo3ObserverIfDriving();   // H3 observer focus-field analysis
@@ -21393,7 +21242,6 @@ namespace
             Sleep(50);
 #else
             LogHalo3VehicleProbeIfNew();   // live H3 feature status/fallback
-            LogHalo3FrozenChannelIfNew();  // H3 Cortana/Gravemind channel -> theatre
             if constexpr (kEnableRetiredHalo3Diagnostics)
             {
                 LogHalo3ObserverIfDriving();   // H3 observer focus-field analysis
