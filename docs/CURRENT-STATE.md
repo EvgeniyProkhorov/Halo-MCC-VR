@@ -5,10 +5,11 @@ pointer. Detailed pre-cleanup experiments remain available in Git history; they
 are evidence, not instructions.
 
 > **Start here: "PUBLIC RELEASE: MCC VR Alpha 0.3.1 - 2026-07-30" below is the
-> current published state, and "ACCEPTED DEVELOPMENT BASELINE: Halo 3 animated
-> CHUD crosshair - 2026-08-01" is the current development baseline that the
-> next hotfix/feature update builds on. It descends from the Halo 3
-> first-person vehicle baseline recorded under it.**
+> current published state, and "ACCEPTED DEVELOPMENT BASELINE: Reach crosshair
+> survives its own bloom - 2026-08-02" is the current development baseline that
+> the next hotfix/feature update builds on. It descends from the Halo 3
+> animated CHUD crosshair baseline recorded under it, which in turn descends
+> from the Halo 3 first-person vehicle baseline.**
 > Everything dated earlier is history.
 > Several older sections describe Reach features as impossible, mandatory, or
 > not yet built that have since been built and headset-confirmed - in
@@ -60,11 +61,91 @@ live, headset-tuned `halomccvr.cfg` and users are told to replace their old one
 artifact - do not rebuild and republish without repeating headset verification,
 since the DLL embeds its compile timestamp and a rebuild is never byte-identical.
 
-## ACCEPTED DEVELOPMENT BASELINE: Halo 3 animated CHUD crosshair - 2026-08-01
+## ACCEPTED DEVELOPMENT BASELINE: Reach crosshair survives its own bloom - 2026-08-02
 
 **This is the current development baseline for the next hotfix/feature update.**
-It is on `feature/halo3-vehicles`, sits one commit above the first-person
-vehicle baseline recorded below, and is not yet published.
+It fixes GitHub #70 (also reported directly by the user): Halo: Reach's VR
+crosshair disappeared for about a second every time the player took damage.
+
+| Identity | Value |
+| --- | --- |
+| Baseline source | `5e47b648b65e983ec84f834c7c656bd3e87d84aa` (branch `feature/halo3-vehicles`) |
+| Build | Release x64, preset `release`, ODST ON, Reach ON, ReachRender ON |
+| Candidate package | `out/candidates/5e47b64-reach-fp-parity-20260802-054336728Z` |
+| `halo3xr.dll` SHA-256 | `F3CFB2E15F49B1F861A5E64B886D5ADF38FAD36B4C58E308182189D7EE68DF64` |
+| `halo3xr_launcher.exe` SHA-256 | `D3CB54AE7920D0FDFB633B85D405986DC2C6C1BE0F92DB7C2B8CE9B10438C405` |
+| Installed editions | Steam and Microsoft Store; DLL hashes verified independently in both `Halo_MCC_VR` folders |
+| Accepted runtime | Steam edition, VirtualDesktopXR 1.0.10, Meta Quest 3 |
+| Headset result | Accepted: "ok it's working now". Halo 3 regression accepted separately in the same session: "halo 3 works". |
+| Preserved evidence | `out/test-runs/5e47b64-reach-crosshair-damage-and-halo3-regression-pass-20260802-010200` |
+| Preserved log SHA-256 | `11EF65CA45A2EA1AF332402CE28885EA495AFCE2508114BFDCD0EC8633A33664` |
+
+**Root cause: Reach blooms its crosshair out of the capture crop.** Official
+HREK CHUD exports (`out/hrek-evidence/chud`) show the Reach crosshair
+collection is five bitmap widgets - `ar_reticule`, `l_crosshair`,
+`r_crosshair`, `t_crosshair`, `b_crosshair` - which is exactly the `pieces 5`
+the runtime reports. Every one carries
+`external input B = weapon barrel error scale` and drives its `active`
+animation from `extern 2`, that same input. Taking a hit spikes barrel error,
+the four petals bloom outward, and they leave the capture crop - a magnified
+centre crop holding only `kReticleSize/(gameWidth*2)`, about 9% of screen
+width. The empty middle was then published over the good art.
+
+**The fix.** The capture target carries a mip chain; on a frame that is about
+to pay the blocking swapchain upload anyway, the 8x8 level is read back and its
+alpha summed. A capture holding no ink, or under half the ink of the crosshair
+currently on the quad, is refused and the last good crosshair stays. Only
+measured-good captures ever reach the swapchain. Crop widening was rejected on
+purpose: it costs either apparent size or sharpness, and bloom is not the
+aiming feedback in VR that it is on a flat screen, where the crosshair rides
+the controller ray.
+
+**What the accepted log proves.** `art` is the measured ink and `blankHeld` the
+refusals per window. Reach reaches `art 0` with `blankHeld` at 137, 154, 180
+and **zero** uploads in those windows - the guard held the good crosshair
+through every bloom. Halo 3 in the same session reports `pieces 0, held 0,
+art 479, blankHeld 0`: it supplies no piece count so that guard is inert there
+by construction, its ink never drops, and not one publish was refused.
+
+**Three earlier candidates are in this build and did nothing for this bug.**
+They are recorded because each one *eliminated* something:
+
+- `c2d9149` settles a CHANGED art identity before it may replace held art.
+  Inert here - the key never left `8E28E5B60B57DCA3`.
+- `ecb018c` refuses a capture with FEWER class-2 pieces than the held art.
+  Inert here - all five widgets keep drawing, they are merely clipped.
+- `0dab3d7` introduced the ink measurement, which is what proved the mechanism
+  (`art 343` good, `art 0` blank). Its anti-stuck escape hatch fired on
+  consecutive-hold count alone, so an EMPTY capture satisfied it after 24
+  refusals and was published anyway - `art 0` windows still showed 6-7 uploads,
+  about three blanks per second. `5e47b64` requires that escape to hold at
+  least some ink.
+
+Between them these eliminate, by measurement rather than argument, the art
+identity, the piece count, the quad submission gates and the swapchain: across
+a whole combat session the quad read `SUBMITTED ... heldArt=1` with zero
+`NOT submitted` lines while the crosshair still vanished.
+
+**Debt carried by this baseline.** `c2d9149` and `ecb018c` are proven inert for
+this defect and remain live in the shipped bytes. Removing them is a separate,
+headset-tested cleanup step, one path at a time - deleting dormant Reach
+crosshair code broke the runtime once already (2026-07-26). Do not fold that
+cleanup into a feature candidate.
+
+**Process record, because it was expensive.** The answer was in
+`out/hrek-evidence/chud` the entire time and three candidates were spent
+reasoning about the publish path instead of reading it. Two rules follow:
+search the existing evidence exports before proposing any runtime probe, and a
+restated symptom is not a test result - check the log's build stamp *and* that
+the session actually contains the event before treating a report as a failure.
+
+## ACCEPTED: Halo 3 animated CHUD crosshair - 2026-08-01
+
+This was the development baseline until the Reach crosshair result above
+superseded it. It is on `feature/halo3-vehicles`, sits one commit above the
+first-person vehicle baseline recorded below, and is not yet published. Its
+Halo 3 behavior was re-confirmed in the headset on the `5e47b64` baseline
+above, which is the regression that shared publish-path change owed.
 
 | Identity | Value |
 | --- | --- |
