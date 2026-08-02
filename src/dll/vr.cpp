@@ -4707,9 +4707,10 @@ float4 ps_scope_linearize(VSOut i):SV_Target { return paint(i.uv,true); }
     }
 
     // How much crosshair ink does the capture hold? Returns the summed alpha
-    // of the downsampled capture, or 0 when the check could not run. Only
-    // called on a frame that is about to pay the blocking swapchain upload
-    // anyway, so it never runs at frame rate.
+    // of the downsampled capture, or 0 when the check could not run. Once a
+    // known-good reticle is held, this must never wait for the GPU: a busy
+    // probe simply holds that art for this refresh instead of taking a frame
+    // deadline away from the headset.
     uint32_t MeasureAuthoredReticleCoverage()
     {
         if (!g_authoredReticleProbeUsable || !g_context ||
@@ -4737,8 +4738,14 @@ float4 ps_scope_linearize(VSOut i):SV_Target { return paint(i.uv,true); }
             g_authoredReticleTexture, probeMip, nullptr);
 
         D3D11_MAPPED_SUBRESOURCE mapped{};
+        // The first valid capture establishes the safe fallback. After that,
+        // polling avoids the synchronous GPU readback that caused PSVR2's
+        // perfectly periodic 120 Hz deadline misses; a not-ready probe returns
+        // zero and the caller deliberately holds the known-good art.
+        const UINT mapFlags = g_authoredReticleGoodValid
+            ? D3D11_MAP_FLAG_DO_NOT_WAIT : 0;
         if (FAILED(g_context->Map(g_authoredReticleProbeStaging, 0,
-                                  D3D11_MAP_READ, 0, &mapped)))
+                                  D3D11_MAP_READ, mapFlags, &mapped)))
         {
             return 0;
         }
