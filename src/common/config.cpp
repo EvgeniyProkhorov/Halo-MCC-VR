@@ -41,6 +41,28 @@ Config::Config()
             vehicle_cam_right_set[slot] = true;
         }
     }
+    for (const ConfigShippedSeatTrim& trim : kConfigOdstShippedSeatTrims)
+    {
+        const int slot = ConfigOdstSeatTrimSlot(
+            trim.vehicleId, trim.seatIndex, trim.mountedTurret);
+        if (slot < 0 || slot >= kOdstVehicleTrimSlots)
+            continue;
+        if (trim.hasForward)
+        {
+            odst_vehicle_cam_forward_v[slot] = trim.forward;
+            odst_vehicle_cam_forward_set[slot] = true;
+        }
+        if (trim.hasUp)
+        {
+            odst_vehicle_cam_up_v[slot] = trim.up;
+            odst_vehicle_cam_up_set[slot] = true;
+        }
+        if (trim.hasRight)
+        {
+            odst_vehicle_cam_right_v[slot] = trim.right;
+            odst_vehicle_cam_right_set[slot] = true;
+        }
+    }
 }
 static std::wstring g_path;
 
@@ -107,6 +129,38 @@ static void ParseSeatTrim(const char* key, const char* suffix,
     LOG("config: unknown vehicle in '%s' ignored", key);
 }
 
+// The ODST bank, keyed "odst_<vehicle>_<seat>". Deliberately a separate parser
+// from the Halo 3 one above rather than a parameterised version of it: ODST has
+// its own vehicle list (it adds the shade) and its own seat list (its scorpion
+// riders are player-enterable), so sharing the loop would need both tables
+// threaded through and could mis-file a seat that exists in only one title.
+// There is no legacy whole-vehicle form here — these keys are new.
+static void ParseOdstSeatTrim(const char* key, const char* suffix,
+                              const char* val, float* values, bool* setFlags)
+{
+    for (int v = 0; v < kOdstVehicleTrimCount; ++v)
+    {
+        const size_t nameLen = strlen(kOdstVehicleTrimNames[v]);
+        if (strncmp(suffix, kOdstVehicleTrimNames[v], nameLen) != 0)
+            continue;
+        const char* rest = suffix + nameLen;
+        if (*rest != '_')
+            continue;               // a longer vehicle name may still match
+        ++rest;
+        for (int s = 0; s < kOdstVehicleSeatSlots; ++s)
+            if (!strcmp(rest, kOdstVehicleSeatNames[s]))
+            {
+                const int slot = v * kOdstVehicleSeatSlots + s;
+                if (ParseFloatSetting(key, val, values[slot]))
+                    setFlags[slot] = true;
+                return;
+            }
+        LOG("config: unknown ODST seat in '%s' ignored", key);
+        return;
+    }
+    LOG("config: unknown ODST vehicle in '%s' ignored", key);
+}
+
 static bool FileExists(const wchar_t* path)
 {
     const DWORD attributes = GetFileAttributesW(path);
@@ -171,6 +225,18 @@ static void Clamp()
                        kVehicleCamUpMin, kVehicleCamUpMax);
         g_config.vehicle_cam_right_v[i] =
             std::clamp(g_config.vehicle_cam_right_v[i],
+                       kVehicleCamRightMin, kVehicleCamRightMax);
+    }
+    for (int i = 0; i < kOdstVehicleTrimSlots; ++i)
+    {
+        g_config.odst_vehicle_cam_forward_v[i] =
+            std::clamp(g_config.odst_vehicle_cam_forward_v[i],
+                       kVehicleCamForwardMin, kVehicleCamForwardMax);
+        g_config.odst_vehicle_cam_up_v[i] =
+            std::clamp(g_config.odst_vehicle_cam_up_v[i],
+                       kVehicleCamUpMin, kVehicleCamUpMax);
+        g_config.odst_vehicle_cam_right_v[i] =
+            std::clamp(g_config.odst_vehicle_cam_right_v[i],
                        kVehicleCamRightMin, kVehicleCamRightMax);
     }
     g_config.vehicle_wheel_max_deg =
@@ -338,6 +404,22 @@ void ConfigLoad(const wchar_t* path)
         // A malformed value must NOT invent an override (the seat keeps
         // following the universal trim), and an unknown suffix is reported,
         // not silently swallowed.
+        // ODST's own bank: vehicle_cam_forward_m_odst_warthog_passenger.
+        // These MUST be tested before the Halo 3 forms below, whose prefixes
+        // they share -- otherwise "odst_warthog_passenger" reaches the Halo 3
+        // parser, which would report an unknown vehicle and drop the line.
+        else if (!strncmp(key, "vehicle_cam_forward_m_odst_", 27))
+            ParseOdstSeatTrim(key, key + 27, val,
+                              g_config.odst_vehicle_cam_forward_v,
+                              g_config.odst_vehicle_cam_forward_set);
+        else if (!strncmp(key, "vehicle_cam_up_m_odst_", 22))
+            ParseOdstSeatTrim(key, key + 22, val,
+                              g_config.odst_vehicle_cam_up_v,
+                              g_config.odst_vehicle_cam_up_set);
+        else if (!strncmp(key, "vehicle_cam_right_m_odst_", 25))
+            ParseOdstSeatTrim(key, key + 25, val,
+                              g_config.odst_vehicle_cam_right_v,
+                              g_config.odst_vehicle_cam_right_set);
         else if (!strncmp(key, "vehicle_cam_forward_m_", 22))
             ParseSeatTrim(key, key + 22, val, g_config.vehicle_cam_forward_v,
                           g_config.vehicle_cam_forward_set);
@@ -826,6 +908,29 @@ void ConfigSave()
                 fprintf(f, "vehicle_cam_right_m_%s_%s = %.2f\n",
                         kVehicleTrimNames[v], kVehicleSeatNames[s],
                         g_config.vehicle_cam_right_v[i]);
+        }
+    fprintf(f, "# ODST keeps its own seat trims under the same names with an\n");
+    fprintf(f, "# 'odst_' in front of the vehicle, so tuning a Warthog in ODST\n");
+    fprintf(f, "# never moves the Halo 3 one:\n");
+    fprintf(f, "#   vehicle_cam_forward_m_odst_<vehicle>_<seat>\n");
+    fprintf(f, "#   ODST adds the shade, and its Scorpion riders are seats\n");
+    fprintf(f, "#   passenger .. passenger4.\n");
+    for (int v = 0; v < kOdstVehicleTrimCount; ++v)
+        for (int s = 0; s < kOdstVehicleSeatSlots; ++s)
+        {
+            const int i = v * kOdstVehicleSeatSlots + s;
+            if (g_config.odst_vehicle_cam_forward_set[i])
+                fprintf(f, "vehicle_cam_forward_m_odst_%s_%s = %.2f\n",
+                        kOdstVehicleTrimNames[v], kOdstVehicleSeatNames[s],
+                        g_config.odst_vehicle_cam_forward_v[i]);
+            if (g_config.odst_vehicle_cam_up_set[i])
+                fprintf(f, "vehicle_cam_up_m_odst_%s_%s = %.2f\n",
+                        kOdstVehicleTrimNames[v], kOdstVehicleSeatNames[s],
+                        g_config.odst_vehicle_cam_up_v[i]);
+            if (g_config.odst_vehicle_cam_right_set[i])
+                fprintf(f, "vehicle_cam_right_m_odst_%s_%s = %.2f\n",
+                        kOdstVehicleTrimNames[v], kOdstVehicleSeatNames[s],
+                        g_config.odst_vehicle_cam_right_v[i]);
         }
     fprintf(f, "\n");
     fprintf(f, "# ON follows ground-vehicle yaw/pitch; aircraft stay yaw-only.\n");

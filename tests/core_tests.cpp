@@ -5384,6 +5384,69 @@ int main()
                 OdstObjectEntryIsLive(0x8000) &&
                 OdstObjectEntryIsLive(0xFFFF);
 
+            // ODST's config bank must be able to key every seat its tags
+            // actually expose, which is exactly why it is wider than Halo 3's:
+            // the Scorpion's four riders are player seats in ODST, and the
+            // Shade exists at all. A slot collision here would put one seat's
+            // trim on another.
+            const int shadeSlot = ConfigOdstSeatTrimSlot(
+                static_cast<int>(OdstVehicleId::Shade), 0, false);
+            const int scorpionRider4 = ConfigOdstSeatTrimSlot(
+                static_cast<int>(OdstVehicleId::Scorpion), 4, false);
+            const int scorpionGunner = ConfigOdstSeatTrimSlot(
+                static_cast<int>(OdstVehicleId::Scorpion), 0, true);
+            const int warthogDriver = ConfigOdstSeatTrimSlot(
+                static_cast<int>(OdstVehicleId::Warthog), 0, false);
+            bool slotsUnique = shadeSlot >= 0 && scorpionRider4 >= 0 &&
+                scorpionGunner >= 0 && warthogDriver >= 0 &&
+                shadeSlot < kOdstVehicleTrimSlots &&
+                scorpionRider4 != scorpionGunner &&
+                scorpionRider4 != warthogDriver &&
+                shadeSlot != scorpionGunner;
+            // Every seat ODST actually authors a point for must be keyable.
+            for (const OdstSeatPoint& p : kOdstSeatPoints)
+            {
+                const int slot = ConfigOdstSeatTrimSlot(
+                    static_cast<int>(p.vehicle), p.seatIndex, p.carrierFrame);
+                slotsUnique = slotsUnique && slot >= 0 &&
+                    slot < kOdstVehicleTrimSlots;
+            }
+            // Halo 3's narrower table genuinely cannot key the ODST-only
+            // seats -- which is the whole reason ODST has its own bank.
+            const bool halo3CannotKeyOdstSeats =
+                ConfigSeatTrimSlot(
+                    static_cast<int>(OdstVehicleId::Scorpion), 4, false) < 0 &&
+                ConfigSeatTrimSlot(
+                    static_cast<int>(OdstVehicleId::Shade), 0, false) < 0;
+
+            // An unset ODST seat follows the universal trim; a set one wins.
+            Config c;
+            const bool odstFallbackHolds =
+                ConfigOdstSeatCamForward(c, shadeSlot) ==
+                    c.vehicle_cam_forward_m &&
+                ConfigOdstSeatCamUp(c, scorpionRider4) == c.vehicle_cam_up_m;
+            c.odst_vehicle_cam_forward_v[shadeSlot] = 0.42f;
+            c.odst_vehicle_cam_forward_set[shadeSlot] = true;
+            const bool odstOverrideWins =
+                ConfigOdstSeatCamForward(c, shadeSlot) == 0.42f &&
+                // ...and it must not have disturbed the Halo 3 bank.
+                ConfigSeatCamForward(c, ConfigSeatTrimSlot(
+                    static_cast<int>(Halo3VehicleId::Warthog), 0, false)) !=
+                    0.42f;
+            // The shipped ODST defaults must land on ODST slots, seeded from
+            // the accepted Halo 3 tuning for the seats that diffed identical.
+            const bool odstShippedSeeded =
+                c.odst_vehicle_cam_forward_set[warthogDriver] &&
+                c.odst_vehicle_cam_forward_v[warthogDriver] ==
+                    c.vehicle_cam_forward_v[ConfigSeatTrimSlot(
+                        static_cast<int>(Halo3VehicleId::Warthog), 0, false)];
+
+            Check(slotsUnique && halo3CannotKeyOdstSeats &&
+                  odstFallbackHolds && odstOverrideWins && odstShippedSeeded,
+                "The ODST trim bank keys every seat ODST authors, including "
+                "the seats Halo 3's table cannot express, and stays "
+                "independent of the Halo 3 bank");
+
             Check(sharedVehiclesResolve && shadeSplitsFromTurret &&
                   offsetsAreTitleSpecific && coherenceGateHolds &&
                   seatControlHolds && tableGateHolds,

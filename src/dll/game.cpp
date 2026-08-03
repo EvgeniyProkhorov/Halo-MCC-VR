@@ -2725,6 +2725,12 @@ namespace
     // C21: the rigid, vehicle-parented seat placement the hands hang off while
     // a first-person vehicle seat owns the view. False everywhere else.
     bool Halo3ComputeSeatBodyAnchor(float out[3]);
+#if HALOMCCVR_EXPERIMENTAL_ODST_BRINGUP
+    // O2: ODST's equivalent, so the shared hand solver can hang the arms off an
+    // ODST seat too. Declared here because the solver runs long before the ODST
+    // vehicle block is defined.
+    bool OdstComputeSeatBodyAnchor(float out[3]);
+#endif
 
     void BuildTrackedGameBasisFromFrame(const float q[4], bool head,
                                         bool followValid, float hullYaw,
@@ -4871,7 +4877,14 @@ namespace
         // longer does. Unavailable anchor keeps the existing origin, so this
         // can only ever fall back to the behavior it replaces.
         float bodyAnchor[3] = {};
-        const bool bodyAnchorValid = Halo3ComputeSeatBodyAnchor(bodyAnchor);
+        // Whichever title owns the camera supplies the seat: only one of these
+        // can be active at a time, and each returns false unless its own
+        // vehicle transaction is armed and fresh.
+        bool bodyAnchorValid = Halo3ComputeSeatBodyAnchor(bodyAnchor);
+#if HALOMCCVR_EXPERIMENTAL_ODST_BRINGUP
+        if (!bodyAnchorValid)
+            bodyAnchorValid = OdstComputeSeatBodyAnchor(bodyAnchor);
+#endif
         Halo3SelectHandOrigin(g_config.vehicle_hands_follow_body,
                               bodyAnchorValid, bodyAnchor, cam);
         // Forward standoff along the controller's own aim direction (basis
@@ -8940,6 +8953,883 @@ namespace
         LOG("ODST comfort: stock motion-blur values restored during teardown");
     }
 
+    // ================= ODST first-person vehicle seat (O2) =================
+    // A deliberate mirror of the headset-accepted Halo 3 package rather than a
+    // retarget of it: the pure math, seat-point convention, settle latch and
+    // debounce are the shared ones, but every engine offset, function pointer
+    // and piece of published state is ODST's own. ODST shifted its object and
+    // unit layout by +0x20 and moved its object-table TLS slot, so a shared
+    // sampler could only ever read one title correctly.
+
+    unsigned char* OdstLoadedTagDefinition(uint32_t datum)
+    {
+        void** instSlot = g_odstTagInstanceTable;
+        void** baseSlot = g_odstTagDataBase;
+        // Both globals live in the zero-init tail of .data: their CONTENTS are
+        // only valid once the engine has loaded a map (O-E2a), so a null here
+        // is normal at menu, not a fault.
+        auto* instances = instSlot
+            ? static_cast<unsigned char*>(*instSlot) : nullptr;
+        auto* tagBase = baseSlot
+            ? static_cast<unsigned char*>(*baseSlot) : nullptr;
+        const uint32_t index = datum & 0xFFFFu;
+        if (!instances || !tagBase || index == 0xFFFFu)
+            return nullptr;
+        const uint32_t address = *reinterpret_cast<const uint32_t*>(
+            instances + static_cast<size_t>(index) * 8 + 4);
+        return address
+            ? tagBase + static_cast<size_t>(address) * 4 : nullptr;
+    }
+
+    // Published seat state. Same seqlock contract as Halo 3's transform: a
+    // reader that sees an odd or changed sequence, a stale sample, or any
+    // non-finite value takes the stock camera instead.
+    struct OdstVehicleTransform
+    {
+        std::atomic<uint32_t> seq{0};
+        std::atomic<uint32_t> valid{0};
+        std::atomic<uint64_t> sampleMs{0};
+        float rawFwd[3]{};
+        float anchor[3]{};       // authored point + bounce: the camera
+        float anchorBase[3]{};   // same point rigid in the seat: the hands
+        uint32_t anchorValid = 0;
+        uint32_t anchorBaseValid = 0;
+        uint32_t headParented = 0;
+        int32_t seatIndex = -1;
+        int32_t parentHandle = -1;
+        uint32_t vehicleId =
+            static_cast<uint32_t>(OdstVehicleId::Unknown);
+        int32_t mountedTurret = 0;
+    };
+    OdstVehicleTransform g_odstVehicleTransform;
+    std::atomic<uint64_t> g_odstVehicleSampleMs{0};
+    std::atomic<uint32_t> g_odstVehicleFpStable{
+        static_cast<uint32_t>(Halo3VehicleState::Unknown)};
+    Halo3VehicleDebounce g_odstVehicleFpDebounce;
+    std::atomic<uint32_t> g_odstSeatRecenters{0};
+
+    // Camera-thread caches (plain: only the camera thread touches them).
+    struct OdstSeatNodeCache
+    {
+        uint32_t generation = 0;
+        int objectHandle = -1;
+        uint32_t definitionIndex = 0xFFFFFFFFu;
+        int nodeIndex = -1;
+        int seatIndex = -1;
+        uint32_t vehicleId =
+            static_cast<uint32_t>(OdstVehicleId::Unknown);
+        bool mounted = false;
+        bool resolved = false;
+        bool valid = false;
+        Halo3Matrix4x3 defaultInverse{};
+    };
+    OdstSeatNodeCache g_odstSeatNodeCache;
+
+    struct OdstHeadReference
+    {
+        uint32_t generation = 0;
+        int unitHandle = -1;
+        int parentHandle = -1;
+        int nodeObjectHandle = -1;
+        int seatIndex = -1;
+        int nodeIndex = -1;
+        bool interpolateNodes = false;
+        bool nodeInterpolated = false;
+        Halo3HeadSettleLatch settle{};
+    };
+    OdstHeadReference g_odstHeadReference;
+
+    // Seat-flag patch (hide body). Same transaction shape as Halo 3's: patch
+    // only the occupied loaded seat, restore only a value that is still ours.
+    struct OdstNativeSeatPatch
+    {
+        uint32_t generation = 0;
+        uint32_t definitionIndex = 0xFFFFFFFFu;
+        int seatIndex = -1;
+        uint32_t* flags = nullptr;
+        uint32_t originalFlags = 0;
+        bool active = false;
+    };
+    OdstNativeSeatPatch g_odstNativeSeatPatch;
+    std::atomic<uint32_t> g_odstNativeSeatState{0};   // 0 stock,1 active,2 fail
+    std::atomic<uint32_t> g_odstNativeSeatSerial{0};
+
+    void OdstRestoreNativeSeatPatch()
+    {
+        OdstNativeSeatPatch& patch = g_odstNativeSeatPatch;
+        const bool hadState =
+            g_odstNativeSeatState.load(std::memory_order_relaxed) != 0;
+        if (patch.active && patch.flags)
+        {
+            const uint32_t patchedFlags =
+                patch.originalFlags & ~kOdstSeatThirdPersonCameraBit;
+            __try
+            {
+                // Restore only what is still ours; a concurrent engine write
+                // wins rather than being clobbered back.
+                if (*patch.flags == patchedFlags)
+                    *patch.flags = patch.originalFlags;
+            }
+            __except (EXCEPTION_EXECUTE_HANDLER)
+            {
+            }
+        }
+        patch = {};
+        if (hadState)
+        {
+            g_odstNativeSeatState.store(0, std::memory_order_relaxed);
+            g_odstNativeSeatSerial.fetch_add(1, std::memory_order_release);
+        }
+    }
+
+    bool OdstEnsureFirstPersonSeatFlag(uint32_t definitionIndex, int seatIndex,
+                                       uint32_t generation)
+    {
+        if (!g_config.vehicle_first_person || !g_config.vehicle_hide_body)
+        {
+            OdstRestoreNativeSeatPatch();
+            return false;
+        }
+        OdstNativeSeatPatch& patch = g_odstNativeSeatPatch;
+        const uint32_t state =
+            g_odstNativeSeatState.load(std::memory_order_relaxed);
+        const bool sameSeat = patch.generation == generation &&
+            patch.definitionIndex == definitionIndex &&
+            patch.seatIndex == seatIndex;
+        if (sameSeat && state == 1)
+            return true;
+        if (sameSeat && state == 2)
+            return false;           // proven bad for this seat: never retry
+        OdstRestoreNativeSeatPatch();
+        patch.generation = generation;
+        patch.definitionIndex = definitionIndex;
+        patch.seatIndex = seatIndex;
+
+        bool installed = false;
+        if (definitionIndex <= 0xFFFFu && seatIndex >= 0 && seatIndex <= 125)
+        {
+            __try
+            {
+                unsigned char* definition =
+                    OdstLoadedTagDefinition(definitionIndex);
+                void** baseSlot = g_odstTagDataBase;
+                auto* tagBase = baseSlot
+                    ? static_cast<unsigned char*>(*baseSlot) : nullptr;
+                if (definition && tagBase)
+                {
+                    const int32_t seatCount =
+                        *reinterpret_cast<const int32_t*>(
+                            definition + kOdstVehicleSeatsCountOffset);
+                    const uint32_t seatsAddress =
+                        *reinterpret_cast<const uint32_t*>(
+                            definition + kOdstVehicleSeatsDataOffset);
+                    if (seatCount > 0 && seatCount <= 126 &&
+                        seatIndex < seatCount && seatsAddress)
+                    {
+                        unsigned char* seat = tagBase +
+                            static_cast<size_t>(seatsAddress) * 4 +
+                            static_cast<size_t>(seatIndex) *
+                                kOdstVehicleSeatStride;
+                        auto* flags = reinterpret_cast<uint32_t*>(
+                            seat + kOdstSeatFlagsOffset);
+                        const uint32_t originalFlags = *flags;
+                        // Only ever touch a seat that actually is a
+                        // third-person player seat today.
+                        if (originalFlags & kOdstSeatThirdPersonCameraBit)
+                        {
+                            const uint32_t patchedFlags =
+                                originalFlags & ~kOdstSeatThirdPersonCameraBit;
+                            patch.flags = flags;
+                            patch.originalFlags = originalFlags;
+                            patch.active = true;
+                            *flags = patchedFlags;
+                            installed = *flags == patchedFlags;
+                        }
+                    }
+                }
+            }
+            __except (EXCEPTION_EXECUTE_HANDLER)
+            {
+                installed = false;
+            }
+        }
+        if (!installed)
+        {
+            OdstRestoreNativeSeatPatch();
+            patch.generation = generation;
+            patch.definitionIndex = definitionIndex;
+            patch.seatIndex = seatIndex;
+            g_odstNativeSeatState.store(2, std::memory_order_relaxed);
+            g_odstNativeSeatSerial.fetch_add(1, std::memory_order_release);
+            return false;
+        }
+        g_odstNativeSeatState.store(1, std::memory_order_relaxed);
+        g_odstNativeSeatSerial.fetch_add(1, std::memory_order_release);
+        return true;
+    }
+
+    // The authored point in the seat node's local space: tag point + trims,
+    // through the render model's stored default inverse for that node.
+    bool OdstResolveAuthoredNodeLocal(uint32_t generation, int objectHandle,
+                                      uint32_t definitionIndex, int nodeIndex,
+                                      OdstVehicleId vehicleId, int seatIndex,
+                                      bool mounted, float trimForward,
+                                      float trimUp, float trimRight,
+                                      float outNodeLocal[3])
+    {
+        const OdstSeatPoint* point =
+            OdstFindSeatPoint(vehicleId, seatIndex, mounted);
+        if (!point || nodeIndex < 0 || definitionIndex > 0xFFFFu)
+            return false;
+        OdstSeatNodeCache& cache = g_odstSeatNodeCache;
+        const bool same = cache.resolved && cache.generation == generation &&
+            cache.objectHandle == objectHandle &&
+            cache.definitionIndex == definitionIndex &&
+            cache.nodeIndex == nodeIndex && cache.seatIndex == seatIndex &&
+            cache.vehicleId == static_cast<uint32_t>(vehicleId) &&
+            cache.mounted == mounted;
+        const auto emit = [&]() {
+            if (!cache.valid)
+                return false;
+            // Tag Y is LEFT, so a rightward trim subtracts. Same convention as
+            // the accepted Halo 3 path.
+            const float authored[3] = {point->x + trimForward,
+                                       point->y - trimRight,
+                                       point->z + trimUp};
+            return Halo3MatrixTransformPoint(
+                cache.defaultInverse, authored, outNodeLocal);
+        };
+        if (same)
+            return emit();
+
+        cache = {};
+        cache.generation = generation;
+        cache.objectHandle = objectHandle;
+        cache.definitionIndex = definitionIndex;
+        cache.nodeIndex = nodeIndex;
+        cache.seatIndex = seatIndex;
+        cache.vehicleId = static_cast<uint32_t>(vehicleId);
+        cache.mounted = mounted;
+        cache.resolved = true;     // a failed walk is cached, never retried
+        bool readOk = false;
+        __try
+        {
+            unsigned char* objectDef =
+                OdstLoadedTagDefinition(definitionIndex);
+            const uint32_t modelDatum = objectDef
+                ? *reinterpret_cast<const uint32_t*>(
+                      objectDef + kOdstVehicleModelRefOffset)
+                : 0xFFFFFFFFu;
+            unsigned char* modelDef = OdstLoadedTagDefinition(modelDatum);
+            const uint32_t renderDatum = modelDef
+                ? *reinterpret_cast<const uint32_t*>(
+                      modelDef + kOdstModelRenderRefOffset)
+                : 0xFFFFFFFFu;
+            unsigned char* renderDef = OdstLoadedTagDefinition(renderDatum);
+            void** baseSlot = g_odstTagDataBase;
+            auto* tagBase = baseSlot
+                ? static_cast<unsigned char*>(*baseSlot) : nullptr;
+            if (renderDef && tagBase)
+            {
+                const int32_t nodeCount = *reinterpret_cast<const int32_t*>(
+                    renderDef + kOdstRenderModelNodesCountOffset);
+                const uint32_t nodesAddress =
+                    *reinterpret_cast<const uint32_t*>(
+                        renderDef + kOdstRenderModelNodesDataOffset);
+                if (nodeCount > 0 && nodeIndex < nodeCount && nodesAddress)
+                {
+                    unsigned char* node = tagBase +
+                        static_cast<size_t>(nodesAddress) * 4 +
+                        static_cast<size_t>(nodeIndex) *
+                            kOdstRenderModelNodeStride;
+                    memcpy(&cache.defaultInverse,
+                           node + kOdstRenderModelNodeInverseOffset,
+                           sizeof(cache.defaultInverse));
+                    readOk = true;
+                }
+            }
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            readOk = false;
+        }
+        cache.valid = readOk && Halo3MatrixValid(cache.defaultInverse);
+        return emit();
+    }
+
+    // One world-space node matrix for the seat/attachment node, preferring the
+    // engine's own interpolated bank so the eye rides the RENDERED vehicle.
+    bool OdstReadLiveNodeMatrix(int objectHandle, unsigned char* objectData,
+                                int nodeIndex, Halo3Matrix4x3& out,
+                                bool& outInterpolated)
+    {
+        outInterpolated = false;
+        if (nodeIndex < 0 || !objectData)
+            return false;
+        bool accessorReturned = false;
+        if (g_config.vehicle_cam_smoothing &&
+            g_odstNodeBinding.load(std::memory_order_acquire) ==
+                static_cast<uint8_t>(OdstVehicleBindingState::Installed) &&
+            g_odstInterpolatedNodes)
+        {
+            __try
+            {
+                Halo3Matrix4x3* matrices = nullptr;
+                int count = 0;
+                accessorReturned =
+                    g_odstInterpolatedNodes(objectHandle, &matrices, &count) !=
+                        0 && matrices && nodeIndex < count;
+                if (accessorReturned)
+                {
+                    out = matrices[nodeIndex];
+                    outInterpolated = true;
+                }
+            }
+            __except (EXCEPTION_EXECUTE_HANDLER)
+            {
+                // Losing the accessor costs smoothing, never the seat: fall
+                // through to the raw bank and stop calling it.
+                g_odstNodeBinding.store(
+                    static_cast<uint8_t>(
+                        OdstVehicleBindingState::StockFallback),
+                    std::memory_order_release);
+                accessorReturned = false;
+                outInterpolated = false;
+            }
+        }
+        if (!accessorReturned)
+        {
+            __try
+            {
+                const int byteSize = *reinterpret_cast<const int16_t*>(
+                    objectData + kOdstObjectNodeBankSizeOffset);
+                const int count = Halo3MatrixCountFromByteSize(byteSize);
+                const int relative = *reinterpret_cast<const int16_t*>(
+                    objectData + kOdstObjectNodeBankRelOffset);
+                if (count <= 0 || nodeIndex >= count || relative == 0)
+                    return false;
+                memcpy(&out,
+                       objectData + relative +
+                           static_cast<size_t>(nodeIndex) *
+                               kOdstNodeMatrixStride,
+                       sizeof(out));
+            }
+            __except (EXCEPTION_EXECUTE_HANDLER)
+            {
+                return false;
+            }
+        }
+        return Halo3MatrixValid(out);
+    }
+
+    // The occupant's animated head marker, in world space. Optional: losing it
+    // costs the seat bounce, never the seat.
+    bool OdstReadPhaseMatchedHead(int unitHandle, bool interpolateNodes,
+                                  float outWorld[3])
+    {
+        if (g_odstNodeBinding.load(std::memory_order_acquire) !=
+                static_cast<uint8_t>(OdstVehicleBindingState::Installed) ||
+            !g_odstMarkersInternal)
+            return false;
+        bool ok = false;
+        __try
+        {
+            Halo3ObjectMarker marker{};
+            const int16_t found = g_odstMarkersInternal(
+                unitHandle, static_cast<int>(kOdstHeadMarkerStringId), &marker,
+                1, false, interpolateNodes);
+            if (found > 0)
+            {
+                outWorld[0] = marker.matrix.position[0];
+                outWorld[1] = marker.matrix.position[1];
+                outWorld[2] = marker.matrix.position[2];
+                ok = std::isfinite(outWorld[0]) &&
+                    std::isfinite(outWorld[1]) && std::isfinite(outWorld[2]);
+            }
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            g_odstNodeBinding.store(
+                static_cast<uint8_t>(OdstVehicleBindingState::StockFallback),
+                std::memory_order_release);
+            ok = false;
+        }
+        return ok;
+    }
+
+    struct OdstSeatSnapshot
+    {
+        float rawFwd[3];
+        float anchor[3];
+        float anchorBase[3];
+        bool anchorValid;
+        bool anchorBaseValid;
+        int seatIndex;
+        int parentHandle;
+        OdstVehicleId identity;
+        bool mounted;
+    };
+
+    bool OdstReadSeatSnapshot(OdstSeatSnapshot& out)
+    {
+        OdstVehicleTransform& xf = g_odstVehicleTransform;
+        for (int attempt = 0; attempt < 2; ++attempt)
+        {
+            const uint32_t before = xf.seq.load(std::memory_order_acquire);
+            if (before & 1u)
+                continue;
+            if (!xf.valid.load(std::memory_order_relaxed))
+                return false;
+            const uint64_t sampleMs = xf.sampleMs.load(
+                std::memory_order_relaxed);
+            OdstSeatSnapshot seat{};
+            memcpy(seat.rawFwd, xf.rawFwd, sizeof(seat.rawFwd));
+            memcpy(seat.anchor, xf.anchor, sizeof(seat.anchor));
+            memcpy(seat.anchorBase, xf.anchorBase, sizeof(seat.anchorBase));
+            seat.anchorValid = xf.anchorValid != 0;
+            seat.anchorBaseValid = xf.anchorBaseValid != 0;
+            seat.seatIndex = xf.seatIndex;
+            seat.parentHandle = xf.parentHandle;
+            seat.identity = static_cast<OdstVehicleId>(xf.vehicleId);
+            seat.mounted = xf.mountedTurret != 0;
+            if (xf.seq.load(std::memory_order_acquire) != before)
+                continue;
+            const uint64_t nowMs = GetTickCount64();
+            if (!sampleMs || nowMs < sampleMs || nowMs - sampleMs > 100)
+                return false;
+            for (float v : {seat.anchor[0], seat.anchor[1], seat.anchor[2],
+                            seat.anchorBase[0], seat.anchorBase[1],
+                            seat.anchorBase[2], seat.rawFwd[0],
+                            seat.rawFwd[1], seat.rawFwd[2]})
+                if (!std::isfinite(v))
+                    return false;
+            out = seat;
+            return true;
+        }
+        return false;
+    }
+
+    bool OdstVehicleFpActive()
+    {
+        if (!g_config.vehicle_first_person)
+            return false;
+        if (g_odstVehicleBinding.load(std::memory_order_acquire) !=
+            static_cast<uint8_t>(OdstVehicleBindingState::Installed))
+            return false;
+        if (g_odstVehicleFpStable.load(std::memory_order_relaxed) !=
+            static_cast<uint32_t>(Halo3VehicleState::Vehicle))
+            return false;
+        const uint64_t sampleMs =
+            g_odstVehicleSampleMs.load(std::memory_order_relaxed);
+        const uint64_t nowMs = GetTickCount64();
+        return sampleMs && nowMs >= sampleMs && nowMs - sampleMs <= 500;
+    }
+
+    bool OdstComputeAuthoredAnchor(float out[3])
+    {
+        OdstSeatSnapshot seat;
+        if (!OdstReadSeatSnapshot(seat) || !seat.anchorValid)
+            return false;
+        memcpy(out, seat.anchor, sizeof(seat.anchor));
+        return true;
+    }
+
+    // The pre-bounce placement: rigid in the vehicle's frame, so the arms and
+    // gun ride the seat rather than the occupant's animated head.
+    bool OdstComputeSeatBodyAnchor(float out[3])
+    {
+        if (!out || !OdstVehicleFpActive())
+            return false;
+        OdstSeatSnapshot seat;
+        if (!OdstReadSeatSnapshot(seat) || !seat.anchorBaseValid)
+            return false;
+        memcpy(out, seat.anchorBase, sizeof(seat.anchorBase));
+        return true;
+    }
+
+    void OdstSampleVehicleState(uint64_t nowMs)
+    {
+        if (g_odstVehicleBinding.load(std::memory_order_acquire) !=
+                static_cast<uint8_t>(OdstVehicleBindingState::Installed) ||
+            !g_odstEngineTlsIndex)
+            return;
+        const uint32_t generation =
+            g_odstRuntimeGeneration.load(std::memory_order_acquire);
+        if (!generation)
+            return;
+        // Seated: sample every camera frame so the seat tracks the rendered
+        // vehicle. On foot a 15 ms latch is plenty.
+        const bool seatedLastSample =
+            g_odstVehicleTransform.valid.load(std::memory_order_relaxed) != 0;
+        const uint64_t last =
+            g_odstVehicleSampleMs.load(std::memory_order_relaxed);
+        if (!seatedLastSample && nowMs - last < 15)
+            return;
+        g_odstVehicleSampleMs.store(nowMs, std::memory_order_relaxed);
+
+        int unit = -1;
+        int seat = -1;
+        int parent = -1;
+        unsigned parentKind = 0;
+        unsigned native = 0;
+        uint32_t defIndex = 0xFFFFFFFFu;
+        int physicsType = -1;
+        int unitParentNode = -1;
+        unsigned char* parentObjectData = nullptr;
+        uint32_t seat0Flags = 0;
+        bool seatFlagsValid = false;
+        bool faulted = false;
+        __try
+        {
+            auto** slots = reinterpret_cast<void**>(__readgsqword(0x58));
+            auto* tls = slots ? reinterpret_cast<unsigned char*>(
+                slots[*g_odstEngineTlsIndex]) : nullptr;
+            unsigned char* table = tls
+                ? *reinterpret_cast<unsigned char**>(
+                      tls + kOdstTlsObjectTableOffset)
+                : nullptr;
+            unsigned char* entries = table
+                ? *reinterpret_cast<unsigned char**>(
+                      table + kOdstObjectTableEntriesOffset)
+                : nullptr;
+            unit = g_odstPlayerUnitGetter(0);
+            if (unit != -1 && entries)
+            {
+                unsigned char* data = *reinterpret_cast<unsigned char**>(
+                    entries +
+                    static_cast<size_t>(unit & 0xFFFF) *
+                        kOdstObjectEntryStride +
+                    kOdstObjectEntryDataOffset);
+                if (data)
+                {
+                    seat = *reinterpret_cast<const int16_t*>(
+                        data + kOdstUnitSeatWordOffset);
+                    if (!OdstSeatWordMeansUnseated(seat))
+                    {
+                        native = g_odstUnitInVehicle(unit);
+                        unitParentNode = *reinterpret_cast<const int8_t*>(
+                            data + kOdstObjectParentNodeOffset);
+                        parent = *reinterpret_cast<const int32_t*>(
+                            data + kOdstObjectParentOffset);
+                        if (parent != -1)
+                        {
+                            unsigned char* parentEntry = entries +
+                                static_cast<size_t>(parent & 0xFFFF) *
+                                    kOdstObjectEntryStride;
+                            parentKind = *(parentEntry +
+                                kOdstObjectEntryKindOffset);
+                            unsigned char* parentData =
+                                *reinterpret_cast<unsigned char**>(
+                                    parentEntry + kOdstObjectEntryDataOffset);
+                            if (parentData &&
+                                parentKind == kOdstObjectKindVehicle)
+                            {
+                                parentObjectData = parentData;
+                                const uint16_t definitionIndex =
+                                    *reinterpret_cast<const uint16_t*>(
+                                        parentData);
+                                defIndex = definitionIndex;
+                                physicsType =
+                                    g_odstVehicleTypeAccessor(definitionIndex);
+                                unsigned char* definition =
+                                    OdstLoadedTagDefinition(definitionIndex);
+                                void** baseSlot = g_odstTagDataBase;
+                                auto* tagBase = baseSlot
+                                    ? static_cast<unsigned char*>(*baseSlot)
+                                    : nullptr;
+                                if (definition && tagBase)
+                                {
+                                    const int32_t seatCount =
+                                        *reinterpret_cast<const int32_t*>(
+                                            definition +
+                                            kOdstVehicleSeatsCountOffset);
+                                    const uint32_t seatsAddress =
+                                        *reinterpret_cast<const uint32_t*>(
+                                            definition +
+                                            kOdstVehicleSeatsDataOffset);
+                                    if (seatCount > 0 && seatCount <= 126 &&
+                                        seatsAddress)
+                                    {
+                                        seat0Flags =
+                                            *reinterpret_cast<const uint32_t*>(
+                                                tagBase +
+                                                static_cast<size_t>(
+                                                    seatsAddress) * 4 +
+                                                kOdstSeatFlagsOffset);
+                                        seatFlagsValid = true;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            faulted = true;
+        }
+
+        if (faulted)
+        {
+            // A fault here means an offset is wrong for this build. Disarm the
+            // whole ODST vehicle transaction loudly rather than keep reading.
+            OdstRestoreNativeSeatPatch();
+            g_odstVehicleTransform.valid.store(0, std::memory_order_relaxed);
+            g_odstVehicleFpStable.store(
+                static_cast<uint32_t>(Halo3VehicleState::Unknown),
+                std::memory_order_relaxed);
+            g_odstVehicleBinding.store(
+                static_cast<uint8_t>(OdstVehicleBindingState::StockFallback),
+                std::memory_order_release);
+            g_odstVehicleProbeFaults.fetch_add(1, std::memory_order_relaxed);
+            LOG("ODST vehicle seat: FAULTED reading engine state; the ODST "
+                "vehicle transaction is disarmed and every vehicle camera "
+                "returns to stock. The ODST camera core is unaffected");
+            return;
+        }
+
+        const bool seated = unit != -1 &&
+            !OdstSeatWordMeansUnseated(seat) && parentObjectData != nullptr;
+
+        // Identity. A mounted-turret gunner is not resolved in this candidate:
+        // ODST's object parent-node byte is not yet proven (O-E2 open gap), so
+        // an attached gun keeps the stock chase view rather than guessing the
+        // carrier frame.
+        OdstDefinitionFields fields{};
+        fields.physicsType = physicsType;
+        fields.seatFlagsValid = seatFlagsValid;
+        fields.seat0Flags = seat0Flags;
+        fields.inVehicle = native != 0;
+        if (physicsType == 1)
+        {
+            // Jeep cousins are separated by engine moment, read from the
+            // definition's own physics record.
+            __try
+            {
+                unsigned char* definition =
+                    OdstLoadedTagDefinition(defIndex);
+                void** baseSlot = g_odstTagDataBase;
+                auto* tagBase = baseSlot
+                    ? static_cast<unsigned char*>(*baseSlot) : nullptr;
+                if (definition && tagBase)
+                {
+                    unsigned char* block = definition +
+                        kOdstVehiclePhysicsBlocksOffset +
+                        1 * kOdstVehiclePhysicsRecordStride;   // human_jeep
+                    const uint32_t address =
+                        *reinterpret_cast<const uint32_t*>(block + 4);
+                    if (address)
+                    {
+                        const unsigned char* element = tagBase +
+                            static_cast<size_t>(address) * 4;
+                        fields.engineMoment =
+                            *reinterpret_cast<const float*>(
+                                element + kOdstJeepEngineMomentOffset);
+                        fields.jeepValid =
+                            std::isfinite(fields.engineMoment);
+                    }
+                }
+            }
+            __except (EXCEPTION_EXECUTE_HANDLER)
+            {
+                fields.jeepValid = false;
+            }
+        }
+        else if (physicsType == 3)
+        {
+            __try
+            {
+                unsigned char* definition =
+                    OdstLoadedTagDefinition(defIndex);
+                void** baseSlot = g_odstTagDataBase;
+                auto* tagBase = baseSlot
+                    ? static_cast<unsigned char*>(*baseSlot) : nullptr;
+                if (definition && tagBase)
+                {
+                    unsigned char* block = definition +
+                        kOdstVehiclePhysicsBlocksOffset +
+                        3 * kOdstVehiclePhysicsRecordStride;  // alien_scout
+                    const uint32_t address =
+                        *reinterpret_cast<const uint32_t*>(block + 4);
+                    if (address)
+                    {
+                        const unsigned char* element = tagBase +
+                            static_cast<size_t>(address) * 4;
+                        fields.specificType = *reinterpret_cast<const int8_t*>(
+                            element + kOdstScoutSpecificTypeOffset);
+                        fields.scoutValid = true;
+                    }
+                }
+            }
+            __except (EXCEPTION_EXECUTE_HANDLER)
+            {
+                fields.scoutValid = false;
+            }
+        }
+        const OdstVehicleId anchorId = seated
+            ? OdstResolveVehicleId(fields) : OdstVehicleId::Unknown;
+
+        if (seated)
+            OdstEnsureFirstPersonSeatFlag(defIndex, seat, generation);
+        else
+            OdstRestoreNativeSeatPatch();
+
+        float cameraAnchor[3] = {};
+        float bodyAnchor[3] = {};
+        float rawFwd[3] = {};
+        bool anchorValid = false;
+        bool headParented = false;
+        bool nodeInterpolated = false;
+        if (seated && anchorId != OdstVehicleId::Unknown)
+        {
+            const int trimSlot = ConfigOdstSeatTrimSlot(
+                static_cast<int>(anchorId), seat, false);
+            const float trimScale = g_worldScale.load(std::memory_order_relaxed);
+            const float trimForward =
+                ConfigOdstSeatCamForward(g_config, trimSlot) * trimScale;
+            const float trimUp =
+                ConfigOdstSeatCamUp(g_config, trimSlot) * trimScale;
+            const float trimRight =
+                ConfigOdstSeatCamRight(g_config, trimSlot) * trimScale;
+
+            float authoredNodeLocal[3] = {};
+            Halo3Matrix4x3 liveNode{};
+            // The parent-node byte is a LEAD, not a proof (O-E2 open gap): it
+            // must land inside the render model's own node table, and the
+            // matrix it selects must validate, or nothing is placed. A wrong
+            // offset therefore costs the seat, never the camera.
+            const bool haveLiveNode =
+                unitParentNode >= 0 &&
+                unitParentNode <= kOdstMaximumRenderNodes &&
+                OdstResolveAuthoredNodeLocal(
+                    generation, parent, defIndex, unitParentNode, anchorId,
+                    seat, false, trimForward, trimUp, trimRight,
+                    authoredNodeLocal) &&
+                OdstReadLiveNodeMatrix(parent, parentObjectData,
+                                       unitParentNode, liveNode,
+                                       nodeInterpolated);
+            if (haveLiveNode)
+            {
+                memcpy(rawFwd, liveNode.forward, sizeof(rawFwd));
+                anchorValid = Halo3MatrixTransformPoint(
+                    liveNode, authoredNodeLocal, cameraAnchor);
+                memcpy(bodyAnchor, cameraAnchor, sizeof(bodyAnchor));
+
+                // Occupant bounce, relative to the settled pose in THIS seat.
+                const bool stableSeat =
+                    g_odstVehicleFpStable.load(std::memory_order_relaxed) ==
+                    static_cast<uint32_t>(Halo3VehicleState::Vehicle);
+                OdstHeadReference& headRef = g_odstHeadReference;
+                const bool sameHeadSeat = headRef.generation == generation &&
+                    headRef.unitHandle == unit &&
+                    headRef.parentHandle == parent &&
+                    headRef.nodeObjectHandle == parent &&
+                    headRef.seatIndex == seat &&
+                    headRef.nodeIndex == unitParentNode &&
+                    headRef.interpolateNodes ==
+                        g_config.vehicle_cam_smoothing &&
+                    headRef.nodeInterpolated == nodeInterpolated;
+                if (!sameHeadSeat || !stableSeat)
+                {
+                    headRef = {};
+                    headRef.generation = generation;
+                    headRef.unitHandle = unit;
+                    headRef.parentHandle = parent;
+                    headRef.nodeObjectHandle = parent;
+                    headRef.seatIndex = seat;
+                    headRef.nodeIndex = unitParentNode;
+                    headRef.interpolateNodes = g_config.vehicle_cam_smoothing;
+                    headRef.nodeInterpolated = nodeInterpolated;
+                }
+                float headWorld[3] = {};
+                float currentHeadLocal[3] = {};
+                if (anchorValid && stableSeat &&
+                    OdstReadPhaseMatchedHead(unit, nodeInterpolated,
+                                             headWorld) &&
+                    Halo3MatrixInverseTransformPoint(liveNode, headWorld,
+                                                     currentHeadLocal))
+                {
+                    float headAnchor[3] = {};
+                    if (headRef.settle.Update(nowMs, currentHeadLocal) &&
+                        Halo3ComputeHeadParentedPoint(
+                            liveNode, headWorld, headRef.settle.reference,
+                            authoredNodeLocal, g_config.vehicle_bounce,
+                            headAnchor))
+                    {
+                        memcpy(cameraAnchor, headAnchor,
+                               sizeof(cameraAnchor));
+                        headParented = true;
+                    }
+                }
+                else if (!headRef.settle.valid)
+                {
+                    headRef.settle = {};
+                }
+            }
+            else
+            {
+                g_odstHeadReference = {};
+            }
+        }
+        else
+        {
+            g_odstSeatNodeCache = {};
+            g_odstHeadReference = {};
+        }
+
+        OdstVehicleTransform& xf = g_odstVehicleTransform;
+        xf.seq.fetch_add(1, std::memory_order_acq_rel);
+        if (seated && anchorValid)
+        {
+            memcpy(xf.rawFwd, rawFwd, sizeof(xf.rawFwd));
+            memcpy(xf.anchor, cameraAnchor, sizeof(xf.anchor));
+            memcpy(xf.anchorBase, bodyAnchor, sizeof(xf.anchorBase));
+            xf.anchorValid = 1;
+            xf.anchorBaseValid = 1;
+            xf.headParented = headParented ? 1u : 0u;
+            xf.seatIndex = seat;
+            xf.parentHandle = parent;
+            xf.vehicleId = static_cast<uint32_t>(anchorId);
+            xf.mountedTurret = 0;
+            xf.valid.store(1, std::memory_order_relaxed);
+            xf.sampleMs.store(nowMs, std::memory_order_relaxed);
+        }
+        else
+        {
+            xf.anchorValid = 0;
+            xf.anchorBaseValid = 0;
+            xf.headParented = 0;
+            xf.valid.store(0, std::memory_order_relaxed);
+        }
+        xf.seq.fetch_add(1, std::memory_order_release);
+
+        // Debounced seat state drives the play-space recentre on both edges.
+        const Halo3VehicleState state = unit == -1
+            ? Halo3VehicleState::Unknown
+            : (seated && anchorValid ? Halo3VehicleState::Vehicle
+                                     : Halo3VehicleState::OnFoot);
+        const Halo3VehicleState previousStable = g_odstVehicleFpDebounce.stable;
+        if (g_odstVehicleFpDebounce.Update(state, kHalo3VehicleDebounceFrames))
+        {
+            g_odstVehicleFpStable.store(
+                static_cast<uint32_t>(g_odstVehicleFpDebounce.stable),
+                std::memory_order_relaxed);
+            if (g_config.vehicle_first_person &&
+                (g_odstVehicleFpDebounce.stable ==
+                     Halo3VehicleState::Vehicle ||
+                 previousStable == Halo3VehicleState::Vehicle))
+            {
+                if (g_config.vehicle_recenter_on_seat)
+                {
+                    g_needPosRecenter.store(true, std::memory_order_release);
+                    g_odstSeatRecenters.fetch_add(
+                        1, std::memory_order_relaxed);
+                }
+            }
+        }
+    }
+
     void OdstApplyHeadLook(void* source)
     {
         if (!source)
@@ -9071,6 +9961,18 @@ namespace
         up[1] = (-sinPitch * sinYaw) * cosRoll - cosYaw * sinRoll;
         up[2] = cosPitch * cosRoll;
 
+        // O2 seat placement, in the same slot Halo 3 uses: after the rotation
+        // is written and BEFORE the room-scale lean is added, so leaning still
+        // works from the seat. The authored point already carries the trims,
+        // the live rendered node and the occupant bounce, so consuming it here
+        // is a plain overwrite. A cutscene keeps the authored camera.
+        if (!cinematic && OdstVehicleFpActive())
+        {
+            float anchor[3];
+            if (OdstComputeAuthoredAnchor(anchor))
+                memcpy(position, anchor, sizeof(anchor));
+        }
+
         if (g_positional.load(std::memory_order_relaxed))
         {
             const float dx = headPosition[0] - g_headPosRef[0];
@@ -9105,26 +10007,6 @@ namespace
     // it only logs when the observed state actually changes, so an ordinary
     // session produces a handful of lines rather than a flood.
     inline constexpr uint64_t kOdstProbeIntervalMs = 2000;
-
-    unsigned char* OdstLoadedTagDefinition(uint32_t datum)
-    {
-        void** instSlot = g_odstTagInstanceTable;
-        void** baseSlot = g_odstTagDataBase;
-        // Both globals live in the zero-init tail of .data: their CONTENTS are
-        // only valid once the engine has loaded a map (O-E2a), so a null here
-        // is normal at menu, not a fault.
-        auto* instances = instSlot
-            ? static_cast<unsigned char*>(*instSlot) : nullptr;
-        auto* tagBase = baseSlot
-            ? static_cast<unsigned char*>(*baseSlot) : nullptr;
-        const uint32_t index = datum & 0xFFFFu;
-        if (!instances || !tagBase || index == 0xFFFFu)
-            return nullptr;
-        const uint32_t address = *reinterpret_cast<const uint32_t*>(
-            instances + static_cast<size_t>(index) * 8 + 4);
-        return address
-            ? tagBase + static_cast<size_t>(address) * 4 : nullptr;
-    }
 
     // Walks every LIVE object in the engine's object table once per level and
     // reports the distinct vehicle definitions it finds. The table is the
@@ -9581,6 +10463,10 @@ namespace
         float savedPosition[3]{}, savedForward[3]{}, savedUp[3]{};
         if (ownsActiveCamera)
         {
+            // O2: sample the seat before anything reads it this frame, exactly
+            // where Halo 3 samples in its own camera copy. OdstApplyHeadLook
+            // below consumes the anchor it publishes.
+            OdstSampleVehicleState(GetTickCount64());
             ApplyOdstMotionBlurSetting();
             // Exact Halo 3 control ownership: publish the source camera's
             // pre-head-look forward for every active camera copy. Vehicles
@@ -9718,10 +10604,8 @@ namespace
             {
                 TitleAdapter_PublishHeartbeat(
                     GameTitle::Halo3ODST, runtimeGeneration, cameraNowMs);
-                // O1 evidence only. Runs where Halo 3 samples its vehicle
-                // state, so the ODST offsets are exercised on the same thread
-                // and cadence the real sampler would use — but it publishes
-                // nothing, so this candidate cannot change what is rendered.
+                // O1 evidence: kept alongside the sampler so one session
+                // produces both the offset proof and the seat behavior.
                 OdstVehicleProbe(cameraNowMs);
             }
             g_odstCamera.sawValidCamera.store(true, std::memory_order_release);
@@ -23231,10 +24115,23 @@ void Game_AutoVrTick()
             const bool odstStereoActive =
                 g_enabled.load(std::memory_order_relaxed) &&
                 g_odstCamera.armed.load(std::memory_order_relaxed);
-            const RuntimeMode odstMode =
+            RuntimeMode odstMode =
                 (nativePauseKnown && nativePaused) ? RuntimeMode::Paused
                 : (odstStereoActive ? RuntimeMode::Gameplay
                                     : RuntimeMode::Loading);
+            // O2: upgrade gameplay to the vehicle/turret modes, matching Halo
+            // 3. Locomotion and rumble are gated on this, so without it an
+            // ODST seat would lose head-relative movement and haptics.
+            if (odstMode == RuntimeMode::Gameplay && OdstVehicleFpActive())
+            {
+                OdstSeatSnapshot seat;
+                if (OdstReadSeatSnapshot(seat) && seat.anchorValid)
+                {
+                    odstMode = seat.identity ==
+                            OdstVehicleId::StationaryTurret
+                        ? RuntimeMode::Turret : RuntimeMode::Vehicle;
+                }
+            }
             const uint32_t generation =
                 g_odstRuntimeGeneration.load(std::memory_order_acquire);
             if (generation)
@@ -23971,6 +24868,73 @@ const char* Game_Halo3SeatTrimName(int slot)
     _snprintf_s(text, sizeof(text), _TRUNCATE, "%s %s", kNiceVehicle[v],
                 kNiceSeat[s]);
     return text;
+}
+
+#if HALOMCCVR_EXPERIMENTAL_ODST_BRINGUP
+// O2: the ODST trim table mirrors OdstVehicleId the same way, with the shade
+// appended. Same tripwire so the two can never drift apart silently.
+static_assert(static_cast<int>(OdstVehicleId::Scorpion) == 1 &&
+                  static_cast<int>(OdstVehicleId::Shade) ==
+                      kOdstVehicleTrimCount,
+              "kOdstVehicleTrimNames must mirror OdstVehicleId order");
+#endif
+
+// O2: the occupied seat in whichever title owns the camera. `outIsOdst`
+// reports which bank the slot indexes, because ODST's table is wider (its
+// Scorpion riders are player seats and it adds the shade). Only one title's
+// vehicle transaction can be armed at a time, so the two can never both
+// answer.
+int Game_VehicleSeatTrimSlotEx(int* outIsOdst)
+{
+    if (outIsOdst)
+        *outIsOdst = 0;
+    const int haloSlot = Game_Halo3CurrentSeatTrimSlot();
+    if (haloSlot >= 0)
+        return haloSlot;
+#if HALOMCCVR_EXPERIMENTAL_ODST_BRINGUP
+    if (OdstVehicleFpActive())
+    {
+        OdstSeatSnapshot seat;
+        if (OdstReadSeatSnapshot(seat))
+        {
+            const int slot = ConfigOdstSeatTrimSlot(
+                static_cast<int>(seat.identity), seat.seatIndex, seat.mounted);
+            if (slot >= 0 && outIsOdst)
+                *outIsOdst = 1;
+            return slot;
+        }
+    }
+#endif
+    return -1;
+}
+
+const char* Game_VehicleSeatTrimName(int slot, int isOdst)
+{
+    if (!isOdst)
+        return Game_Halo3SeatTrimName(slot);
+#if HALOMCCVR_EXPERIMENTAL_ODST_BRINGUP
+    static char text[56];
+    if (slot < 0 || slot >= kOdstVehicleTrimSlots)
+        return "this seat";
+    const int v = slot / kOdstVehicleSeatSlots;
+    const int s = slot % kOdstVehicleSeatSlots;
+    static const char* const kNiceVehicle[kOdstVehicleTrimCount] = {
+        "Scorpion", "Warthog", "Mongoose", "Ghost",   "Wraith", "Prowler",
+        "Banshee",  "Hornet",  "Chopper",  "Turret",  "Shade"};
+    static const char* const kNiceSeat[kOdstVehicleSeatSlots] = {
+        "driver", "passenger", "passenger 2", "passenger 3", "passenger 4",
+        "gunner"};
+    // Both single-seat cases read wrong with a seat word after them.
+    if (s == 0 && (v == kOdstVehicleTrimCount - 2 ||
+                   v == kOdstVehicleTrimCount - 1))
+        return v == kOdstVehicleTrimCount - 1 ? "ODST Shade" : "ODST Turret";
+    _snprintf_s(text, sizeof(text), _TRUNCATE, "ODST %s %s", kNiceVehicle[v],
+                kNiceSeat[s]);
+    return text;
+#else
+    (void)slot;
+    return "this seat";
+#endif
 }
 
 bool Game_ComputeAimStick(float& outRx, float& outRy)

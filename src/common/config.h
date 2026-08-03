@@ -69,6 +69,27 @@ inline constexpr const char* kVehicleSeatNames[kVehicleSeatSlots] = {
     "driver", "passenger", "passenger2", "gunner"};
 inline constexpr int kVehicleTrimSlots = kVehicleTrimCount * kVehicleSeatSlots;
 
+// ODST keeps its own bank of per-seat trims (user directive, 2026-08-03) under
+// `_odst_`-prefixed keys, so tuning a warthog in ODST never moves the Halo 3
+// warthog and vice versa. It needs a wider table than Halo 3's for two
+// evidence-backed reasons (docs/ODST-VEHICLE-EVIDENCE.md O-E1): ODST clears the
+// scorpion riders' "invalid for player" bit, so seat indices 1-4 are all
+// enterable, and ODST adds the shade as a drivable vehicle Halo 3 never
+// exposed. The Halo 3 names, slots and key spellings above are untouched, so no
+// existing config line changes meaning.
+inline constexpr int kOdstVehicleTrimCount = 11;
+inline constexpr const char* kOdstVehicleTrimNames[kOdstVehicleTrimCount] = {
+    "scorpion", "warthog", "mongoose", "ghost",   "wraith",  "prowler",
+    "banshee",  "hornet",  "chopper",  "turret",  "shade"};
+inline constexpr int kOdstVehicleSeatSlots = 6;
+inline constexpr int kOdstVehicleGunnerSlot = 5;
+inline constexpr const char*
+    kOdstVehicleSeatNames[kOdstVehicleSeatSlots] = {
+        "driver", "passenger", "passenger2", "passenger3", "passenger4",
+        "gunner"};
+inline constexpr int kOdstVehicleTrimSlots =
+    kOdstVehicleTrimCount * kOdstVehicleSeatSlots;
+
 // Vehicle placement controls are authored in metres, then converted to Halo
 // world units at the same boundary as the Blender seat point. Forward/height
 // have a little more travel than the original -0.5..1.0 sliders; lateral trim
@@ -98,6 +119,22 @@ inline constexpr int ConfigSeatTrimSlot(int vehicleId, int seatIndex,
     return v * kVehicleSeatSlots + seatIndex;
 }
 
+// The same mapping over ODST's wider table. `vehicleId` is the raw
+// OdstVehicleId value (1 = scorpion .. 11 = shade), mirroring
+// kOdstVehicleTrimNames by contract; game.cpp static_asserts the two.
+inline constexpr int ConfigOdstSeatTrimSlot(int vehicleId, int seatIndex,
+                                            bool mountedTurret)
+{
+    const int v = vehicleId - 1;
+    if (v < 0 || v >= kOdstVehicleTrimCount)
+        return -1;
+    if (mountedTurret)
+        return v * kOdstVehicleSeatSlots + kOdstVehicleGunnerSlot;
+    if (seatIndex < 0 || seatIndex >= kOdstVehicleGunnerSlot)
+        return -1;
+    return v * kOdstVehicleSeatSlots + seatIndex;
+}
+
 // Seat placements the maintainer tuned in the headset and which therefore ship
 // as the product's own defaults, exactly as the released ZIP ships their live
 // config. Written 2026-08-01 from the Game Pass session that accepted the
@@ -123,6 +160,24 @@ struct ConfigShippedSeatTrim
 };
 
 inline constexpr ConfigShippedSeatTrim kConfigShippedSeatTrims[] = {
+    // vehicle, seat, mounted,  forward,  up,     right,  F,     U,     R
+    {1, 0, false,  0.29f,  1.50f, -0.03f, true,  true,  true},  // scorpion driver
+    {2, 0, false, -0.04f,  0.00f,  0.00f, true,  false, false}, // warthog driver
+    {2, 1, false, -0.28f,  0.55f, -0.10f, true,  true,  true},  // warthog passenger
+    {6, 0, true,   0.00f,  0.30f,  0.00f, false, true,  false}, // prowler gunner
+    {8, 0, false, -0.23f, -0.09f, -0.03f, true,  true,  true},  // hornet driver
+    {9, 0, false,  0.12f, -0.06f,  0.00f, true,  true,  false}, // chopper driver
+};
+
+// ODST's shipped bank. Seeded from the Halo 3 values above for every seat the
+// tag diff proved geometrically identical (O-E1: same nodes, same markers
+// within 1e-4 wu, same seat flags), so ODST feels right the first time it is
+// driven instead of starting from an untuned universal trim. Tuning a seat in
+// ODST afterwards writes only the ODST bank. Vehicle ids follow
+// kOdstVehicleTrimNames (1 = scorpion .. 11 = shade); the ODST-only seats
+// (scorpion riders, shade) ship unset and follow the universal trim until the
+// headset says otherwise.
+inline constexpr ConfigShippedSeatTrim kConfigOdstShippedSeatTrims[] = {
     // vehicle, seat, mounted,  forward,  up,     right,  F,     U,     R
     {1, 0, false,  0.29f,  1.50f, -0.03f, true,  true,  true},  // scorpion driver
     {2, 0, false, -0.04f,  0.00f,  0.00f, true,  false, false}, // warthog driver
@@ -232,6 +287,15 @@ struct Config
     bool vehicle_cam_forward_set[kVehicleTrimSlots] = {};
     bool vehicle_cam_up_set[kVehicleTrimSlots] = {};
     bool vehicle_cam_right_set[kVehicleTrimSlots] = {};
+    // ODST's own bank, written as vehicle_cam_*_m_odst_<vehicle>_<seat>. The
+    // universal trims above are still the fallback for an unset ODST seat, so
+    // one universal nudge continues to move every seat in both titles.
+    float odst_vehicle_cam_forward_v[kOdstVehicleTrimSlots] = {};
+    float odst_vehicle_cam_up_v[kOdstVehicleTrimSlots] = {};
+    float odst_vehicle_cam_right_v[kOdstVehicleTrimSlots] = {};
+    bool odst_vehicle_cam_forward_set[kOdstVehicleTrimSlots] = {};
+    bool odst_vehicle_cam_up_set[kOdstVehicleTrimSlots] = {};
+    bool odst_vehicle_cam_right_set[kOdstVehicleTrimSlots] = {};
     // Optional vehicle-frame view: ON follows ground-vehicle yaw and pitch
     // while keeping roll out of the horizon; aircraft stay yaw-only. OFF keeps
     // the world-locked view Alpha 0.3.1 shipped; it remains the default.
@@ -618,6 +682,33 @@ inline float ConfigSeatCamRight(const Config& c, int slot)
 {
     if (slot >= 0 && slot < kVehicleTrimSlots && c.vehicle_cam_right_set[slot])
         return c.vehicle_cam_right_v[slot];
+    return c.vehicle_cam_right_m;
+}
+
+// ODST's bank. `slot` comes from ConfigOdstSeatTrimSlot; an unset ODST seat
+// falls back to the same universal trim Halo 3 uses, so the universal slider
+// still means "every seat in every title".
+inline float ConfigOdstSeatCamForward(const Config& c, int slot)
+{
+    if (slot >= 0 && slot < kOdstVehicleTrimSlots &&
+        c.odst_vehicle_cam_forward_set[slot])
+        return c.odst_vehicle_cam_forward_v[slot];
+    return c.vehicle_cam_forward_m;
+}
+
+inline float ConfigOdstSeatCamUp(const Config& c, int slot)
+{
+    if (slot >= 0 && slot < kOdstVehicleTrimSlots &&
+        c.odst_vehicle_cam_up_set[slot])
+        return c.odst_vehicle_cam_up_v[slot];
+    return c.vehicle_cam_up_m;
+}
+
+inline float ConfigOdstSeatCamRight(const Config& c, int slot)
+{
+    if (slot >= 0 && slot < kOdstVehicleTrimSlots &&
+        c.odst_vehicle_cam_right_set[slot])
+        return c.odst_vehicle_cam_right_v[slot];
     return c.vehicle_cam_right_m;
 }
 

@@ -153,6 +153,11 @@ bool Game_Halo3VehicleWheelActive();
 // per-seat menu. Game_Halo3SeatTrimName is menu-thread only.
 int Game_Halo3CurrentSeatTrimSlot();
 const char* Game_Halo3SeatTrimName(int slot);
+// O2: the same binding across titles. `outIsOdst` reports which bank the slot
+// indexes, because ODST keeps its own wider table (its Scorpion riders are
+// player seats and it adds the Shade). Menu thread only, same as above.
+int Game_VehicleSeatTrimSlotEx(int* outIsOdst);
+const char* Game_VehicleSeatTrimName(int slot, int isOdst);
 // True while an armed tracked camera consumes the OpenXR turn action. The
 // XInput hook must then suppress stock RX/RY so the game cannot create a second
 // camera motion underneath the HMD-owned view.

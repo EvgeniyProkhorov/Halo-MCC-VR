@@ -325,22 +325,52 @@ and `'d@t@'` signature, element size and capacity before iterating, so a wrong
 TLS slot produces a loud log line instead of a bad read. Anchor AOB (1 hit in
 each title, `datum_new`): `44 8B 41 3C 83 CA FF 8B 59 38 4C 8B D1`.
 
-### Open gaps the O1 probe must close
+### O-E2g - parent-node byte and the two discriminators (proven 2026-08-03)
 
-These are recorded as NOT proven; nothing may ship assuming them.
+Closed three of the four gaps below by direct retail disassembly.
 
-1. **Object parent-node byte.** Halo 3 reads it at `object+0x14`; no
-   disassembled ODST body touched it, so neither `+0x14` nor the
-   +0x20-shifted `+0x34` is proven. Mounted-turret gunner anchoring needs it.
+**Object parent-node byte = `objectData+0x14`, UNCHANGED from Halo 3.**
+Signed int8; `0xFF` (-1) means "no specific node" and the engine falls back to
+the parent's own orientation. ODST body `0x3CDEB8-0x3CDF6B` is an
+instruction-for-instruction twin of Halo 3's `0x38C804`: `0x3CDEF2`
+`cmp dword [rdi+0x10], -1` (parent handle), `0x3CDF0F`
+`cmp byte [rdi+0x14], 0xFF`, `0x3CDF2F` `movsx rax, byte [rdi+0x14]` followed
+by `imul rax,rax,0x34` and `movsx r9, word [rdx+0x12C]`. That last operand is
+ODST's OWN node-bank offset, so the same body proves the surrounding layout
+really did shift while this field really did not. A family scan finds 13 read
+sites in each title, all at `+0x14`. AOB (ODST-exact, `h3=0`):
+`48 0F BE 47 14 48 8B 54 CA 10 48 6B C0 34 4C 0F BF 8A 2C 01 00 00`.
+
+**human_jeep `engine_moment` = element `+0x14`** (retail-confirmed). The jeep
+element accessor is `0x3DB4F0`; `0x4147C2` takes `lea rdx,[elem+0x14]` as the
+engine sub-struct base and the torque update divides its first float at
+`0x4276ED` (`divss xmm7, [rsi]`). Neighbours line up too (max angular velocity
+`+0x18`, gears `+0x1C/+0x20`).
+
+**alien_scout `specific_type` = element `+0x28`, int8** (retail-confirmed).
+Scout accessor `0x3DB558`; `0x417432` compares `cmp byte [rax+0x28], 4`,
+byte-for-byte the same as Halo 3's `0x3BF61E`.
+
+**Clean negative: seat camera-tracks `+0x80/+0x84` has no retail consumer** in
+EITHER title. Camera tracks are opened from a global tag table, not from the
+seat: ODST `0x39C3F8` walks a cached definition at `[0xA9C9B8]`, block at
+`+0x278`, element stride `0x58`, track tag index at element `+0x34`, and
+stores the result into the unit's runtime array at `unit+0x27C`. The
+kit-derived seat sub-offsets are therefore kit-only and must never be treated
+as engine-validated. Nothing in this port reads them.
+
+### Open gaps
+
+1. ~~Object parent-node byte~~ - PROVEN above at `+0x14`.
 2. **Render-model node inverse at record `+0x28`.** Byte-verified from the kit
    field table and guerilla's own serialization comment, but no retail ODST
    instruction consuming it was found (three systematic scans returned only
    unrelated families). The structure is sound; the runtime consumer is not
    identified.
-3. **Three kit-metadata-only seat sub-offsets:** camera-tracks `seat+0x80`,
-   jeep `engine_moment` `+0x14`, scout `specific_type` `+0x28`. Their
-   containing structs and neighbouring anchors are retail-confirmed; these
-   three specific reads are not.
+3. ~~Three kit-metadata-only seat sub-offsets~~ - the two this port actually
+   reads (jeep `engine_moment`, scout `specific_type`) are retail-confirmed in
+   O-E2g; camera-tracks `seat+0x80` is proven to have no retail consumer and
+   is not read by anything here.
 4. **Shade and troop-hog identity discriminators** (see the O-E1 identity
    section): the shade authors zero physics blocks, so what
    `vehicle_definition_get_type` returns for it must be observed, together

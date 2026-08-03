@@ -39,6 +39,19 @@ inline constexpr size_t kOdstObjectEntryDataOffset = 0x10;
 inline constexpr size_t kOdstObjectEntryKindOffset = 3;
 inline constexpr unsigned kOdstObjectKindVehicle = 1;
 inline constexpr size_t kOdstObjectParentOffset = 0x10;
+// The node on the PARENT that an attached child (a seated unit, a mounted gun)
+// hangs from. Signed int8; 0xFF (-1) means "no specific node", and the engine
+// then falls back to the parent's own orientation. Proven for ODST at
+// halo3odst.dll+0x3CDF0F (`cmp byte [rdi+0x14], 0xFF`) and +0x3CDF2F
+// (`movsx rax, byte [rdi+0x14]` then `imul rax,rax,0x34`), in the same body
+// that reads the parent handle at +0x10 and indexes the node bank through
+// ODST's own +0x12C -- so the surrounding shifts are real while this field
+// genuinely stayed at +0x14. Thirteen sites read it in each title, all at the
+// same offset. The runtime still bounds-checks the value it reads.
+inline constexpr size_t kOdstObjectParentNodeOffset = 0x14;
+inline constexpr int8_t kOdstObjectParentNodeNone = -1;
+// A parent node index this large is not a node, it is a wrong offset.
+inline constexpr int kOdstMaximumRenderNodes = 255;
 // Unit seat word: 0xFFFF (read as int16 -1) when the unit is not seated.
 // Halo 3 reads +0x24E; ODST's own seat-mode chooser at 0x1535D3 reads +0x262.
 inline constexpr size_t kOdstUnitSeatWordOffset = 0x262;
@@ -129,8 +142,11 @@ inline constexpr size_t kOdstVehiclePhysicsRecordStride = 0xC;
 inline constexpr int kOdstPhysicsTypeCount = 10;
 inline constexpr int kOdstPhysicsTypeNoneAuthored = 0xB;
 inline constexpr int kOdstPhysicsTypeTurret = 5;
-// Discriminator fields inside those records (kit-metadata derived; the O1
-// probe confirms them against a live loaded definition).
+// Discriminator fields inside those records, both confirmed by retail ODST
+// instructions: the jeep engine sub-struct base is taken at
+// +0x4147C2 (`lea rdx, [elem+0x14]`) and its first float divided as the engine
+// moment at +0x4276ED; the scout's specific type is compared as an int8 at
+// +0x417432 (`cmp byte [rax+0x28], 4`).
 inline constexpr size_t kOdstJeepEngineMomentOffset = 0x14;
 inline constexpr size_t kOdstScoutSpecificTypeOffset = 0x28;
 
@@ -308,4 +324,157 @@ inline const char* OdstVehicleIdName(OdstVehicleId id)
 inline bool OdstSeatWordMeansUnseated(int seatWord)
 {
     return seatWord == -1;
+}
+
+// Authored first-person seat points, vehicle/carrier tag space, world units —
+// the same convention and the same struct shape as kHalo3SeatPoints.
+//
+// PROVENANCE (docs/ODST-VEHICLE-EVIDENCE.md O-E1/O-E1b). Every vehicle ODST
+// shares with Halo 3 was diffed tag-for-tag: the render-model node hierarchies
+// are byte-identical (max default-translation delta 0.0), all shared marker
+// translations agree within 1e-4 wu, and every player seat's label, marker,
+// flag word and camera marker match. Those seats therefore REUSE the
+// headset-accepted Halo 3 values verbatim rather than being re-authored — a
+// re-author could only introduce drift from a placement the user already
+// accepted in the headset.
+//
+// The remaining entries are seats Halo 3 never had. They are composed from the
+// tags' own seat markers through the render-model default node chain, plus the
+// kit's seated-eye convention of 0.33 wu above the seat marker — the same way
+// every accepted Halo 3 root-seat point was authored. Two independent
+// cross-checks validated that composition: the mauler turret's seat marker
+// composes exactly onto the engine's own gunner camera marker, and the
+// scorpion turret attach composes onto the accepted Halo 3 mounted-gunner
+// point in x and y.
+struct OdstSeatPoint
+{
+    OdstVehicleId vehicle;
+    int8_t seatIndex;
+    bool carrierFrame;
+    float x, y, z;
+};
+
+inline constexpr OdstSeatPoint kOdstSeatPoints[] = {
+    // ---- Reused verbatim from the accepted Halo 3 table ----
+    {OdstVehicleId::Warthog,  0, false,  0.0299f,  0.1683f, 0.6663f},
+    {OdstVehicleId::Warthog,  1, false, -0.0139f, -0.1903f, 0.6601f},
+    {OdstVehicleId::Mongoose, 0, false, -0.0476f,  0.0000f, 0.5207f},
+    {OdstVehicleId::Mongoose, 1, false, -0.4368f,  0.0000f, 0.5967f},
+    {OdstVehicleId::Ghost,    0, false, -0.1078f,  0.0000f, 0.4491f},
+    {OdstVehicleId::Wraith,   0, false,  0.3060f,  0.0000f, 1.0573f},
+    {OdstVehicleId::Chopper,  0, false, -0.4396f,  0.0000f, 0.7348f},
+    {OdstVehicleId::Banshee,  0, false,  0.4190f,  0.0000f, 0.4119f},
+    {OdstVehicleId::Scorpion, 0, false,  0.0326f,  0.1893f, 1.0226f},
+    // No ODST campaign scenario places a Prowler or a Hornet, but both tags
+    // ship and diffed identical to Halo 3's, so carrying their accepted points
+    // costs nothing and covers a mod or a Firefight variant that spawns one.
+    {OdstVehicleId::Mauler,   0, false, -1.0738f,  0.0000f, 0.6381f},
+    {OdstVehicleId::Mauler,   1, false, -0.2252f,  0.4659f, 0.7430f},
+    {OdstVehicleId::Mauler,   2, false, -0.2389f, -0.4790f, 0.6764f},
+    {OdstVehicleId::Hornet,   0, false,  1.0059f, -0.0098f, 0.6517f},
+    {OdstVehicleId::Hornet,   1, false,  0.5215f,  0.3566f, 0.5583f},
+    {OdstVehicleId::Hornet,   2, false,  0.5208f, -0.3379f, 0.5830f},
+    // Mounted-turret gunners, authored in the CARRIER's frame.
+    {OdstVehicleId::Warthog,  0, true,  -0.5832f,  0.0000f, 1.0624f},
+    {OdstVehicleId::Scorpion, 0, true,   0.4673f, -0.1903f, 0.8659f},
+    {OdstVehicleId::Wraith,   0, true,  -0.1886f,  0.0000f, 1.1956f},
+    {OdstVehicleId::Mauler,   0, true,   0.0054f,  0.0000f, 0.9307f},
+    // The walk-up machinegun turret / plasma cannon / missile pod share one
+    // point, exactly as they do in Halo 3.
+    {OdstVehicleId::StationaryTurret, 0, false, -0.2368f, 0.0000f, 0.5743f},
+
+    // ---- ODST-only seats ----
+    // The scorpion's four corner riders. Halo 3 marks these invalid for the
+    // player; ODST clears that bit (flags 0x10270 -> 0x270) and squads ride
+    // the tank, so the player can take them too. Each rider sits on its own
+    // tread-cover node, which is why the lateral values are so large.
+    {OdstVehicleId::Scorpion, 1, false,  0.3217f,  0.8483f, 0.7864f},
+    {OdstVehicleId::Scorpion, 2, false,  0.5289f, -0.8483f, 0.7890f},
+    {OdstVehicleId::Scorpion, 3, false, -0.7294f,  0.9483f, 0.7910f},
+    {OdstVehicleId::Scorpion, 4, false, -0.5277f, -0.9483f, 0.7896f},
+    // The shade. Its authored shade_d_camera marker sits at the ORIGIN of
+    // node 0 (degenerate), so the seat marker on node 1 (`floater`) is the
+    // only usable anchor. That node rotates with the gun, so resolving it
+    // through the live node matrix makes the eye ride the mount.
+    {OdstVehicleId::Shade,    0, false, -0.1252f,  0.0000f, 0.9791f},
+};
+
+inline constexpr const OdstSeatPoint* OdstFindSeatPoint(
+    OdstVehicleId vehicle, int seatIndex, bool mountedTurret)
+{
+    if (vehicle == OdstVehicleId::Unknown)
+        return nullptr;
+    for (const OdstSeatPoint& p : kOdstSeatPoints)
+    {
+        if (p.vehicle == vehicle && p.carrierFrame == mountedTurret &&
+            static_cast<int>(p.seatIndex) == seatIndex)
+            return &p;
+    }
+    return nullptr;
+}
+
+// Behaviour predicates. These mirror the Halo 3 rules because ODST ships the
+// same authored vehicles and the same control scheme for them, with the shade
+// added: the shade is a driven turret whose hull IS its aim, so it is treated
+// like a walk-up turret for steering (nothing authors it) while still getting
+// a seat point.
+inline constexpr bool OdstSeatIsDriver(OdstVehicleId id, int seatIndex,
+                                       bool mountedTurret)
+{
+    return !mountedTurret && seatIndex == 0 &&
+        id != OdstVehicleId::Unknown &&
+        id != OdstVehicleId::StationaryTurret &&
+        id != OdstVehicleId::Shade;
+}
+
+inline constexpr bool OdstVehicleIsLookSteered(OdstVehicleId id)
+{
+    switch (id)
+    {
+    case OdstVehicleId::Warthog:
+    case OdstVehicleId::Mongoose:
+    case OdstVehicleId::Ghost:
+    case OdstVehicleId::Mauler:
+    case OdstVehicleId::Chopper:
+    case OdstVehicleId::Banshee:
+    case OdstVehicleId::Hornet:
+        return true;
+    default:  // Scorpion, Wraith, shade, turrets, Unknown
+        return false;
+    }
+}
+
+inline constexpr bool OdstVehicleUsesWheel(OdstVehicleId id)
+{
+    return OdstVehicleIsLookSteered(id) &&
+        id != OdstVehicleId::Banshee && id != OdstVehicleId::Hornet;
+}
+
+inline constexpr bool OdstSeatFollowsHull(OdstVehicleId id, int seatIndex,
+                                          bool mountedTurret)
+{
+    if (id == OdstVehicleId::Unknown ||
+        id == OdstVehicleId::StationaryTurret)
+        return false;
+    // The shade's own body IS what its aim turns, exactly like a walk-up
+    // turret's, so following it would cancel the closed loop's feedback.
+    if (id == OdstVehicleId::Shade)
+        return false;
+    return OdstFindSeatPoint(id, seatIndex, mountedTurret) != nullptr;
+}
+
+inline constexpr bool OdstSeatFollowsPitch(OdstVehicleId id, int seatIndex,
+                                           bool mountedTurret)
+{
+    if (!OdstSeatFollowsHull(id, seatIndex, mountedTurret))
+        return false;
+    return id != OdstVehicleId::Banshee && id != OdstVehicleId::Hornet;
+}
+
+inline constexpr bool OdstSeatAuthorsSteering(OdstVehicleId id, int seatIndex,
+                                              bool mountedTurret,
+                                              bool followEnabled)
+{
+    return followEnabled && OdstSeatIsDriver(id, seatIndex, mountedTurret) &&
+        OdstVehicleIsLookSteered(id);
 }
