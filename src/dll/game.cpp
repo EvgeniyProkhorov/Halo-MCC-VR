@@ -5608,7 +5608,9 @@ namespace
     // ODST's own render_exposure_lock byte. Engaged only while a first-person
     // seat owns the view, so ordinary play keeps its adaptation.
     uint8_t* g_odstExposureLock = nullptr;
+    uint8_t* g_odstVisionAdapt = nullptr;
     std::atomic<uint32_t> g_odstExposureLockState{0};
+    std::atomic<uint32_t> g_odstExposureEngages{0};
 #endif
 
     struct Halo3ObserverCapture
@@ -9061,6 +9063,9 @@ namespace
         uint32_t vehicleId =
             static_cast<uint32_t>(OdstVehicleId::Unknown);
         int32_t mountedTurret = 0;
+        // The OCCUPIED seat's own flags: whether the occupant fires a personal
+        // weapon from here decides whether their shots leave their own eye.
+        uint32_t occupiedSeatFlags = 0;
     };
     OdstVehicleTransform g_odstVehicleTransform;
     std::atomic<uint64_t> g_odstVehicleSampleMs{0};
@@ -9495,6 +9500,20 @@ namespace
         return true;
     }
 
+    // True only in a seat where the occupant fires their OWN weapon, which is
+    // the only case whose projectiles leave the occupant's eye point and are
+    // therefore displaced by our seat camera. A driver's or a mounted gunner's
+    // shots come out of a vehicle barrel and must not be re-aimed.
+    bool OdstSeatFiresPersonalWeapon()
+    {
+        if (!OdstVehicleFpActive())
+            return false;
+        OdstVehicleTransform& xf = g_odstVehicleTransform;
+        if (!xf.valid.load(std::memory_order_relaxed))
+            return false;
+        return (xf.occupiedSeatFlags & kOdstSeatAllowsWeaponsBit) != 0;
+    }
+
     // Hold the engine's exposure steady while a seat owns the view. Looking
     // down at a dashboard fills the luminance measurement with a large dark
     // surface, so the eye-adaptation integrator ramps the whole scene's
@@ -9509,18 +9528,31 @@ namespace
     // rather than anything we remembered.
     void OdstApplyExposureLock(bool engage)
     {
-        if (!g_odstExposureLock)
+        if (!g_odstExposureLock && !g_odstVisionAdapt)
             return;
-        const uint8_t want = engage ? 1u : 0u;
         __try
         {
-            if (*g_odstExposureLock != want)
-                *g_odstExposureLock = want;
+            // Both are engine developer switches with known stock constants:
+            // the exposure lock is 0 stock and 1 held; the vision-mode
+            // adaptation is 1 stock and 0 held.
+            if (g_odstExposureLock)
+            {
+                const uint8_t want = engage ? 1u : 0u;
+                if (*g_odstExposureLock != want)
+                    *g_odstExposureLock = want;
+            }
+            if (g_odstVisionAdapt)
+            {
+                const uint8_t want = engage ? 0u : 1u;
+                if (*g_odstVisionAdapt != want)
+                    *g_odstVisionAdapt = want;
+            }
         }
         __except (EXCEPTION_EXECUTE_HANDLER)
         {
             g_odstExposureLock = nullptr;
-            LOG("ODST vehicle exposure: FAULTED writing the adaptation lock; "
+            g_odstVisionAdapt = nullptr;
+            LOG("ODST vehicle exposure: FAULTED writing an adaptation switch; "
                 "exposure control abandoned, everything else unaffected");
             return;
         }
@@ -9528,9 +9560,19 @@ namespace
         if (g_odstExposureLockState.exchange(state, std::memory_order_relaxed)
             != state)
         {
-            LOG("ODST vehicle exposure: adaptation %s",
+            // The engage COUNT is the diagnostic that matters: a steady ride
+            // must show one engage, not a stream of them. A stream would mean
+            // something is still releasing the lock mid-ride.
+            const uint32_t engages = engage
+                ? g_odstExposureEngages.fetch_add(
+                      1, std::memory_order_relaxed) + 1
+                : g_odstExposureEngages.load(std::memory_order_relaxed);
+            LOG("ODST vehicle exposure: adaptation %s (engage #%u; exposure "
+                "lock %s, vision-mode adaptation %s)",
                 engage ? "HELD steady for the seat view"
-                       : "returned to the engine's own control");
+                       : "returned to the engine's own control",
+                engages, g_odstExposureLock ? "on" : "unavailable",
+                g_odstVisionAdapt ? "on" : "unavailable");
         }
     }
 
@@ -9689,6 +9731,7 @@ namespace
         int unitParentNode = -1;
         unsigned char* parentObjectData = nullptr;
         uint32_t seat0Flags = 0;
+        uint32_t occupiedSeatFlags = 0;
         bool seatFlagsValid = false;
         bool faulted = false;
         __try
@@ -9762,13 +9805,23 @@ namespace
                                     if (seatCount > 0 && seatCount <= 126 &&
                                         seatsAddress)
                                     {
+                                        unsigned char* seats = tagBase +
+                                            static_cast<size_t>(
+                                                seatsAddress) * 4;
                                         seat0Flags =
                                             *reinterpret_cast<const uint32_t*>(
-                                                tagBase +
-                                                static_cast<size_t>(
-                                                    seatsAddress) * 4 +
-                                                kOdstSeatFlagsOffset);
+                                                seats + kOdstSeatFlagsOffset);
                                         seatFlagsValid = true;
+                                        if (seat >= 0 && seat < seatCount)
+                                        {
+                                            occupiedSeatFlags =
+                                                *reinterpret_cast<
+                                                    const uint32_t*>(
+                                                    seats +
+                                                    static_cast<size_t>(seat) *
+                                                        kOdstVehicleSeatStride +
+                                                    kOdstSeatFlagsOffset);
+                                        }
                                     }
                                 }
                             }
@@ -10004,6 +10057,7 @@ namespace
             xf.parentHandle = parent;
             xf.vehicleId = static_cast<uint32_t>(anchorId);
             xf.mountedTurret = 0;
+            xf.occupiedSeatFlags = occupiedSeatFlags;
             xf.valid.store(1, std::memory_order_relaxed);
             xf.sampleMs.store(nowMs, std::memory_order_relaxed);
         }
@@ -10736,11 +10790,21 @@ namespace
             // O3: integrate the hull heading and publish its roll-free pitch
             // before the head look and the VR turn read either.
             OdstApplySeatYawFollow();
-            // Engaged only once a seat actually owns the view, so the frozen
-            // level is one the engine already adapted to rather than a
-            // load-time initial value.
+            // Engaged on SEAT OCCUPANCY, deliberately not on the per-frame
+            // liveness predicate the camera uses. OdstVehicleFpActive() also
+            // requires a sample fresh within 500 ms; a momentary stale sample
+            // is a reason to stop steering the camera, but handing auto
+            // exposure back for those frames is exactly what let the dash keep
+            // driving the brightness. Occupancy is already debounced.
+            const bool seatOwnsView =
+                g_config.vehicle_first_person &&
+                g_odstVehicleBinding.load(std::memory_order_acquire) ==
+                    static_cast<uint8_t>(
+                        OdstVehicleBindingState::Installed) &&
+                g_odstVehicleFpStable.load(std::memory_order_relaxed) ==
+                    static_cast<uint32_t>(Halo3VehicleState::Vehicle);
             OdstApplyExposureLock(g_config.vehicle_steady_exposure &&
-                                  OdstVehicleFpActive());
+                                  seatOwnsView);
             ApplyOdstMotionBlurSetting();
             // Exact Halo 3 control ownership: publish the source camera's
             // pre-head-look forward for every active camera copy. Vehicles
@@ -12179,6 +12243,16 @@ namespace
     // instead: lock byte = matchRva + 7 + disp32 at match+3.
     const char* kOdstExposureLockSig =
         "40 38 2D ?? ?? ?? ?? 0F 57 C9 0F 28 C4 F3 0F 5C C6 F3 0F 5A C8";
+    // ODST's vision-mode (VISR) automatic overbrightness adaptation is a
+    // SECOND, independent brightness control that the exposure lock never
+    // touched: it measures the same scene luminance and writes its own ratio.
+    // Zeroing this byte makes the test at +0x1F165D skip the whole ratio
+    // computation and its store at +0x1F172B, so the vision-mode brightness
+    // holds its authored value instead of chasing a dark dashboard. Costs
+    // nothing when VISR is down, which the engine already skips earlier.
+    // Storage = hit + 7 + disp32 at hit+2 (expected +0x8E6CA4).
+    const char* kOdstVisionAdaptSig =
+        "80 3D ?? ?? ?? ?? 00 48 8D 0C 80 0F 10 5C 8D 04 44 8B 5C 8D 14 8B 0D";
 
     const char* kOdstMarkersInternalSig =
         "48 8B C4 48 89 58 08 48 89 68 10 48 89 70 18 "
@@ -13962,6 +14036,34 @@ namespace
                 "missing/ambiguous (found=%d unique=%d); the dash will keep "
                 "driving auto-exposure and everything else is unaffected",
                 exposureHit ? 1 : 0, exposureUnique ? 1 : 0);
+        }
+
+        // The vision-mode overbrightness adaptation is a second, independent
+        // brightness control; losing it costs only that path.
+        g_odstVisionAdapt = nullptr;
+        const uintptr_t visionHit =
+            sig::Find(base, size, kOdstVisionAdaptSig);
+        const bool visionUnique = visionHit && !sig::Find(
+            visionHit + 1, base + size - visionHit - 1, kOdstVisionAdaptSig);
+        if (visionUnique)
+        {
+            const uintptr_t visionAddress = visionHit + 7 +
+                *reinterpret_cast<const int32_t*>(visionHit + 2);
+            if (visionAddress >= base && visionAddress + 1 <= base + size)
+            {
+                g_odstVisionAdapt = reinterpret_cast<uint8_t*>(visionAddress);
+                LOG("ODST vehicle exposure: vision-mode overbrightness "
+                    "adaptation resolved at +0x%llX (from its test at +0x%llX)",
+                    (unsigned long long)(visionAddress - base),
+                    (unsigned long long)(visionHit - base));
+            }
+        }
+        if (!g_odstVisionAdapt)
+        {
+            LOG("ODST vehicle exposure: vision-mode adaptation signature "
+                "missing/ambiguous (found=%d unique=%d); VISR brightness keeps "
+                "its own adaptation, exposure lock unaffected",
+                visionHit ? 1 : 0, visionUnique ? 1 : 0);
         }
 
         // The render-node pair is a second, independent transaction: both
@@ -25294,13 +25396,17 @@ bool Game_ComputeAimStick(float& outRx, float& outRy)
     RotateByQuat(q, localDir, f3);
     const float fx = f3[0], fy = f3[1], fz = f3[2];
 
-    // Halo spawns first-person projectiles at the CAMERA — the head — and no
-    // steering can move that origin. Aiming the bullet ray PARALLEL to the
-    // hand ray therefore leaves a permanent head-to-hand parallax miss (the
-    // 07-15 report "bullets shoot from my head"). Instead steer the head-
-    // origin ray through the point the hand ray reaches at the crosshair
-    // distance: every shot then passes exactly through the floating reticle,
-    // and beyond it the two rays are effectively identical.
+    // Halo spawns first-person projectiles at the ENGINE's camera — on foot,
+    // the head — and no steering can move that origin. Aiming the bullet ray
+    // PARALLEL to the hand ray therefore leaves a permanent head-to-hand
+    // parallax miss (the 07-15 report "bullets shoot from my head"). Instead
+    // steer the head-origin ray through the point the hand ray reaches at the
+    // crosshair distance: every shot then passes exactly through the floating
+    // reticle, and beyond it the two rays are effectively identical.
+    //
+    // `hp` is the ROOM head, which maps onto the engine's camera only while the
+    // two are the same point. In a first-person vehicle seat they are not — see
+    // the seat re-origin below, which is the correction for that case.
     const float d = Clamp(g_config.crosshair_distance_m, 2.0f, 50.0f);
     float tx = p[0] + fx * d - hp[0];
     float ty = p[1] + fy * d - hp[1];
@@ -25325,6 +25431,64 @@ bool Game_ComputeAimStick(float& outRx, float& outRy)
         // this frame, retaining their proven independent pitch loop.
         desiredYaw = atan2f(followedAim[1], followedAim[0]);
         desiredPitch = asinf(Clamp(followedAim[2], -1.0f, 1.0f));
+    }
+
+    // The engine still fires from ITS OWN eye point. For a first-person seat
+    // that is the occupant's `head` marker: unit_get_camera_position
+    // (halo3odst.dll+0x399DC4) resolves the seat's camera marker, then -- when
+    // bit 4 "third person camera" is clear, which is exactly the bit we clear
+    // to hide the body -- overwrites it with marker `head` on the UNIT.
+    //
+    // The seat work moved the point we RENDER from to the authored seat anchor.
+    // The loop above aims from the rendered eye THROUGH the reticle, so the aim
+    // direction and the sight direction are identical; the shot therefore
+    // leaves the engine's eye PARALLEL to the sight line, displaced by
+    // (rendered eye - engine eye). Parallel lines never converge, so that is a
+    // constant miss in metres at EVERY range -- no crosshair distance can tune
+    // it out. The warthog passenger ships trims of +0.55 m up and -0.10 m
+    // lateral, which is a ~0.56 m low-and-right miss; the driver ships 0.00 on
+    // both, which is why only the passenger shows it.
+    //
+    // Both points are already published every camera frame, so re-origin the
+    // desired ray on the engine's. Self-neutralising: when the two coincide --
+    // on foot, or in a seat with no trim -- the correction is exactly zero.
+    // Deliberately narrow: ODST, and only a seat whose own tag says the
+    // occupant fires a PERSONAL weapon (the "allows weapons" flag - the
+    // warthog passenger's 0x1070 has it, the driver's 0x40014 does not).
+    // A driver's or mounted gunner's shots leave a vehicle barrel, not the
+    // occupant's eye, so re-aiming them would be wrong; and Halo 3's
+    // first-person vehicles are the accepted baseline, which this must not
+    // disturb. Halo 3 can be brought in later on its own evidence.
+    bool aimSeated = false;
+#if HALOMCCVR_EXPERIMENTAL_ODST_BRINGUP
+    aimSeated = OdstSeatFiresPersonalWeapon();
+#endif
+    if (aimSeated && tl > 1e-3f &&
+        g_camValid.load(std::memory_order_acquire) &&
+        g_baseCamValid.load(std::memory_order_acquire))
+    {
+        const float offsetX = g_camX.load() - g_baseCamX.load();
+        const float offsetY = g_camY.load() - g_baseCamY.load();
+        const float offsetZ = g_camZ.load() - g_baseCamZ.load();
+        // The reticle floats `tl` metres from the rendered eye along the
+        // desired direction; put that same point in world units and aim at it
+        // from where the engine actually shoots.
+        const float range = tl * g_worldScale.load(std::memory_order_relaxed);
+        const float cosDesiredPitch = cosf(desiredPitch);
+        const float toReticleX =
+            cosDesiredPitch * cosf(desiredYaw) * range + offsetX;
+        const float toReticleY =
+            cosDesiredPitch * sinf(desiredYaw) * range + offsetY;
+        const float toReticleZ = sinf(desiredPitch) * range + offsetZ;
+        const float reticleLength = sqrtf(toReticleX * toReticleX +
+                                          toReticleY * toReticleY +
+                                          toReticleZ * toReticleZ);
+        if (std::isfinite(reticleLength) && reticleLength > 1e-3f)
+        {
+            desiredYaw = atan2f(toReticleY, toReticleX);
+            desiredPitch = asinf(
+                Clamp(toReticleZ / reticleLength, -1.0f, 1.0f));
+        }
     }
 
     const float ax = g_aimFwdX.load(), ay = g_aimFwdY.load(), az = g_aimFwdZ.load();

@@ -410,6 +410,102 @@ with follow OFF every control stays exactly as it shipped. The wheel and the
 so a look-steered ODST driver takes the wheel and an ODST aircraft correctly
 keeps the plain stick.
 
+## O5 - the three faults O4 did not fix (2026-08-03)
+
+O4 missed all three. Each was then re-hunted with instruction-level evidence
+and independently verified; both verifiers returned PARTIAL with corrections,
+which are applied below.
+
+### 1. Passenger shots - PARALLEL SIGHT AND SHOT LINES
+
+Not the seat's angular limits (O4's guess). `Game_ComputeAimStick` aims a ray
+from the RENDERED eye THROUGH the reticle, so the aim direction and the sight
+direction are identical. The shot, however, leaves the ENGINE's eye:
+`unit_get_camera_position` (`halo3odst.dll+0x399DC4`) resolves the seat's
+camera marker and then - when seat flag bit 4 is clear, which is exactly the
+bit we clear to hide the body - overwrites it with marker `head` on the UNIT
+(`+0x39A02B mov edx,0x9F`, `+0x3A033 call 0x37F514`).
+
+Our seat work moved the rendered eye to the authored anchor. The two lines are
+therefore PARALLEL, separated by (rendered eye - engine eye): a constant miss
+in metres at EVERY range, which no crosshair distance can tune out. The
+warthog passenger's shipped trims are +0.55 m up and -0.10 m lateral, giving
+|offset| = 0.559 m: **6.4 deg at 5 m, 2.1 deg at 15 m, 0.8 deg at 40 m, low
+and slightly right**. The driver ships 0.00 on both axes - which is exactly
+why only the passenger showed it.
+
+This also explains why O4's "honest crosshair" changed nothing: a parallax
+offset biases the DESIRED direction, so the loop converges to ~zero error and
+the stall detector provably never arms.
+
+**Fix:** re-origin the desired ray onto the engine's eye using
+`g_cam - g_baseCam`, both already published every camera frame. Self-
+neutralising - zero when the two points coincide.
+
+**Verifier correction applied:** the gate was narrowed from "any first-person
+seat in either title" to ODST seats whose tag sets the **allows-weapons** flag
+(`1 << 5`). A driver's or mounted gunner's projectiles leave a vehicle barrel,
+not the occupant's eye, and `+0x3F5EEC` has a caller-supplied-origin path that
+bypasses `0x399DC4` entirely; re-aiming those would be wrong. Halo 3's
+first-person vehicles are the accepted baseline and are deliberately excluded
+until they have their own evidence.
+
+### 2. Crosshair stale across a weapon switch - THE COVERAGE GUARD
+
+Not the cache key: the folded key IS weapon-specific (`widgetIndex` is the
+engine's chud_definition index, `RE-notes.md:48-51`), and it does change.
+
+The publish is refused downstream in `UploadAuthoredReticle`: new art must
+carry at least HALF the ink of the art already on the quad. That bar exists to
+catch a crosshair blooming out of the capture crop - which redraws the same
+widgets and so folds the SAME key. A weapon swap is a different crosshair that
+legitimately carries less ink, so it fails the bar and the previous weapon's
+reticle stays up.
+
+**Measured, not theorised** - a preserved Halo 3 log
+(`out/analysis/odst-level-load-lockout/halo3xr-1d6dcb6-steam-prev.log`) caught
+it end to end: `art 446` -> switch -> `art 106` (106 < 446/2), then refusals
+accumulating `blankHeld 2,4,5,0,4,5,4` = 24, releasing at exactly
+`kAuthoredReticleMaxConsecutiveHolds`, ~13 seconds stale. ODST samples one
+frame in thirty versus Halo 3's one in six, so the same 24 refusals there are
+hundreds of frames.
+
+**Fix:** when the captured identity differs from the published one, drop the
+half-ink bar (the `ink >= 2` "an empty capture is never a crosshair" rule is
+untouched), and reset the refusal counter so a new weapon cannot inherit
+refusals earned by the previous one.
+
+**Verifier corrections applied:** Reach is excluded, because it folds its key
+per DRAWN widget, so its documented thinning case also changes the key and
+still needs the guard behind it; and ODST was added to the crosshair telemetry
+line, which had never once logged `key`, `art` or `blankHeld` for that title.
+
+### 3. Dashboard exposure - WE WERE RELEASING OUR OWN LOCK
+
+The lock byte is correct and the guard is sound: every path that changes the
+adapted exposure funnels into the store at `+0x2B2201`, and `state+8` is the
+only per-frame, screen-content-dependent input to the exposure exponent
+(verified in all four consumers: `+0x2C5C10`, `+0x2AD6FC`, `+0x2AD745`,
+`+0x2DF02C`).
+
+Two things defeated it:
+1. **We handed the lock back mid-ride.** It was driven by
+   `OdstVehicleFpActive()`, which additionally requires a sample fresher than
+   500 ms. Any blink released the lock for those frames. It is now driven by
+   debounced seat OCCUPANCY - a stale sample is a reason to stop steering the
+   camera, not to resume auto-exposure. The log now prints an engage COUNT: a
+   steady ride must show one engage, not a stream.
+2. **A second, independent brightness control was never covered:** ODST's
+   vision-mode (VISR) automatic overbrightness adaptation, which measures the
+   same scene luminance and writes its own ratio. Its enable byte is asserted
+   0 while seated (AOB unique, storage = `hit + 7 + disp32@hit+2`, expected
+   `+0x8E6CA4`), which makes `+0x1F165D` skip the ratio computation and its
+   store at `+0x1F172B`. Costs nothing when VISR is down.
+
+Not shipped: patching the script-instant bypass at `+0x2B2032` (would change
+engine behaviour for scripted cinematics) or the adaptation rate, which is a
+shared `.rdata` constant.
+
 ## O4 - passenger aim truth and steady seat exposure (2026-08-03)
 
 ### Passenger shots not following the crosshair - ROOT CAUSE FOUND

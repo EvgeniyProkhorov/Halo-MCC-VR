@@ -133,6 +133,11 @@ inline constexpr uint32_t kOdstSeatThirdPersonCameraBit = 1u << 4;
 inline constexpr uint32_t kOdstSeatDriverBit = 1u << 2;
 inline constexpr uint32_t kOdstSeatGunnerBit = 1u << 3;
 inline constexpr uint32_t kOdstSeatInvalidForPlayerBit = 1u << 16;
+// "allows weapons": the occupant fires their OWN weapon from this seat rather
+// than the vehicle's. Warthog passenger 0x1070 has it; the driver's 0x40014
+// does not. This is what separates a seat whose shots leave the occupant's own
+// eye point from one whose shots leave a vehicle barrel.
+inline constexpr uint32_t kOdstSeatAllowsWeaponsBit = 1u << 5;
 inline constexpr size_t kOdstSeatCameraMarkerNameOffset = 0x6C;
 // Physics-type blocks: 10 records of 0xC. The accessor returns the first
 // non-empty index, or 0xB when the definition authors none (walk-up turrets

@@ -5487,6 +5487,28 @@ int main()
                 !OdstSeatFollowsHull(OdstVehicleId::StationaryTurret, 0,
                                      false);
 
+            // The seat flag that decides whose eye the shots leave. Only a
+            // seat that lets the occupant use their own weapon may have its
+            // aim re-origined onto the engine's eye; a driver or mounted
+            // gunner fires a vehicle barrel.
+            const bool personalWeaponSeatSplit =
+                // ODST warthog passenger, flags 0x1070 (from its own tag)
+                (0x1070u & kOdstSeatAllowsWeaponsBit) != 0 &&
+                // ODST warthog driver, flags 0x40014
+                (0x40014u & kOdstSeatAllowsWeaponsBit) == 0 &&
+                // the machinegun turret gunner, flags 0x5500018
+                (0x5500018u & kOdstSeatAllowsWeaponsBit) == 0 &&
+                // and the bit must not collide with the ones already keyed
+                kOdstSeatAllowsWeaponsBit != kOdstSeatDriverBit &&
+                kOdstSeatAllowsWeaponsBit != kOdstSeatGunnerBit &&
+                kOdstSeatAllowsWeaponsBit !=
+                    kOdstSeatThirdPersonCameraBit;
+
+            Check(personalWeaponSeatSplit,
+                "The allows-weapons seat flag separates a seat whose shots "
+                "leave the occupant's own eye from a driver or turret gunner "
+                "firing the vehicle's weapon");
+
             Check(shadeNeverFollows && aircraftStayYawOnly &&
                   steeringFamiliesHold,
                 "ODST view-follow keeps the Shade and walk-up turrets out, "

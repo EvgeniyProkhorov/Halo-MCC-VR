@@ -4908,7 +4908,8 @@ float4 ps_scope_linearize(VSOut i):SV_Target { return paint(i.uv,true); }
         return true;
     }
 
-    bool UploadAuthoredReticle(bool requireSuccessfulRelease)
+    bool UploadAuthoredReticle(bool requireSuccessfulRelease,
+                               bool identityChanged)
     {
         const bool probePending = g_authoredReticleProbePending;
         if ((!probePending && (!g_authoredReticleReady ||
@@ -4942,7 +4943,18 @@ float4 ps_scope_linearize(VSOut i):SV_Target { return paint(i.uv,true); }
             // the crosshair currently on the quad. The second half is what
             // catches the bloom - the petals leaving the crop takes most of
             // the ink with them even when the centre reticle stays behind.
-            const uint32_t required = g_authoredReticleGoodValid
+            // ...but only when this is the SAME crosshair. The half-ink bar
+            // exists to catch a crosshair blooming out of the crop, which by
+            // definition redraws the same widgets and so folds the same
+            // identity key. A DIFFERENT crosshair - a weapon swap - legitimately
+            // carries less ink, and holding it to the old one's coverage is
+            // what left the previous weapon's reticle on the quad. A preserved
+            // Halo 3 log measured exactly that: ink fell 446 -> 106 across a
+            // switch and the guard held for 24 refusals (~13 s) before letting
+            // it through. ODST samples one frame in thirty, so the same 24
+            // refusals there are hundreds of frames.
+            const uint32_t required =
+                (g_authoredReticleGoodValid && !identityChanged)
                 ? (g_authoredReticleGoodInk * kAuthoredReticleInkNumerator) /
                       kAuthoredReticleInkDenominator
                 : 0;
@@ -4955,6 +4967,12 @@ float4 ps_scope_linearize(VSOut i):SV_Target { return paint(i.uv,true); }
             // published the empty capture anyway, roughly three times a
             // second. An empty capture is never a crosshair, however long it
             // persists; while good art is held it is refused unconditionally.
+            // A new crosshair must not inherit refusals accumulated against
+            // the previous one: the counter is otherwise cleared only on a
+            // successful publish, so a weapon switch could start life most of
+            // the way through its own escape hatch.
+            if (identityChanged)
+                g_authoredReticleConsecutiveHolds = 0;
             const bool staleEnoughToAccept =
                 hasAnyArt && g_authoredReticleConsecutiveHolds >=
                                  kAuthoredReticleMaxConsecutiveHolds;
@@ -7747,9 +7765,21 @@ float4 ps_scope_linearize(VSOut i):SV_Target { return paint(i.uv,true); }
                             !shouldUploadAuthoredReticle;
                         const bool reticleProbePending =
                             g_authoredReticleProbePending;
+                        // A different crosshair, not the same one redrawn: the
+                        // coverage bar must not judge a new weapon's reticle
+                        // against the old one's ink. Reach is excluded because
+                        // it folds its key per DRAWN widget, so its documented
+                        // thinning case also changes the key and still needs
+                        // the coverage guard behind it.
+                        const bool authoredIdentityChanged =
+                            authoredCrosshairKey != 0 &&
+                            authoredCrosshairKey !=
+                                s_refreshState.lastPublishedKey &&
+                            reticleTitle != GameTitle::HaloReach;
                         bool authoredUploadFailed = false;
                         if ((shouldUploadAuthoredReticle || reticleProbePending) &&
-                            UploadAuthoredReticle(false))
+                            UploadAuthoredReticle(false,
+                                                  authoredIdentityChanged))
                         {
                             if (authoredCrosshairKey != 0)
                             {
@@ -7782,7 +7812,11 @@ float4 ps_scope_linearize(VSOut i):SV_Target { return paint(i.uv,true); }
                         // Halo 3 reports the same counters as Reach: a headset
                         // report about the animated crosshair is only
                         // actionable next to the rate it actually published at.
-                        if (reachTitle || reticleTitle == GameTitle::Halo3)
+                        // ODST is included too: its ink has never been measured
+                        // in a headset session, and a stale-crosshair report is
+                        // only actionable next to the coverage the guard saw.
+                        if (reachTitle || reticleTitle == GameTitle::Halo3 ||
+                            reticleTitle == GameTitle::Halo3ODST)
                         {
                             if (authoredArtAlreadyPublished)
                                 ++s_uploadsSkipped;
