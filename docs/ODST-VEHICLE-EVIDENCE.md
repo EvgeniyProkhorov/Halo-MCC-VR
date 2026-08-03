@@ -450,6 +450,38 @@ bypasses `0x399DC4` entirely; re-aiming those would be wrong. Halo 3's
 first-person vehicles are the accepted baseline and are deliberately excluded
 until they have their own evidence.
 
+**KNOWN LIMITATION - this is a partial fix, and the rest is geometry.** Two
+lines from different origins can be made to meet at exactly ONE distance. The
+re-origin aims from the engine's eye through the reticle point, so the miss is
+zero at `crosshair_distance_m` and the residual elsewhere is
+`|offset| * |1 - range/crosshair_distance|`. With the user's 29 m setting and
+the 0.559 m offset:
+
+| range | before | after |
+| --- | --- | --- |
+| 5 m | 6.4 deg | 5.3 deg |
+| 10 m | 3.2 deg | 2.1 deg |
+| 15 m | 2.1 deg | 1.0 deg |
+| 29 m | 1.1 deg | 0.0 deg |
+| 40 m | 0.8 deg | 0.3 deg |
+
+So close-range passenger fire is improved but NOT fixed. The offset itself is
+the real cause and it is almost entirely the seat's own **height trim**: the
+engine fires from where it thinks the occupant's head is, and the shipped
+warthog-passenger trim raises the view **+0.55 m** above that point (the
+lateral -0.10 m contributes the rest). This is sight-over-bore, except the
+"sight" is half a metre up instead of four centimetres.
+
+The complete cure is therefore to shrink the offset, not to re-aim harder:
+lowering that seat's height trim toward 0 collapses the residual to the
+lateral term alone (~0.10 m, under 1 deg even at 5 m). That is a headset
+judgement about view comfort versus aim accuracy and belongs to the user, so
+it is exposed on the existing F1 "Seat height" slider rather than changed
+unilaterally. If the user wants the high view AND exact aim, the only
+remaining option is to stop displacing the camera for that seat and place the
+comfort offset somewhere that does not move the engine's firing point - which
+would be a new candidate with its own headset test.
+
 ### 2. Crosshair stale across a weapon switch - THE COVERAGE GUARD
 
 Not the cache key: the folded key IS weapon-specific (`widgetIndex` is the
