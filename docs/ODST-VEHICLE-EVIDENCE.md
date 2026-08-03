@@ -379,6 +379,37 @@ as engine-validated. Nothing in this port reads them.
 All four are readable from AI-crewed and parked vehicles in an ordinary ODST
 session - none requires the player to enter a seat.
 
+## O3 - view follow and the virtual wheel (2026-08-03)
+
+Brings the last two pieces of the 0.3.2 vehicle package to ODST. Both are
+behavior, not new engine evidence: they consume the seat state O2 already
+publishes, and they reuse the accepted Halo 3 composition rather than
+re-deriving it.
+
+**One publication, two titles.** The roll-stable follow record gains an
+`odstOwner` tag. Only one title's vehicle transaction can ever be armed, so a
+single publication serves both, and every shared consumer - the tracked
+controller basis, the hand room-translation, the closed-loop aim - keeps
+working with no edit at all. The reader validates the tag against whichever
+title is actually driving, so a stale cross-title sample can never pitch the
+wrong camera.
+
+**What follows, and what deliberately does not.** ODST reuses Halo 3's
+families: ground vehicles follow yaw and pitch with roll always excluded, so
+suspension bank or a side impact cannot tip the horizon; Banshee and Hornet
+stay yaw-only, because their flight crosses vertical where forward alone
+cannot pick a continuous roll-free up. The ODST-specific rule is the **Shade**:
+it has a seat point but its own body is what its aim turns, so following it
+would cancel the closed loop's feedback exactly as a walk-up turret would.
+It is excluded from follow, from pitch, from driver status and from steering
+authorship.
+
+**Steering.** `OdstSeatAuthorsSteering` gates on the same follow toggle, so
+with follow OFF every control stays exactly as it shipped. The wheel and the
+"who owns the turn stick" gates now ask Halo 3 first and fall through to ODST,
+so a look-steered ODST driver takes the wheel and an ODST aircraft correctly
+keeps the plain stick.
+
 ### O-E3 status
 
 Offline evidence is COMPLETE and sufficient to author candidate O1 with

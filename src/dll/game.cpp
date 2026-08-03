@@ -237,8 +237,20 @@ namespace
         std::atomic<uint64_t> sampleMs{0};
         std::atomic<float> hullYaw{0.0f};
         std::atomic<float> hullPitch{0.0f};
+        // O3: which title's camera published this. Only one title's vehicle
+        // transaction can ever be armed, so one publication serves both and
+        // every shared consumer (hands, room translation, aim) keeps working
+        // untouched -- but the reader must still verify the sample came from
+        // the title that is actually driving, or a stale cross-title sample
+        // could pitch the wrong camera.
+        std::atomic<uint32_t> odstOwner{0};
         bool writerHasValue = false; // camera-thread writer only
     };
+#if HALOMCCVR_EXPERIMENTAL_ODST_BRINGUP
+    // Defined with the ODST vehicle block far below; declared here because the
+    // follow reader runs long before it.
+    bool OdstFollowContextValid(uint32_t& outGeneration);
+#endif
     Halo3RollStableFollowPublication g_halo3RollStableFollow;
     enum class Halo3PitchFollowState : uint8_t
     {
@@ -264,10 +276,9 @@ namespace
         g_halo3PitchFollowSerial.fetch_add(1, std::memory_order_release);
     }
 
-    void Halo3PublishRollStableFollow(float hullYaw, float hullPitch)
+    void Halo3PublishRollStableFollowFor(uint32_t generation, bool odstOwner,
+                                        float hullYaw, float hullPitch)
     {
-        const uint32_t generation =
-            g_halo3RuntimeGeneration.load(std::memory_order_relaxed);
         if (!generation || !std::isfinite(hullYaw) ||
             !std::isfinite(hullPitch))
             return;
@@ -277,8 +288,17 @@ namespace
         published.sampleMs.store(GetTickCount64(), std::memory_order_relaxed);
         published.hullYaw.store(hullYaw, std::memory_order_relaxed);
         published.hullPitch.store(hullPitch, std::memory_order_relaxed);
+        published.odstOwner.store(odstOwner ? 1u : 0u,
+                                  std::memory_order_relaxed);
         published.sequence.fetch_add(1, std::memory_order_release);
         published.writerHasValue = true;
+    }
+
+    void Halo3PublishRollStableFollow(float hullYaw, float hullPitch)
+    {
+        Halo3PublishRollStableFollowFor(
+            g_halo3RuntimeGeneration.load(std::memory_order_relaxed), false,
+            hullYaw, hullPitch);
     }
 
     void Halo3ClearRollStableFollow()
@@ -301,11 +321,23 @@ namespace
     {
         // The existing checkbox remains the master switch. OFF reaches none of
         // the new transforms, preserving the shipped world-locked path.
-        if (!g_config.vehicle_first_person ||
-            !g_config.vehicle_view_follow || !Halo3VehicleFpActive())
+        if (!g_config.vehicle_first_person || !g_config.vehicle_view_follow)
             return false;
-        const uint32_t generation =
-            g_halo3RuntimeGeneration.load(std::memory_order_acquire);
+        // Whichever title is actually driving supplies both the gate and the
+        // generation the sample must match.
+        uint32_t generation = 0;
+        uint32_t expectedOwner = 0;
+        if (Halo3VehicleFpActive())
+        {
+            generation =
+                g_halo3RuntimeGeneration.load(std::memory_order_acquire);
+        }
+#if HALOMCCVR_EXPERIMENTAL_ODST_BRINGUP
+        else if (OdstFollowContextValid(generation))
+        {
+            expectedOwner = 1;
+        }
+#endif
         if (!generation)
             return false;
         const uint64_t nowMs = GetTickCount64();
@@ -324,9 +356,12 @@ namespace
                 published.hullYaw.load(std::memory_order_relaxed);
             const float samplePitch =
                 published.hullPitch.load(std::memory_order_relaxed);
+            const uint32_t sampleOwner =
+                published.odstOwner.load(std::memory_order_relaxed);
             if (published.sequence.load(std::memory_order_acquire) != before)
                 continue;
-            if (sampleGeneration != generation || !sampleMs ||
+            if (sampleOwner != expectedOwner ||
+                sampleGeneration != generation || !sampleMs ||
                 nowMs < sampleMs ||
                 nowMs - sampleMs > kHalo3RollStableFollowFreshMs ||
                 !std::isfinite(sampleYaw) || !std::isfinite(samplePitch))
@@ -7467,10 +7502,20 @@ namespace
 
     // Is the wheel available in this seat? Aircraft are look-steered but take
     // the plain flight stick, not a wheel.
+    bool OdstSeatUsesWheel();
+    bool OdstSeatAuthorsSteeringNow();
+
     bool Halo3SeatUsesWheel()
     {
         if (!g_halo3SeatAuthorsSteering.load(std::memory_order_acquire))
+        {
+#if HALOMCCVR_EXPERIMENTAL_ODST_BRINGUP
+            // O3: the wheel is title-agnostic once a seat authors steering.
+            return OdstSeatUsesWheel();
+#else
             return false;
+#endif
+        }
         Halo3SeatSnapshot seat;
         if (!Halo3ReadSeatSnapshot(seat))
             return false;
@@ -7484,8 +7529,14 @@ namespace
     // leave a stale "authored" flag suppressing another title's snap turn.
     bool Halo3SeatAuthorsSteeringNow()
     {
-        return g_halo3SeatAuthorsSteering.load(std::memory_order_acquire) !=
-            0 && Halo3VehicleFpActive();
+        if (g_halo3SeatAuthorsSteering.load(std::memory_order_acquire) != 0 &&
+            Halo3VehicleFpActive())
+            return true;
+#if HALOMCCVR_EXPERIMENTAL_ODST_BRINGUP
+        return OdstSeatAuthorsSteeringNow();
+#else
+        return false;
+#endif
     }
 
     const char* Halo3VehicleIdName(uint32_t id)
@@ -9434,6 +9485,118 @@ namespace
         return true;
     }
 
+    // O3: the follow gate for the shared reader. ODST answers only when its
+    // own transaction is armed and fresh, so a Halo 3 sample can never pitch
+    // an ODST camera or the reverse.
+    bool OdstFollowContextValid(uint32_t& outGeneration)
+    {
+        if (!OdstVehicleFpActive())
+            return false;
+        const uint32_t generation =
+            g_odstRuntimeGeneration.load(std::memory_order_acquire);
+        if (!generation)
+            return false;
+        outGeneration = generation;
+        return true;
+    }
+
+    // Camera-thread follow state, mirroring Halo 3's.
+    Halo3SeatYaw g_odstSeatYaw;
+    Halo3SeatPositionKey g_odstYawSeat;
+    std::atomic<uint32_t> g_odstSeatAuthorsSteering{0};
+
+    // O3: integrate the rendered hull's yaw into the VR heading reference and
+    // publish its roll-free pitch. Runs where Halo 3 runs its equivalent: on
+    // the camera thread, before the head look that consumes it.
+    void OdstApplySeatYawFollow()
+    {
+        OdstSeatSnapshot seat{};
+        const bool fpActive = OdstVehicleFpActive();
+        const bool haveSeat =
+            fpActive && OdstReadSeatSnapshot(seat) && seat.anchorValid;
+        const bool active = haveSeat &&
+            OdstSeatFollowsHull(seat.identity, seat.seatIndex, seat.mounted);
+        const bool followEnabled = g_config.vehicle_view_follow;
+        const bool pitchEligible = active &&
+            OdstSeatFollowsPitch(seat.identity, seat.seatIndex, seat.mounted);
+        const uint32_t generation =
+            g_odstRuntimeGeneration.load(std::memory_order_acquire);
+
+        if (!fpActive || !followEnabled || !active)
+        {
+            // OFF, on foot, or a seat that must not follow (the Shade, whose
+            // own body is what its aim turns) reaches the established
+            // world-locked path untouched.
+            if (g_odstSeatYaw.armed)
+                g_odstSeatYaw = {};
+            g_odstYawSeat = {};
+            g_odstSeatAuthorsSteering.store(0, std::memory_order_release);
+            Halo3ClearRollStableFollow();
+            return;
+        }
+        if (!g_odstYawSeat.Matches(generation, seat.parentHandle,
+                                   seat.seatIndex,
+                                   static_cast<uint32_t>(seat.identity),
+                                   seat.mounted))
+        {
+            // A new seat starts a new integration; never carry a heading
+            // across vehicles.
+            Halo3ClearRollStableFollow();
+            g_odstYawSeat.Set(generation, seat.parentHandle, seat.seatIndex,
+                              static_cast<uint32_t>(seat.identity),
+                              seat.mounted);
+            g_odstSeatYaw = {};
+        }
+        // Fed the RAW rendered hull forward, never a smoothed or predicted
+        // one: the follow INTEGRATES, so any cleverness here accumulates.
+        const float delta = Halo3SeatYawDelta(g_odstSeatYaw, seat.rawFwd, true);
+        if (delta != 0.0f)
+            g_gameYawRef = Halo3WrapPi(g_gameYawRef + delta);
+
+        float hullPitch = 0.0f;
+        if (pitchEligible && g_odstSeatYaw.armed &&
+            Halo3RollStablePitchFromForward(seat.rawFwd, hullPitch))
+        {
+            Halo3PublishRollStableFollowFor(generation, true,
+                                            g_odstSeatYaw.lastYaw, hullPitch);
+        }
+        else
+        {
+            // Aircraft keep the proven yaw-only path: their flight crosses
+            // vertical, where forward alone cannot pick a roll-free up.
+            Halo3ClearRollStableFollow();
+        }
+
+        const bool authors = OdstSeatAuthorsSteering(
+            seat.identity, seat.seatIndex, seat.mounted, followEnabled);
+        if (!authors)
+        {
+            g_halo3SteerAxis.store(0.0f, std::memory_order_relaxed);
+            g_halo3WheelDriving.store(0, std::memory_order_relaxed);
+        }
+        g_odstSeatAuthorsSteering.store(authors ? 1u : 0u,
+                                        std::memory_order_release);
+    }
+
+    // Same live re-check Halo 3 performs: the turn and aim authors are shared
+    // across titles, so a latched flag alone must never suppress another
+    // title's stick.
+    bool OdstSeatAuthorsSteeringNow()
+    {
+        return g_odstSeatAuthorsSteering.load(std::memory_order_acquire) != 0 &&
+            OdstVehicleFpActive();
+    }
+
+    bool OdstSeatUsesWheel()
+    {
+        if (!OdstSeatAuthorsSteeringNow())
+            return false;
+        OdstSeatSnapshot seat;
+        if (!OdstReadSeatSnapshot(seat))
+            return false;
+        return OdstVehicleUsesWheel(seat.identity);
+    }
+
     // The pre-bounce placement: rigid in the vehicle's frame, so the arms and
     // gun ride the seat rather than the occupant's animated head.
     bool OdstComputeSeatBodyAnchor(float out[3])
@@ -9953,13 +10116,38 @@ namespace
         const float gameRoll = look.roll;
         const float cosPitch = cosf(gamePitch), sinPitch = sinf(gamePitch);
         const float cosYaw = cosf(gameYaw), sinYaw = sinf(gameYaw);
-        forward[0] = cosPitch * cosYaw;
-        forward[1] = cosPitch * sinYaw;
-        forward[2] = sinPitch;
-        const float cosRoll = cosf(gameRoll), sinRoll = sinf(gameRoll);
-        up[0] = (-sinPitch * cosYaw) * cosRoll + sinYaw * sinRoll;
-        up[1] = (-sinPitch * sinYaw) * cosRoll - cosYaw * sinRoll;
-        up[2] = cosPitch * cosRoll;
+        // O3 optional vehicle-frame view. ON composes the same roll-free
+        // hull frame Halo 3 uses -- yaw and pitch followed, roll deliberately
+        // never -- so suspension bank or a side impact cannot tip the
+        // player's horizon. OFF, stale, or non-finite falls straight through
+        // to the established world-locked mapping below.
+        float hullYaw = 0.0f, hullPitch = 0.0f;
+        bool rotationFollows = false;
+        if (Halo3ReadRollStableFollow(hullYaw, hullPitch))
+        {
+            const float trackedYawDelta =
+                g_yawSign.load(std::memory_order_relaxed) *
+                Halo3WrapPi(headYaw - g_headYawRef);
+            float followBasis[9];
+            if (Halo3ComposeRollStableFollowBasis(
+                    hullYaw, hullPitch, g_gameYawRef, trackedYawDelta,
+                    gamePitch, gameRoll, followBasis))
+            {
+                memcpy(forward, followBasis, sizeof(float) * 3);
+                memcpy(up, followBasis + 6, sizeof(float) * 3);
+                rotationFollows = true;
+            }
+        }
+        if (!rotationFollows)
+        {
+            forward[0] = cosPitch * cosYaw;
+            forward[1] = cosPitch * sinYaw;
+            forward[2] = sinPitch;
+            const float cosRoll = cosf(gameRoll), sinRoll = sinf(gameRoll);
+            up[0] = (-sinPitch * cosYaw) * cosRoll + sinYaw * sinRoll;
+            up[1] = (-sinPitch * sinYaw) * cosRoll - cosYaw * sinRoll;
+            up[2] = cosPitch * cosRoll;
+        }
 
         // O2 seat placement, in the same slot Halo 3 uses: after the rotation
         // is written and BEFORE the room-scale lean is added, so leaning still
@@ -9989,13 +10177,42 @@ namespace
             const float rightMove = dx * (-horizontalForwardZ) +
                 dz * horizontalForwardX;
             const float scale = kOdstWorldUnitsPerMeter;
-            position[0] += Clamp(
-                (cosYaw * forwardMove + sinYaw * rightMove) * scale,
-                -1.5f, 1.5f);
-            position[1] += Clamp(
-                (sinYaw * forwardMove - cosYaw * rightMove) * scale,
-                -1.5f, 1.5f);
-            position[2] += Clamp(dy * scale, -1.5f, 1.5f);
+            // O3: while the view follows the hull, leaning must move through
+            // the SAME pitched frame or a lean would slide along the world
+            // floor instead of the vehicle's. Tracked pitch and roll are
+            // deliberately zero here: the orientation above already applied
+            // them, and applying them twice double-pitches the lean.
+            bool leanFollowed = false;
+            if (rotationFollows)
+            {
+                const float trackedYawDelta =
+                    g_yawSign.load(std::memory_order_relaxed) *
+                    Halo3WrapPi(headYaw - g_headYawRef);
+                float positionBasis[9];
+                float positionWorld[3];
+                const float roomLocal[3] = {forwardMove, -rightMove, dy};
+                if (Halo3ComposeRollStableFollowBasis(
+                        hullYaw, hullPitch, g_gameYawRef, trackedYawDelta,
+                        0.0f, 0.0f, positionBasis) &&
+                    Halo3TransformBasisVector(positionBasis, roomLocal,
+                                              positionWorld))
+                {
+                    position[0] += Clamp(positionWorld[0] * scale, -1.5f, 1.5f);
+                    position[1] += Clamp(positionWorld[1] * scale, -1.5f, 1.5f);
+                    position[2] += Clamp(positionWorld[2] * scale, -1.5f, 1.5f);
+                    leanFollowed = true;
+                }
+            }
+            if (!leanFollowed)
+            {
+                position[0] += Clamp(
+                    (cosYaw * forwardMove + sinYaw * rightMove) * scale,
+                    -1.5f, 1.5f);
+                position[1] += Clamp(
+                    (sinYaw * forwardMove - cosYaw * rightMove) * scale,
+                    -1.5f, 1.5f);
+                position[2] += Clamp(dy * scale, -1.5f, 1.5f);
+            }
         }
     }
 
@@ -10467,6 +10684,9 @@ namespace
             // where Halo 3 samples in its own camera copy. OdstApplyHeadLook
             // below consumes the anchor it publishes.
             OdstSampleVehicleState(GetTickCount64());
+            // O3: integrate the hull heading and publish its roll-free pitch
+            // before the head look and the VR turn read either.
+            OdstApplySeatYawFollow();
             ApplyOdstMotionBlurSetting();
             // Exact Halo 3 control ownership: publish the source camera's
             // pre-head-look forward for every active camera copy. Vehicles

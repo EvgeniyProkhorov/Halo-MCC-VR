@@ -5447,6 +5447,52 @@ int main()
                 "the seats Halo 3's table cannot express, and stays "
                 "independent of the Halo 3 bank");
 
+            // O3 follow eligibility. The Shade is the ODST-specific rule: it
+            // has a seat point, but its own body is what its aim turns, so
+            // following it would cancel the closed loop's feedback exactly the
+            // way a walk-up turret would.
+            const bool shadeNeverFollows =
+                OdstFindSeatPoint(OdstVehicleId::Shade, 0, false) != nullptr &&
+                !OdstSeatFollowsHull(OdstVehicleId::Shade, 0, false) &&
+                !OdstSeatFollowsPitch(OdstVehicleId::Shade, 0, false) &&
+                !OdstSeatIsDriver(OdstVehicleId::Shade, 0, false) &&
+                !OdstSeatAuthorsSteering(OdstVehicleId::Shade, 0, false, true);
+            // Aircraft follow yaw but never pitch; ground vehicles do both.
+            const bool aircraftStayYawOnly =
+                OdstSeatFollowsHull(OdstVehicleId::Banshee, 0, false) &&
+                !OdstSeatFollowsPitch(OdstVehicleId::Banshee, 0, false) &&
+                OdstSeatFollowsHull(OdstVehicleId::Hornet, 0, false) &&
+                !OdstSeatFollowsPitch(OdstVehicleId::Hornet, 0, false) &&
+                OdstSeatFollowsPitch(OdstVehicleId::Warthog, 0, false) &&
+                OdstSeatFollowsPitch(OdstVehicleId::Scorpion, 0, false);
+            // The Scorpion and Wraith aim a turret independently of the hull,
+            // so nothing may author their steering; aircraft are look-steered
+            // but take the flight stick, not a wheel.
+            const bool steeringFamiliesHold =
+                !OdstVehicleIsLookSteered(OdstVehicleId::Scorpion) &&
+                !OdstVehicleIsLookSteered(OdstVehicleId::Wraith) &&
+                OdstVehicleIsLookSteered(OdstVehicleId::Warthog) &&
+                OdstVehicleUsesWheel(OdstVehicleId::Warthog) &&
+                !OdstVehicleUsesWheel(OdstVehicleId::Banshee) &&
+                !OdstVehicleUsesWheel(OdstVehicleId::Hornet) &&
+                // The follow toggle is the master switch for steering author.
+                OdstSeatAuthorsSteering(OdstVehicleId::Warthog, 0, false,
+                                        true) &&
+                !OdstSeatAuthorsSteering(OdstVehicleId::Warthog, 0, false,
+                                         false) &&
+                // A passenger never authors steering, only the driver does.
+                !OdstSeatAuthorsSteering(OdstVehicleId::Warthog, 1, false,
+                                         true) &&
+                // Walk-up turrets are excluded everywhere.
+                !OdstSeatFollowsHull(OdstVehicleId::StationaryTurret, 0,
+                                     false);
+
+            Check(shadeNeverFollows && aircraftStayYawOnly &&
+                  steeringFamiliesHold,
+                "ODST view-follow keeps the Shade and walk-up turrets out, "
+                "holds aircraft to yaw-only, and authors steering for exactly "
+                "the look-steered drivers");
+
             Check(sharedVehiclesResolve && shadeSplitsFromTurret &&
                   offsetsAreTitleSpecific && coherenceGateHolds &&
                   seatControlHolds && tableGateHolds,
