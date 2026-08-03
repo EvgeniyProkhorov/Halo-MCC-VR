@@ -17,6 +17,7 @@ dist/
 .vs/
 .vscode/
 *.user
+*.code-workspace
 
 # CMake
 CMakeCache.txt
@@ -38,3 +39,7 @@ reference/
 # Python bytecode from the read-only Reach probe tools
 tools/reach-probes/__pycache__/
 /Testing/
+
+# H3EK/H3ODSTEK tool.exe writes these into whatever directory it is run from
+gamestate.txt
+reports/
