@@ -447,6 +447,8 @@ void ConfigLoad(const wchar_t* path)
             g_config.vehicle_bounce = (float)atof(val);
         else if (!strcmp(key, "vehicle_recenter_on_seat"))
             g_config.vehicle_recenter_on_seat = atoi(val) != 0;
+        else if (!strcmp(key, "vehicle_steady_exposure"))
+            g_config.vehicle_steady_exposure = atoi(val) != 0;
         else if (!strcmp(key, "vehicle_motion"))
             g_config.vehicle_motion = atoi(val) != 0;
         else if (!strcmp(key, "vehicle_wheel_max_deg"))
@@ -974,6 +976,17 @@ void ConfigSave()
     fprintf(f, "# (default %d)\n", d.vehicle_recenter_on_seat ? 1 : 0);
     fprintf(f, "vehicle_recenter_on_seat = %d\n\n",
             g_config.vehicle_recenter_on_seat ? 1 : 0);
+    fprintf(f, "# Hold the game's automatic exposure steady while you are in a\n");
+    fprintf(f, "# first-person seat. Looking down at a vehicle's dashboard\n");
+    fprintf(f, "# fills the game's brightness measurement with a big dark\n");
+    fprintf(f, "# surface, so its auto-exposure ramps the whole scene - flat\n");
+    fprintf(f, "# play never shows this because nobody looks at the dash. Uses\n");
+    fprintf(f, "# the game's own exposure lock and only inside the seat, so\n");
+    fprintf(f, "# normal play still adapts and cutscenes still light\n");
+    fprintf(f, "# themselves. ODST for now. (default %d)\n",
+            d.vehicle_steady_exposure ? 1 : 0);
+    fprintf(f, "vehicle_steady_exposure = %d\n\n",
+            g_config.vehicle_steady_exposure ? 1 : 0);
     fprintf(f, "# Motion steering. In a Warthog, Mongoose, Ghost, Prowler or\n");
     fprintf(f, "# Chopper, DOUBLE-CLICK both grips to take hold of an invisible\n");
     fprintf(f, "# steering wheel: hold your hands as if on a wheel and tilt it,\n");

@@ -915,6 +915,12 @@ namespace
             "delayed at any setting.");
         changed |= ImGui::Checkbox("Re-centre when I get in and out",
                                    &g_config.vehicle_recenter_on_seat);
+        changed |= ImGui::Checkbox("Steady brightness in the seat (ODST)",
+                                   &g_config.vehicle_steady_exposure);
+        ImGui::TextDisabled(
+            "Looking down at the dashboard fills the game's brightness\n"
+            "meter with a big dark surface, so its auto-exposure ramps the\n"
+            "whole scene. This holds it steady while you are seated.");
         ImGui::TextDisabled(
             "ON (default) re-centres your play space once you have settled\n"
             "into a seat and again when you get out, so a step you took on\n"

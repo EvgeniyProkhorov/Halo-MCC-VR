@@ -158,6 +158,12 @@ const char* Game_Halo3SeatTrimName(int slot);
 // player seats and it adds the Shade). Menu thread only, same as above.
 int Game_VehicleSeatTrimSlotEx(int* outIsOdst);
 const char* Game_VehicleSeatTrimName(int slot, int isOdst);
+// True while a vehicle seat's own angular limit is holding the weapon short of
+// where the hand points (a warthog rider seat authors yaw +/-90, pitch +/-45
+// relative to the hull). `outDir` then carries the engine's ACTUAL aim as a
+// VR-space unit vector so the floating reticle can sit on the gun instead of
+// promising a shot the engine will never take.
+bool Game_GetClampedAimDirection(float outDir[3]);
 // True while an armed tracked camera consumes the OpenXR turn action. The
 // XInput hook must then suppress stock RX/RY so the game cannot create a second
 // camera motion underneath the HMD-owned view.

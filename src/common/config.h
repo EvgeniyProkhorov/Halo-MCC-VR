@@ -326,6 +326,15 @@ struct Config
     // boundary as a standing offset. Position only: it never snaps your facing.
     bool vehicle_recenter_on_seat = true;
 
+    // Hold the engine's automatic exposure steady while a first-person seat
+    // owns the view. Looking down at a vehicle's dashboard fills the game's
+    // luminance measurement with a big dark surface, so its eye adaptation
+    // ramps the whole scene's brightness -- something flat play never provokes
+    // because nobody looks at the dash. Uses the engine's own exposure lock,
+    // engaged only in the seat, so ordinary play keeps its adaptation and
+    // authored cinematic exposure changes still work. ODST for now.
+    bool vehicle_steady_exposure = true;
+
     // Motion steering in look-steered ground driver seats: grab an invisible
     // wheel with both grips and turn it. 0 = the right stick steers.
     bool vehicle_motion = true;

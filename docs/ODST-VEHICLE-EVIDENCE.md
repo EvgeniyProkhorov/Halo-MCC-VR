@@ -410,6 +410,101 @@ with follow OFF every control stays exactly as it shipped. The wheel and the
 so a look-steered ODST driver takes the wheel and an ODST aircraft correctly
 keeps the plain stick.
 
+## O4 - passenger aim truth and steady seat exposure (2026-08-03)
+
+### Passenger shots not following the crosshair - ROOT CAUSE FOUND
+
+Not a placement or parallax problem. **The seat itself bounds the weapon.**
+The warthog rider seat authors, in its own tag:
+
+| field | value |
+| --- | --- |
+| `yaw minimum` / `yaw maximum` | `-90` / `+90` degrees |
+| `pitch range` | `-45` / `+45` degrees |
+
+Those limits are relative to the HULL. With a world-locked view the allowed
+cone rotates with the vehicle while the VR crosshair stays fixed in the world,
+so as soon as the hand points outside the cone the engine simply refuses to
+aim there. The closed loop then holds full stick deflection indefinitely while
+the reticle keeps promising a shot that lands somewhere else - exactly the
+reported "shots dont follow the crosshair at all times", and exactly why the
+DRIVER seat is unaffected (its aim is steering, with no such clamp).
+
+**Fix:** nothing can make the gun exceed its seat's limit, so the crosshair is
+made honest instead. When the aim error stalls past normal tracking lag
+(>~7 degrees, not shrinking, for 250 ms) while a first-person seat owns the
+view, the reticle is drawn along the engine's REAL aim rather than the hand
+ray. Shots then follow the crosshair by construction. The reticle is
+documented as "the truth"; while clamped, the hand ray is the one thing that
+is not. Gated to vehicle seats, so on-foot aiming is untouched.
+
+### Dashboard auto-exposure - ROOT CAUSE FOUND
+
+Looking down at a vehicle dash swung the whole scene's brightness. That is
+ODST's eye-adaptation integrator (`halo3odst.dll+0x2B1E90-0x2B2226`) reacting
+to a large dark surface filling its luminance measurement - something flat
+play never provokes because nobody looks at the dash.
+
+The integrator's blend store at `+0x2B2201` is guarded at `+0x2B21BD` by a
+static byte; nonzero skips the write and freezes adaptation. That byte is the
+engine's own **`render_exposure_lock`**: named in HREK's
+`bin/debug_menu_init.txt`, present in H3ODSTEK's unstripped debug-var table,
+and matched to retail through the per-view save/restore of the render-debug
+block next to the `"player_view %d"` string. Retail default 0.
+
+MCC ships the exposure debug-var records with NULL value pointers, so the
+storage is decoded from the instruction instead - AOB unique (1 hit in each
+title): `40 38 2D ?? ?? ?? ?? 0F 57 C9 0F 28 C4 F3 0F 5C C6 F3 0F 5A C8`,
+lock byte = `matchRva + 7 + disp32@match+3` (ODST `+0x8F0D70`, Halo 3
+`+0x8AD070`).
+
+**Fix:** assert that byte while a first-person seat owns the view, and assert
+the known stock 0 otherwise - asserted, never restored from a captured value,
+because it is a module global that outlives the camera generation and the
+engine's own per-view save/restore copies the block around it. Engaging only
+once seated means the held level is one the engine already adapted to, not a
+load-time initial value. Scripted/cinematic exposure deliberately bypasses
+this lock in the engine, so cutscenes still light themselves. New config key
+and F1 toggle `vehicle_steady_exposure` (default on).
+
+Rejected as more invasive or unsafe: the adaptation RATE is a shared `.rdata`
+constant (patching it is unattributable); exposure min/max arrive as tag-fed
+stack arguments (would need a tag patch or an argument hook); the
+`render_exposure_stops` float is a possible companion trim but was not needed.
+Nothing here touches `halo3odst.dll+0x2A6308`, the function whose earlier
+scaling deleted the native HUD.
+
+## SUPERSEDED: passenger-seat shots do not always follow the crosshair
+
+User report 2026-08-03, on **O2** (`40bd330`) with `vehicle_view_follow = 0`
+and `crosshair_distance_m = 29.0`: the passenger seat placement "looks great"
+but "shots dont follow the crosshair at all times". Two candidate mechanisms,
+distinguishable by one test; do not fix before the test says which.
+
+**1. Hull rotation versus a world-locked view (fits "not at all times").**
+Riding as a passenger, the engine rotates the occupant's aim WITH the vehicle.
+With the view world-locked, the VR crosshair stays fixed in the world while
+the game's aim is dragged by the hull, so the closed-loop aim author is
+permanently cancelling the vehicle's yaw rate instead of just tracking the
+player's hand. Its output is a stick deflection clamped to +/-1 against the
+game's own maximum look rate, so a hard corner saturates it and the aim lags
+behind the crosshair; driving straight lets the error settle and shots land
+true. That is exactly the intermittent pattern reported, and it is precisely
+what the C25 follow was built to remove: with follow ON the aim reference
+rotates with the hull, so the loop only has to track the hand.
+**O3 already ships this for ODST** - the test is simply to enable the toggle.
+
+**2. Seat-anchor parallax (would NOT be intermittent).** The VR camera now
+sits at the authored seat point while Halo spawns first-person bullets from
+its own camera ([[bullet-origin-runtime-only]]). Any offset between them makes
+the aim ray and the bullet ray converge only at `crosshair_distance_m`, so
+shots miss by an amount that varies with target RANGE, including while parked.
+
+**Discriminating test:** park the vehicle and shoot a near and a far target
+from the passenger seat. Accurate while stationary = mechanism 1 (enable
+follow). Off while stationary, and off by a different amount near versus far =
+mechanism 2 (tune `crosshair_distance_m`, currently 29.0).
+
 ### O-E3 status
 
 Offline evidence is COMPLETE and sufficient to author candidate O1 with

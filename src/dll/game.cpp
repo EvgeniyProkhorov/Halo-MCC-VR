@@ -5605,6 +5605,10 @@ namespace
         static_cast<uint8_t>(OdstVehicleBindingState::NotInstalled)};
     std::atomic<uint64_t> g_odstVehicleProbeMs{0};
     std::atomic<uint32_t> g_odstVehicleProbeFaults{0};
+    // ODST's own render_exposure_lock byte. Engaged only while a first-person
+    // seat owns the view, so ordinary play keeps its adaptation.
+    uint8_t* g_odstExposureLock = nullptr;
+    std::atomic<uint32_t> g_odstExposureLockState{0};
 #endif
 
     struct Halo3ObserverCapture
@@ -7319,6 +7323,12 @@ namespace
     // input thread's wheel update, read by the aim-stick author.
     std::atomic<float> g_halo3SteerAxis{0.0f};
     std::atomic<uint32_t> g_halo3WheelDriving{0};
+    // The engine's real aim, in VR space, published only while a seat's own
+    // angular limit is holding the gun short of where the hand points. The
+    // reticle consumes it so the crosshair never promises an impossible shot.
+    std::atomic<uint32_t> g_aimClampedValid{0};
+    std::atomic<float> g_aimClampedVrYaw{0.0f};
+    std::atomic<float> g_aimClampedVrPitch{0.0f};
     std::atomic<uint32_t> g_halo3WheelSwallowsGrips{0};
 
     void Halo3ApplySeatYawFollow()
@@ -9485,6 +9495,45 @@ namespace
         return true;
     }
 
+    // Hold the engine's exposure steady while a seat owns the view. Looking
+    // down at a dashboard fills the luminance measurement with a large dark
+    // surface, so the eye-adaptation integrator ramps the whole scene's
+    // exposure -- something flat play never provokes because nobody looks at
+    // the dash. This is the engine's own lock, so authored/scripted cinematic
+    // exposure changes deliberately bypass it and still work.
+    //
+    // ASSERTED, never restored from a captured value: this is a module global
+    // that outlives our camera generation, and the engine's per-view save and
+    // restore copies the whole render-debug block around it. The stock value
+    // is the known constant 0, so leaving a seat writes that constant back
+    // rather than anything we remembered.
+    void OdstApplyExposureLock(bool engage)
+    {
+        if (!g_odstExposureLock)
+            return;
+        const uint8_t want = engage ? 1u : 0u;
+        __try
+        {
+            if (*g_odstExposureLock != want)
+                *g_odstExposureLock = want;
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            g_odstExposureLock = nullptr;
+            LOG("ODST vehicle exposure: FAULTED writing the adaptation lock; "
+                "exposure control abandoned, everything else unaffected");
+            return;
+        }
+        const uint32_t state = engage ? 1u : 0u;
+        if (g_odstExposureLockState.exchange(state, std::memory_order_relaxed)
+            != state)
+        {
+            LOG("ODST vehicle exposure: adaptation %s",
+                engage ? "HELD steady for the seat view"
+                       : "returned to the engine's own control");
+        }
+    }
+
     // O3: the follow gate for the shared reader. ODST answers only when its
     // own transaction is armed and fresh, so a Halo 3 sample can never pitch
     // an ODST camera or the reverse.
@@ -10687,6 +10736,11 @@ namespace
             // O3: integrate the hull heading and publish its roll-free pitch
             // before the head look and the VR turn read either.
             OdstApplySeatYawFollow();
+            // Engaged only once a seat actually owns the view, so the frozen
+            // level is one the engine already adapted to rather than a
+            // load-time initial value.
+            OdstApplyExposureLock(g_config.vehicle_steady_exposure &&
+                                  OdstVehicleFpActive());
             ApplyOdstMotionBlurSetting();
             // Exact Halo 3 control ownership: publish the source camera's
             // pre-head-look forward for every active camera copy. Vehicles
@@ -12116,6 +12170,16 @@ namespace
         "48 8B C4 48 89 58 08 48 89 68 10 48 89 70 18 "
         "57 41 54 41 55 41 56 41 57 48 83 EC 30 "
         "4C 8B EA 0F 29 70 C8 48 8D 50 20 8B F9 4D 8B F0";
+    // ODST's eye-adaptation integrator tests this byte before it writes the
+    // blended exposure; nonzero freezes adaptation. It is the engine's own
+    // `render_exposure_lock` (named in HREK's debug menu and present in
+    // H3ODSTEK's unstripped debug-var table), and it is read at exactly one
+    // place in the whole module. The debug-var record ships with a NULL value
+    // pointer in retail, so the storage is decoded from this instruction
+    // instead: lock byte = matchRva + 7 + disp32 at match+3.
+    const char* kOdstExposureLockSig =
+        "40 38 2D ?? ?? ?? ?? 0F 57 C9 0F 28 C4 F3 0F 5C C6 F3 0F 5A C8";
+
     const char* kOdstMarkersInternalSig =
         "48 8B C4 48 89 58 08 48 89 68 10 48 89 70 18 "
         "66 44 89 48 20 57 41 54 41 55 41 56 41 57 48 83 EC 70 "
@@ -13869,6 +13933,36 @@ namespace
             (unsigned long long)(instanceAddress - base),
             (unsigned long long)(tagBaseAddress - base),
             (unsigned long long)kOdstEngineTlsIndexRva);
+
+        // Exposure lock: a third independent transaction. Losing it costs only
+        // the steady exposure in a seat.
+        g_odstExposureLock = nullptr;
+        const uintptr_t exposureHit =
+            sig::Find(base, size, kOdstExposureLockSig);
+        const bool exposureUnique = exposureHit && !sig::Find(
+            exposureHit + 1, base + size - exposureHit - 1,
+            kOdstExposureLockSig);
+        if (exposureUnique)
+        {
+            const uintptr_t lockAddress = exposureHit + 7 +
+                *reinterpret_cast<const int32_t*>(exposureHit + 3);
+            if (lockAddress >= base && lockAddress + 1 <= base + size)
+            {
+                g_odstExposureLock = reinterpret_cast<uint8_t*>(lockAddress);
+                LOG("ODST vehicle exposure: render_exposure_lock resolved at "
+                    "+0x%llX (from the adaptation test at +0x%llX); seat views "
+                    "will hold a steady exposure",
+                    (unsigned long long)(lockAddress - base),
+                    (unsigned long long)(exposureHit - base));
+            }
+        }
+        if (!g_odstExposureLock)
+        {
+            LOG("ODST vehicle exposure: adaptation-lock signature "
+                "missing/ambiguous (found=%d unique=%d); the dash will keep "
+                "driving auto-exposure and everything else is unaffected",
+                exposureHit ? 1 : 0, exposureUnique ? 1 : 0);
+        }
 
         // The render-node pair is a second, independent transaction: both
         // patterns also match once in halo3.dll, so they are only meaningful
@@ -25240,6 +25334,57 @@ bool Game_ComputeAimStick(float& outRx, float& outRy)
     const float errYaw = WrapPi(desiredYaw - aimYaw);
     const float errPitch = desiredPitch - aimPitch;
 
+    // A passenger's weapon is bounded to a cone around the VEHICLE, not the
+    // world: the ODST/Halo 3 warthog rider seat authors yaw -90..+90 and pitch
+    // -45..+45 (docs/ODST-VEHICLE-EVIDENCE.md). Point a hand outside that cone
+    // -- easy with a world-locked view once the hull turns -- and the engine
+    // simply refuses to aim there. The closed loop then holds full deflection
+    // forever while the reticle keeps promising a shot that lands somewhere
+    // else, which is the reported "shots don't follow the crosshair".
+    //
+    // Nothing can make the gun exceed the seat's limit, so make the crosshair
+    // honest instead: once the error has stalled well past normal tracking lag,
+    // publish the game's REAL aim so the reticle sits on the gun. The reticle
+    // is documented as the truth; while clamped it is the only thing that is.
+    {
+        static uint64_t stalledSinceMs = 0;
+        static float previousErrorMagnitude = 0.0f;
+        const float errorMagnitude =
+            sqrtf(errYaw * errYaw + errPitch * errPitch);
+        const uint64_t nowMs = GetTickCount64();
+        const bool seated = Halo3VehicleFpActive()
+#if HALOMCCVR_EXPERIMENTAL_ODST_BRINGUP
+            || OdstVehicleFpActive()
+#endif
+            ;
+        // ~7 degrees is far beyond the loop's ordinary lag, and a shrinking
+        // error means it is still converging, so neither counts as clamped.
+        constexpr float kAimStallRadians = 0.12f;
+        constexpr float kAimConvergingRadians = 0.005f;
+        constexpr uint64_t kAimStallMs = 250;
+        if (!seated || errorMagnitude < kAimStallRadians ||
+            errorMagnitude < previousErrorMagnitude - kAimConvergingRadians)
+            stalledSinceMs = 0;
+        else if (!stalledSinceMs)
+            stalledSinceMs = nowMs;
+        previousErrorMagnitude = errorMagnitude;
+        if (stalledSinceMs && nowMs - stalledSinceMs >= kAimStallMs)
+        {
+            // Invert the same mapping the desired angles came through, so the
+            // published direction is the engine's aim expressed in VR space.
+            const float vrYaw = g_headYawRef +
+                g_yawSign.load() * WrapPi(aimYaw - g_gameYawRef);
+            const float vrPitch = g_pitchSign.load() * aimPitch;
+            g_aimClampedVrYaw.store(vrYaw, std::memory_order_relaxed);
+            g_aimClampedVrPitch.store(vrPitch, std::memory_order_relaxed);
+            g_aimClampedValid.store(1, std::memory_order_release);
+        }
+        else
+        {
+            g_aimClampedValid.store(0, std::memory_order_release);
+        }
+    }
+
     // Full deflection at ~4.8 deg of error (was ~10; user: vertical follow too
     // slow). The ceiling is the game's own turn rate — raising in-game look
     // sensitivity raises it further.
@@ -25272,6 +25417,24 @@ bool Game_ComputeAimStick(float& outRx, float& outRy)
         return true;
     }
     outRx = Clamp(-errYaw * k, -1.0f, 1.0f);
+    return true;
+}
+
+// True while a seat's angular limit is holding the weapon short of the hand's
+// direction. `outDir` then carries the engine's ACTUAL aim as a VR-space unit
+// vector, in the same convention the reticle uses (yaw about +Y, -Z forward).
+bool Game_GetClampedAimDirection(float outDir[3])
+{
+    if (!outDir || !g_aimClampedValid.load(std::memory_order_acquire))
+        return false;
+    const float yaw = g_aimClampedVrYaw.load(std::memory_order_relaxed);
+    const float pitch = g_aimClampedVrPitch.load(std::memory_order_relaxed);
+    if (!std::isfinite(yaw) || !std::isfinite(pitch))
+        return false;
+    const float cp = cosf(pitch);
+    outDir[0] = sinf(yaw) * cp;
+    outDir[1] = sinf(pitch);
+    outDir[2] = -cosf(yaw) * cp;
     return true;
 }
 

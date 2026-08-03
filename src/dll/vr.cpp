@@ -8007,7 +8007,20 @@ float4 ps_scope_linearize(VSOut i):SV_Target { return paint(i.uv,true); }
                             g_reticleAimPoseValid = true;
                             const XrVector3f aimRay = Rotate(
                                 g_reticleAimPose.orientation, {0.0f,0.0f,-1.0f});
-                            const float aimDir[3] = {aimRay.x,aimRay.y,aimRay.z};
+                            float aimDir[3] = {aimRay.x,aimRay.y,aimRay.z};
+                            // A vehicle seat bounds the weapon to a cone around
+                            // the hull, so a hand outside it asks for an angle
+                            // the engine will never reach. While that limit is
+                            // holding, show where the gun ACTUALLY points: the
+                            // reticle is meant to be the truth, and this is the
+                            // one case where the hand ray is not.
+                            float clampedAim[3];
+                            if (Game_GetClampedAimDirection(clampedAim))
+                            {
+                                aimDir[0] = clampedAim[0];
+                                aimDir[1] = clampedAim[1];
+                                aimDir[2] = clampedAim[2];
+                            }
                             const float dist = g_config.crosshair_distance_m;
                             const float yaw = atan2f(aimDir[0], -aimDir[2]);
                             const float sp = fminf(fmaxf(aimDir[1], -1.0f), 1.0f);
