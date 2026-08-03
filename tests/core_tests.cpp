@@ -21,6 +21,7 @@
 #include "hud_layout_logic.h"
 #include "input_logic.h"
 #include "odst_bringup_logic.h"
+#include "odst_vehicle_logic.h"
 #include "reach_adapter.h"
 #include "reach_chud_logic.h"
 #include "reach_observer_logic.h"
@@ -5257,6 +5258,139 @@ int main()
                   lookupOk,
                 "Vehicle identity separates same-type cousins and an "
                 "unidentified vehicle resolves to no point at all");
+        }
+
+        // O1: ODST's own identity rules. ODST ships the same authored vehicles
+        // as Halo 3, so the shared discriminators must behave identically —
+        // but the shade is new, and it collides with the walk-up turrets
+        // because neither authors a physics block. Only the seat's own driver
+        // bit plus the engine's in-vehicle answer separate them.
+        {
+            OdstDefinitionFields hog;
+            hog.physicsType = 1; hog.jeepValid = true;
+            hog.engineMoment = kOdstWarthogEngineMoment;
+            OdstDefinitionFields goose;
+            goose.physicsType = 1; goose.jeepValid = true;
+            goose.engineMoment = kOdstMongooseEngineMoment;
+            OdstDefinitionFields ghost;
+            ghost.physicsType = 3; ghost.scoutValid = true;
+            ghost.specificType = 1;
+            OdstDefinitionFields wraith;
+            wraith.physicsType = 3; wraith.scoutValid = true;
+            wraith.specificType = 3;
+            const bool sharedVehiclesResolve =
+                OdstResolveVehicleId(hog) == OdstVehicleId::Warthog &&
+                OdstResolveVehicleId(goose) == OdstVehicleId::Mongoose &&
+                OdstResolveVehicleId(ghost) == OdstVehicleId::Ghost &&
+                OdstResolveVehicleId(wraith) == OdstVehicleId::Wraith;
+
+            // A shade: no physics block authored, seat 0 is a driver seat, and
+            // the engine reports the occupant is in a vehicle.
+            OdstDefinitionFields shade;
+            shade.physicsType = kOdstPhysicsTypeNoneAuthored;
+            shade.seatFlagsValid = true;
+            shade.seat0Flags = kOdstSeatDriverBit | kOdstSeatGunnerBit |
+                kOdstSeatThirdPersonCameraBit;   // the tag's authored 0x1C
+            shade.inVehicle = true;
+            // A walk-up machinegun turret: gunner seat, no driver bit.
+            OdstDefinitionFields turret;
+            turret.physicsType = kOdstPhysicsTypeNoneAuthored;
+            turret.seatFlagsValid = true;
+            turret.seat0Flags = kOdstSeatGunnerBit |
+                kOdstSeatThirdPersonCameraBit;
+            turret.inVehicle = false;
+            // Same shape but the engine disagrees: refuse to guess.
+            OdstDefinitionFields ambiguous = shade;
+            ambiguous.inVehicle = false;
+            // No seat evidence at all: refuse to guess.
+            OdstDefinitionFields blind = shade;
+            blind.seatFlagsValid = false;
+            const bool shadeSplitsFromTurret =
+                OdstResolveVehicleId(shade) == OdstVehicleId::Shade &&
+                OdstResolveVehicleId(turret) ==
+                    OdstVehicleId::StationaryTurret &&
+                OdstResolveVehicleId(ambiguous) == OdstVehicleId::Unknown &&
+                OdstResolveVehicleId(blind) == OdstVehicleId::Unknown &&
+                OdstResolveVehicleId(OdstDefinitionFields{}) ==
+                    OdstVehicleId::Unknown;
+
+            // ODST's engine offsets must never coincide with Halo 3's, or a
+            // mis-bound title would read plausible garbage instead of failing.
+            const bool offsetsAreTitleSpecific =
+                kOdstUnitSeatWordOffset != kHalo3UnitSeatWordOffset &&
+                kOdstTlsObjectTableOffset != kHalo3TlsObjectTableOffset &&
+                // Halo 3's node-bank cluster is 0x136/0x138 (game.cpp, not
+                // exported here); ODST's is the same cluster shifted -0xC.
+                kOdstObjectNodeBankSizeOffset == 0x12A &&
+                kOdstObjectNodeBankRelOffset == 0x12C &&
+                // ...while the parts that genuinely are shared stay shared.
+                kOdstObjectTableEntriesOffset ==
+                    kHalo3ObjectTableEntriesOffset &&
+                kOdstObjectEntryStride == kHalo3ObjectEntryStride &&
+                kOdstNodeMatrixStride == sizeof(Halo3Matrix4x3);
+
+            // The node bank is only trusted when its byte size is a whole
+            // number of matrices AND that count matches the render model.
+            OdstProbeVehicleRecord good{};
+            good.nodeBankByteSize = 16 * 0x34;
+            good.tagNodeCount = 16;
+            OdstProbeVehicleRecord ragged = good;
+            ragged.nodeBankByteSize = 16 * 0x34 + 3;
+            OdstProbeVehicleRecord mismatched = good;
+            mismatched.tagNodeCount = 12;
+            OdstProbeVehicleRecord empty{};
+            const bool coherenceGateHolds =
+                OdstNodeBankIsCoherent(good) &&
+                !OdstNodeBankIsCoherent(ragged) &&
+                !OdstNodeBankIsCoherent(mismatched) &&
+                !OdstNodeBankIsCoherent(empty);
+
+            const bool seatControlHolds =
+                OdstSeatWordMeansUnseated(-1) &&
+                !OdstSeatWordMeansUnseated(0) &&
+                !OdstSeatWordMeansUnseated(3);
+
+            // The object-table walk must refuse anything that is not provably
+            // this build's "object" data array, because a wrong TLS slot would
+            // otherwise hand it an arbitrary pointer to iterate.
+            OdstDataArrayHeaderView table{};
+            table.nameIsObject = true;
+            table.signature = kOdstDataArraySignature;
+            table.maximumCount = kOdstObjectTableCapacity;
+            table.elementSize = kOdstObjectEntryStride;
+            table.firstUnallocated = 400;
+            table.valid = 1;
+            OdstDataArrayHeaderView wrongName = table;
+            wrongName.nameIsObject = false;
+            OdstDataArrayHeaderView wrongMagic = table;
+            wrongMagic.signature = 0x64407441;
+            OdstDataArrayHeaderView wrongStride = table;
+            wrongStride.elementSize = 0x1C;
+            OdstDataArrayHeaderView notConnected = table;
+            notConnected.valid = 0;
+            OdstDataArrayHeaderView overrun = table;
+            overrun.firstUnallocated = kOdstObjectTableCapacity + 1;
+            const bool tableGateHolds =
+                OdstObjectTableIsWalkable(table) &&
+                !OdstObjectTableIsWalkable(wrongName) &&
+                !OdstObjectTableIsWalkable(wrongMagic) &&
+                !OdstObjectTableIsWalkable(wrongStride) &&
+                !OdstObjectTableIsWalkable(notConnected) &&
+                !OdstObjectTableIsWalkable(overrun) &&
+                !OdstObjectTableIsWalkable(OdstDataArrayHeaderView{}) &&
+                // Only a zero identifier marks a free slot; 0xFFFF is a live
+                // identifier in this engine, not a sentinel.
+                !OdstObjectEntryIsLive(0) &&
+                OdstObjectEntryIsLive(0x8000) &&
+                OdstObjectEntryIsLive(0xFFFF);
+
+            Check(sharedVehiclesResolve && shadeSplitsFromTurret &&
+                  offsetsAreTitleSpecific && coherenceGateHolds &&
+                  seatControlHolds && tableGateHolds,
+                "ODST vehicle identity separates the shade from a walk-up "
+                "turret, refuses to guess without seat evidence, keeps every "
+                "engine offset title-specific, and only walks an object table "
+                "that proves its own name and signature");
         }
 
         // C7 frame composition: a mounted turret's parent-relative frame must

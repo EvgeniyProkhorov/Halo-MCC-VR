@@ -32,6 +32,7 @@
 #include "../common/hud_layout_logic.h"
 #include "../common/input_logic.h"
 #include "../common/odst_bringup_logic.h"
+#include "../common/odst_vehicle_logic.h"
 #include "../common/scope_logic.h"
 
 #ifndef HALOMCCVR_EXPERIMENTAL_ODST_BRINGUP
@@ -5533,6 +5534,31 @@ namespace
     std::atomic<uint64_t> g_halo3VehicleProbeKey{~0ull};
     std::atomic<uint32_t> g_halo3VehicleProbeLoggedSeq{0};
 
+#if HALOMCCVR_EXPERIMENTAL_ODST_BRINGUP
+    // O1: ODST's own vehicle binding. Deliberately a separate set of globals
+    // from the Halo 3 ones above — the two titles' offsets differ, and only
+    // one title's camera core is ever installed, so sharing state could only
+    // ever let a stale pointer outlive its module.
+    //
+    // ODST's engine TLS index is decoded from its OWN matched native body.
+    // g_engineTlsIndex is written only by the Halo 3 install and is never
+    // cleared, so it must never be reused here.
+    uint32_t* g_odstEngineTlsIndex = nullptr;
+    std::atomic<uint8_t> g_odstVehicleBinding{
+        static_cast<uint8_t>(OdstVehicleBindingState::NotInstalled)};
+    Halo3PlayerUnitGetterFn g_odstPlayerUnitGetter = nullptr;
+    Halo3UnitInVehicleFn g_odstUnitInVehicle = nullptr;
+    Halo3VehicleTypeFn g_odstVehicleTypeAccessor = nullptr;
+    Halo3InterpolatedNodesFn g_odstInterpolatedNodes = nullptr;
+    Halo3MarkersInternalFn g_odstMarkersInternal = nullptr;
+    void** g_odstTagInstanceTable = nullptr;
+    void** g_odstTagDataBase = nullptr;
+    std::atomic<uint8_t> g_odstNodeBinding{
+        static_cast<uint8_t>(OdstVehicleBindingState::NotInstalled)};
+    std::atomic<uint64_t> g_odstVehicleProbeMs{0};
+    std::atomic<uint32_t> g_odstVehicleProbeFaults{0};
+#endif
+
     struct Halo3ObserverCapture
     {
         std::atomic<uint32_t> seq{0};      // even = stable, odd = mid-write
@@ -9071,6 +9097,456 @@ namespace
         }
     }
 
+    // O1: ODST vehicle evidence probe. Read-only and inert — it publishes
+    // nothing any camera, HUD or input path consumes; its entire product is
+    // log lines that prove (or disprove) the O-E2 offsets against a live game.
+    //
+    // Deliberately cheap and allocation-free: one pass every two seconds, and
+    // it only logs when the observed state actually changes, so an ordinary
+    // session produces a handful of lines rather than a flood.
+    inline constexpr uint64_t kOdstProbeIntervalMs = 2000;
+
+    unsigned char* OdstLoadedTagDefinition(uint32_t datum)
+    {
+        void** instSlot = g_odstTagInstanceTable;
+        void** baseSlot = g_odstTagDataBase;
+        // Both globals live in the zero-init tail of .data: their CONTENTS are
+        // only valid once the engine has loaded a map (O-E2a), so a null here
+        // is normal at menu, not a fault.
+        auto* instances = instSlot
+            ? static_cast<unsigned char*>(*instSlot) : nullptr;
+        auto* tagBase = baseSlot
+            ? static_cast<unsigned char*>(*baseSlot) : nullptr;
+        const uint32_t index = datum & 0xFFFFu;
+        if (!instances || !tagBase || index == 0xFFFFu)
+            return nullptr;
+        const uint32_t address = *reinterpret_cast<const uint32_t*>(
+            instances + static_cast<size_t>(index) * 8 + 4);
+        return address
+            ? tagBase + static_cast<size_t>(address) * 4 : nullptr;
+    }
+
+    // Walks every LIVE object in the engine's object table once per level and
+    // reports the distinct vehicle definitions it finds. The table is the
+    // engine's generic data array; its header carries a name and a 'd@t@'
+    // signature, and this refuses to walk anything that does not match, so a
+    // wrong TLS slot can only produce a loud log line, never a bad read.
+    void OdstVehicleCensus(uint64_t nowMs)
+    {
+        (void)nowMs;
+        if (g_odstNodeBinding.load(std::memory_order_acquire) !=
+            static_cast<uint8_t>(OdstVehicleBindingState::Installed))
+        {
+            // The census reports node banks; without the node binding there is
+            // nothing extra to learn beyond what the seated probe already logs.
+            return;
+        }
+        // Once per runtime generation is enough: definitions do not change
+        // within a level, and this walk is the most expensive thing here.
+        static uint32_t censusGeneration = 0;
+        const uint32_t generation =
+            g_odstRuntimeGeneration.load(std::memory_order_acquire);
+        if (!generation || generation == censusGeneration)
+            return;
+
+        struct Seen
+        {
+            uint32_t definition;
+            int physicsType;
+            int nodeBankSize;
+            int tagNodes;
+            uint32_t seat0Flags;
+            uint32_t seatCount;
+            bool defOk;
+        };
+        Seen seen[16]{};
+        int seenCount = 0;
+        int liveObjects = 0;
+        int vehicles = 0;
+        uint32_t firstUnallocated = 0;
+        bool headerOk = false;
+        bool faulted = false;
+        __try
+        {
+            auto** slots = reinterpret_cast<void**>(__readgsqword(0x58));
+            auto* tls = slots ? reinterpret_cast<unsigned char*>(
+                slots[*g_odstEngineTlsIndex]) : nullptr;
+            unsigned char* table = tls
+                ? *reinterpret_cast<unsigned char**>(
+                      tls + kOdstTlsObjectTableOffset)
+                : nullptr;
+            if (table)
+            {
+                OdstDataArrayHeaderView header{};
+                header.nameIsObject =
+                    memcmp(table + kOdstDataArrayNameOffset, "object", 7) == 0;
+                header.signature = *reinterpret_cast<const uint32_t*>(
+                    table + kOdstDataArraySignatureOffset);
+                header.maximumCount = *reinterpret_cast<const uint32_t*>(
+                    table + kOdstDataArrayMaxCountOffset);
+                header.elementSize = *reinterpret_cast<const uint32_t*>(
+                    table + kOdstDataArrayElementSizeOffset);
+                header.firstUnallocated = *reinterpret_cast<const uint32_t*>(
+                    table + kOdstDataArrayFirstUnallocatedOffset);
+                header.valid = *(table + kOdstDataArrayValidOffset);
+                headerOk = OdstObjectTableIsWalkable(header);
+                firstUnallocated = header.firstUnallocated;
+                unsigned char* entries = headerOk
+                    ? *reinterpret_cast<unsigned char**>(
+                          table + kOdstDataArrayElementsOffset)
+                    : nullptr;
+                if (entries)
+                {
+                    censusGeneration = generation;
+                    for (uint32_t i = 0; i < firstUnallocated; ++i)
+                    {
+                        unsigned char* entry =
+                            entries + static_cast<size_t>(i) *
+                                kOdstObjectEntryStride;
+                        const uint16_t identifier =
+                            *reinterpret_cast<const uint16_t*>(
+                                entry + kOdstObjectEntryIdentifierOffset);
+                        if (!OdstObjectEntryIsLive(identifier))
+                            continue;   // a hole below the high-water mark
+                        ++liveObjects;
+                        if (*(entry + kOdstObjectEntryKindOffset) !=
+                            kOdstObjectKindVehicle)
+                            continue;
+                        unsigned char* data =
+                            *reinterpret_cast<unsigned char**>(
+                                entry + kOdstObjectEntryDataOffset);
+                        if (!data)
+                            continue;
+                        ++vehicles;
+                        const uint16_t definitionIndex =
+                            *reinterpret_cast<const uint16_t*>(data);
+                        bool known = false;
+                        for (int s = 0; s < seenCount; ++s)
+                            known |= seen[s].definition == definitionIndex;
+                        if (known || seenCount >= 16)
+                            continue;
+                        Seen& record = seen[seenCount++];
+                        record.definition = definitionIndex;
+                        record.physicsType =
+                            g_odstVehicleTypeAccessor(definitionIndex);
+                        record.nodeBankSize =
+                            *reinterpret_cast<const int16_t*>(
+                                data + kOdstObjectNodeBankSizeOffset);
+                        record.tagNodes = -1;
+                        unsigned char* definition =
+                            OdstLoadedTagDefinition(definitionIndex);
+                        if (!definition)
+                            continue;
+                        record.seatCount = *reinterpret_cast<const uint32_t*>(
+                            definition + kOdstVehicleSeatsCountOffset);
+                        const uint32_t seatsAddress =
+                            *reinterpret_cast<const uint32_t*>(
+                                definition + kOdstVehicleSeatsDataOffset);
+                        void** baseSlot = g_odstTagDataBase;
+                        auto* tagBase = baseSlot
+                            ? static_cast<unsigned char*>(*baseSlot) : nullptr;
+                        if (tagBase && seatsAddress && record.seatCount &&
+                            record.seatCount <= 64)
+                        {
+                            unsigned char* seats = tagBase +
+                                static_cast<size_t>(seatsAddress) * 4;
+                            record.seat0Flags =
+                                *reinterpret_cast<const uint32_t*>(
+                                    seats + kOdstSeatFlagsOffset);
+                            record.defOk = true;
+                        }
+                        const uint32_t modelDatum =
+                            *reinterpret_cast<const uint32_t*>(
+                                definition + kOdstVehicleModelRefOffset);
+                        unsigned char* model =
+                            OdstLoadedTagDefinition(modelDatum);
+                        const uint32_t renderDatum = model
+                            ? *reinterpret_cast<const uint32_t*>(
+                                  model + kOdstModelRenderRefOffset)
+                            : 0xFFFFFFFFu;
+                        unsigned char* renderModel =
+                            OdstLoadedTagDefinition(renderDatum);
+                        if (renderModel)
+                        {
+                            record.tagNodes =
+                                *reinterpret_cast<const int32_t*>(
+                                    renderModel +
+                                    kOdstRenderModelNodesCountOffset);
+                        }
+                    }
+                }
+            }
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            faulted = true;
+        }
+
+        if (faulted)
+        {
+            g_odstVehicleProbeFaults.fetch_add(1, std::memory_order_relaxed);
+            LOG("ODST vehProbe census: FAULTED walking the object table; the "
+                "table layout under test is wrong for this build");
+            return;
+        }
+        if (!headerOk)
+        {
+            LOG("ODST vehProbe census: the object table failed its own "
+                "name/'d@t@' signature proof, so nothing was walked. The TLS "
+                "slot +0x%X does not reach this build's object table",
+                (unsigned)kOdstTlsObjectTableOffset);
+            return;
+        }
+        LOG("ODST vehProbe census: %d live objects (high water %u), %d "
+            "vehicles, %d distinct definitions",
+            liveObjects, firstUnallocated, vehicles, seenCount);
+        for (int s = 0; s < seenCount; ++s)
+        {
+            const Seen& record = seen[s];
+            OdstProbeVehicleRecord bank{};
+            bank.nodeBankByteSize = record.nodeBankSize;
+            bank.tagNodeCount = record.tagNodes;
+            OdstDefinitionFields fields{};
+            fields.physicsType = record.physicsType;
+            fields.seatFlagsValid = record.defOk;
+            fields.seat0Flags = record.seat0Flags;
+            // A census entry is an unoccupied or AI-crewed object, so the
+            // engine's own in-vehicle answer is not available here; the shade
+            // and turret both land on Unknown until a seated sample confirms.
+            fields.inVehicle = false;
+            LOG("ODST vehProbe census: def=0x%X type=%d seats=%u "
+                "seat0Flags=0x%X (driver=%d gunner=%d invalidForPlayer=%d) "
+                "nodeBank=%d tagNodes=%d coherent=%d provisionalId=%s",
+                (unsigned)record.definition, record.physicsType,
+                record.seatCount, record.seat0Flags,
+                (record.seat0Flags & kOdstSeatDriverBit) ? 1 : 0,
+                (record.seat0Flags & kOdstSeatGunnerBit) ? 1 : 0,
+                (record.seat0Flags & kOdstSeatInvalidForPlayerBit) ? 1 : 0,
+                record.nodeBankSize, record.tagNodes,
+                OdstNodeBankIsCoherent(bank) ? 1 : 0,
+                OdstVehicleIdName(OdstResolveVehicleId(fields)));
+        }
+    }
+
+    void OdstVehicleProbe(uint64_t nowMs)
+    {
+        if (g_odstVehicleBinding.load(std::memory_order_acquire) !=
+                static_cast<uint8_t>(OdstVehicleBindingState::Installed) ||
+            !g_odstEngineTlsIndex)
+            return;
+        const uint64_t last = g_odstVehicleProbeMs.load(
+            std::memory_order_relaxed);
+        if (nowMs - last < kOdstProbeIntervalMs)
+            return;
+        g_odstVehicleProbeMs.store(nowMs, std::memory_order_relaxed);
+
+        // Everything below is observation only. A fault here must never reach
+        // the camera copy that called us, so the whole walk is guarded and the
+        // fault count is logged rather than retried.
+        int unit = -1;
+        int seat = -1;
+        int parentHandle = -1;
+        unsigned parentKind = 0;
+        unsigned native = 0;
+        bool tlsOk = false;
+        bool entriesOk = false;
+        uint32_t defIndex = 0xFFFFFFFFu;
+        int physicsType = -1;
+        int nodeBankSize = -1;
+        int nodeBankRel = 0;
+        int tagNodeCount = -1;
+        uint32_t seat0Flags = 0;
+        uint32_t seatCount = 0;
+        bool defOk = false;
+        bool faulted = false;
+        __try
+        {
+            auto** slots = reinterpret_cast<void**>(__readgsqword(0x58));
+            auto* tls = slots ? reinterpret_cast<unsigned char*>(
+                slots[*g_odstEngineTlsIndex]) : nullptr;
+            unsigned char* table = tls
+                ? *reinterpret_cast<unsigned char**>(
+                      tls + kOdstTlsObjectTableOffset)
+                : nullptr;
+            tlsOk = table != nullptr;
+            unsigned char* entries = table
+                ? *reinterpret_cast<unsigned char**>(
+                      table + kOdstObjectTableEntriesOffset)
+                : nullptr;
+            entriesOk = entries != nullptr;
+
+            unit = g_odstPlayerUnitGetter(0);
+            if (unit != -1 && entries)
+            {
+                unsigned char* data = *reinterpret_cast<unsigned char**>(
+                    entries +
+                    static_cast<size_t>(unit & 0xFFFF) *
+                        kOdstObjectEntryStride +
+                    kOdstObjectEntryDataOffset);
+                if (data)
+                {
+                    // The negative control: on foot this must read exactly -1,
+                    // every pass. A wrong offset would not hold that.
+                    seat = *reinterpret_cast<const int16_t*>(
+                        data + kOdstUnitSeatWordOffset);
+                    native = g_odstUnitInVehicle(unit);
+                    parentHandle = *reinterpret_cast<const int32_t*>(
+                        data + kOdstObjectParentOffset);
+                    if (!OdstSeatWordMeansUnseated(seat) && parentHandle != -1)
+                    {
+                        unsigned char* parentEntry = entries +
+                            static_cast<size_t>(parentHandle & 0xFFFF) *
+                                kOdstObjectEntryStride;
+                        parentKind =
+                            *(parentEntry + kOdstObjectEntryKindOffset);
+                        unsigned char* parentData =
+                            *reinterpret_cast<unsigned char**>(
+                                parentEntry + kOdstObjectEntryDataOffset);
+                        if (parentData && parentKind == kOdstObjectKindVehicle)
+                        {
+                            const uint16_t definitionIndex =
+                                *reinterpret_cast<const uint16_t*>(parentData);
+                            defIndex = definitionIndex;
+                            physicsType =
+                                g_odstVehicleTypeAccessor(definitionIndex);
+                            nodeBankSize = *reinterpret_cast<const int16_t*>(
+                                parentData + kOdstObjectNodeBankSizeOffset);
+                            nodeBankRel = *reinterpret_cast<const int16_t*>(
+                                parentData + kOdstObjectNodeBankRelOffset);
+                            unsigned char* definition =
+                                OdstLoadedTagDefinition(definitionIndex);
+                            if (definition)
+                            {
+                                seatCount =
+                                    *reinterpret_cast<const uint32_t*>(
+                                        definition +
+                                        kOdstVehicleSeatsCountOffset);
+                                const uint32_t seatsAddress =
+                                    *reinterpret_cast<const uint32_t*>(
+                                        definition +
+                                        kOdstVehicleSeatsDataOffset);
+                                void** baseSlot = g_odstTagDataBase;
+                                auto* tagBase = baseSlot
+                                    ? static_cast<unsigned char*>(*baseSlot)
+                                    : nullptr;
+                                if (tagBase && seatsAddress &&
+                                    seatCount && seatCount <= 64)
+                                {
+                                    unsigned char* seats = tagBase +
+                                        static_cast<size_t>(seatsAddress) * 4;
+                                    seat0Flags =
+                                        *reinterpret_cast<const uint32_t*>(
+                                            seats + kOdstSeatFlagsOffset);
+                                    defOk = true;
+                                }
+                                // Render-model node count, for the node-bank
+                                // coherence proof (matrices must equal nodes).
+                                // Datum layout is the same as Halo 3's: the
+                                // tag reference's datum sits at the block
+                                // offset itself.
+                                const uint32_t modelDatum =
+                                    *reinterpret_cast<const uint32_t*>(
+                                        definition + kOdstVehicleModelRefOffset);
+                                unsigned char* model =
+                                    OdstLoadedTagDefinition(modelDatum);
+                                const uint32_t renderDatum = model
+                                    ? *reinterpret_cast<const uint32_t*>(
+                                          model + kOdstModelRenderRefOffset)
+                                    : 0xFFFFFFFFu;
+                                unsigned char* renderModel =
+                                    OdstLoadedTagDefinition(renderDatum);
+                                if (renderModel)
+                                {
+                                    tagNodeCount =
+                                        *reinterpret_cast<const int32_t*>(
+                                            renderModel +
+                                            kOdstRenderModelNodesCountOffset);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            faulted = true;
+        }
+
+        if (faulted)
+        {
+            const uint32_t faults = g_odstVehicleProbeFaults.fetch_add(
+                1, std::memory_order_relaxed) + 1;
+            if (faults <= 3)
+            {
+                LOG("ODST vehProbe: FAULTED while reading engine state "
+                    "(fault %u); the offsets under test are wrong for this "
+                    "build and nothing may be built on them", faults);
+            }
+            return;
+        }
+
+        // The census below is what makes this candidate answerable without the
+        // player entering anything: every AI-crewed and parked vehicle in the
+        // level exercises the same definition, physics-type and node-bank
+        // reads the real sampler will use.
+        OdstVehicleCensus(nowMs);
+
+        // Log only on a change of the observed shape, so a whole mission emits
+        // a readable handful of lines.
+        OdstProbeVehicleRecord record{};
+        record.dataValid = defOk;
+        record.definitionIndex = defIndex;
+        record.physicsType = physicsType;
+        record.nodeBankByteSize = nodeBankSize;
+        record.nodeBankRelOffset = nodeBankRel;
+        record.tagNodeCount = tagNodeCount;
+
+        OdstDefinitionFields fields{};
+        fields.physicsType = physicsType;
+        fields.seatFlagsValid = defOk;
+        fields.seat0Flags = seat0Flags;
+        fields.inVehicle = native != 0;
+        const OdstVehicleId id = OdstResolveVehicleId(fields);
+
+        static uint64_t loggedKey = ~0ull;
+        const uint64_t key =
+            (static_cast<uint64_t>(defIndex & 0xFFFFu) << 48) ^
+            (static_cast<uint64_t>(static_cast<uint16_t>(seat + 1)) << 32) ^
+            (static_cast<uint64_t>(physicsType & 0xFF) << 24) ^
+            (static_cast<uint64_t>(native & 1) << 16) ^
+            (static_cast<uint64_t>(tlsOk ? 1 : 0) << 8) ^
+            static_cast<uint64_t>(entriesOk ? 1 : 0);
+        if (key == loggedKey)
+            return;
+        loggedKey = key;
+
+        if (OdstSeatWordMeansUnseated(seat))
+        {
+            LOG("ODST vehProbe: on foot — tls chain %s, entries %s, "
+                "unit=0x%X seat=%d (expected -1) native=%u. This is the "
+                "negative control for the seat word at unit+0x%X",
+                tlsOk ? "OK" : "NULL", entriesOk ? "OK" : "NULL",
+                (unsigned)unit, seat, native,
+                (unsigned)kOdstUnitSeatWordOffset);
+            return;
+        }
+
+        LOG("ODST vehProbe: seated — seat=%d native=%u parent=0x%X kind=%u "
+            "def=0x%X type=%d id=%s seats=%u seat0Flags=0x%X "
+            "(driver=%d gunner=%d thirdPerson=%d invalidForPlayer=%d) "
+            "nodeBank size=%d rel=%d tagNodes=%d coherent=%d",
+            seat, native, (unsigned)parentHandle, parentKind,
+            (unsigned)defIndex, physicsType, OdstVehicleIdName(id), seatCount,
+            seat0Flags,
+            (seat0Flags & kOdstSeatDriverBit) ? 1 : 0,
+            (seat0Flags & kOdstSeatGunnerBit) ? 1 : 0,
+            (seat0Flags & kOdstSeatThirdPersonCameraBit) ? 1 : 0,
+            (seat0Flags & kOdstSeatInvalidForPlayerBit) ? 1 : 0,
+            nodeBankSize, nodeBankRel, tagNodeCount,
+            OdstNodeBankIsCoherent(record) ? 1 : 0);
+    }
+
     __declspec(noinline) void* __fastcall OdstCamCopyBody(
         void* destination, void* source)
     {
@@ -9242,6 +9718,11 @@ namespace
             {
                 TitleAdapter_PublishHeartbeat(
                     GameTitle::Halo3ODST, runtimeGeneration, cameraNowMs);
+                // O1 evidence only. Runs where Halo 3 samples its vehicle
+                // state, so the ODST offsets are exercised on the same thread
+                // and cadence the real sampler would use — but it publishes
+                // nothing, so this candidate cannot change what is rendered.
+                OdstVehicleProbe(cameraNowMs);
             }
             g_odstCamera.sawValidCamera.store(true, std::memory_order_release);
         }
@@ -10494,6 +10975,47 @@ namespace
     const char* kOdstHudTargetCopySig =
         "48 63 C1 4C 8D 1D ?? ?? ?? ?? 33 C9 4C 63 D2 4C 8D 04 40 "
         "8B C1 49 C1 E0 05 43 F7 04 18 00 04 00 00 74 05 43 8B 44 18 58";
+
+    // ODST vehicle-detection identities (docs/ODST-VEHICLE-EVIDENCE.md O-E2).
+    // Each was derived from the pinned halo3odst.dll and re-derived
+    // independently; each matches exactly once here and ZERO times in
+    // halo3.dll, so a cross-title mismatch cannot silently bind.
+    //
+    // Native unit_in_vehicle (halo3odst.dll+0x3C54CC). The wildcarded disp32
+    // is the engine TLS index; the pinned `41 B8 20` is ODST's object-table
+    // TLS slot and the trailing `62 02` is its unit seat word (+0x262) —
+    // Halo 3's own bytes there are 0x38 and 0x4E 0x02.
+    const char* kOdstUnitInVehicleSig =
+        "48 89 5C 24 08 57 48 83 EC 20 45 32 DB 41 83 C9 FF 41 3B C9 "
+        "0F 84 82 00 00 00 8B 15 ?? ?? ?? ?? 65 48 8B 04 25 58 00 00 00 "
+        "41 B8 20 00 00 00 0F B7 C9 48 8B 04 D0 4A 8B 14 00 48 8D 04 49";
+    // player_mapping_get_unit_by_output_user (+0x109260). The +0xC8 tail is
+    // load-bearing: a byte-identical sibling at +0x109230 returns the +0xB8
+    // player-index array instead of the unit handle.
+    const char* kOdstPlayerUnitGetterSig =
+        "83 C8 FF 3B C8 74 27 8B 15 ?? ?? ?? ?? 65 48 8B 04 25 58 00 00 00 "
+        "41 B8 08 01 00 00 48 63 C9 48 8B 04 D0 4A 8B 04 00 "
+        "8B 84 88 C8 00 00 00 C3";
+    // vehicle_definition_get_type (+0x3DB46C): cx = vehi tag index, returns
+    // the first non-empty physics block 0..9 or 0xB when none is authored.
+    // The two rip-relative globals are decoded from the matched body.
+    const char* kOdstVehicleTypeAccessorSig =
+        "48 8B 05 ?? ?? ?? ?? 0F B7 C9 8B 54 C8 04 85 D2 75 04 33 D2 EB 0B "
+        "48 8B 05 ?? ?? ?? ?? 48 8D 14 90 33 C0 45 33 C0 "
+        "48 81 C2 E0 02 00 00 B9 0B 00 00 00 83 3A 00";
+    // ODST's interpolated node-bank provider (+0x1B3938) and internal marker
+    // resolver (+0x37F514). Same ABIs and body sizes as their Halo 3
+    // homologs; both patterns also match once in halo3.dll, so the ODST
+    // binding additionally requires the module identity the camera core
+    // already pinned before it uses them.
+    const char* kOdstInterpolatedNodesSig =
+        "48 8B C4 48 89 58 08 48 89 68 10 48 89 70 18 "
+        "57 41 54 41 55 41 56 41 57 48 83 EC 30 "
+        "4C 8B EA 0F 29 70 C8 48 8D 50 20 8B F9 4D 8B F0";
+    const char* kOdstMarkersInternalSig =
+        "48 8B C4 48 89 58 08 48 89 68 10 48 89 70 18 "
+        "66 44 89 48 20 57 41 54 41 55 41 56 41 57 48 83 EC 70 "
+        "45 33 F6 8B E9 49 8B F8 44 8B FA 8B D9 45 0F B7 DE";
 
     const CameraRuntimeProfile kOdstCameraProfile = {
         L"halo3odst.dll",
@@ -12128,6 +12650,165 @@ namespace
             cameraMemberOffset);
     }
 
+    // O1: bind ODST's own vehicle-detection identities. Every address is
+    // resolved by a signature unique to halo3odst.dll (and absent from
+    // halo3.dll), and the engine TLS index plus both tag globals are decoded
+    // rip-relatively from the matched bodies, so no absolute address ships.
+    // This binding is READ-ONLY evidence: nothing it resolves changes a camera,
+    // and failure leaves ODST exactly as it behaves today.
+    void ResolveOdstVehicleBinding(uintptr_t base, size_t size)
+    {
+        g_odstVehicleBinding.store(
+            static_cast<uint8_t>(OdstVehicleBindingState::NotInstalled),
+            std::memory_order_release);
+        g_odstNodeBinding.store(
+            static_cast<uint8_t>(OdstVehicleBindingState::NotInstalled),
+            std::memory_order_release);
+        g_odstEngineTlsIndex = nullptr;
+        g_odstPlayerUnitGetter = nullptr;
+        g_odstUnitInVehicle = nullptr;
+        g_odstVehicleTypeAccessor = nullptr;
+        g_odstInterpolatedNodes = nullptr;
+        g_odstMarkersInternal = nullptr;
+        g_odstTagInstanceTable = nullptr;
+        g_odstTagDataBase = nullptr;
+
+        const uintptr_t nativeHit =
+            sig::Find(base, size, kOdstUnitInVehicleSig);
+        const uintptr_t getterHit =
+            sig::Find(base, size, kOdstPlayerUnitGetterSig);
+        const uintptr_t typeHit =
+            sig::Find(base, size, kOdstVehicleTypeAccessorSig);
+        const bool nativeUnique = nativeHit && !sig::Find(
+            nativeHit + 1, base + size - nativeHit - 1,
+            kOdstUnitInVehicleSig);
+        const bool getterUnique = getterHit && !sig::Find(
+            getterHit + 1, base + size - getterHit - 1,
+            kOdstPlayerUnitGetterSig);
+        const bool typeUnique = typeHit && !sig::Find(
+            typeHit + 1, base + size - typeHit - 1,
+            kOdstVehicleTypeAccessorSig);
+        if (!nativeUnique || !getterUnique || !typeUnique)
+        {
+            g_odstVehicleBinding.store(
+                static_cast<uint8_t>(OdstVehicleBindingState::StockFallback),
+                std::memory_order_release);
+            LOG("ODST vehicle evidence: signature resolve failed "
+                "(native=%d/%d getter=%d/%d type=%d/%d found/unique); no "
+                "vehicle evidence is collected and every ODST behavior is "
+                "unchanged",
+                nativeHit ? 1 : 0, nativeUnique ? 1 : 0,
+                getterHit ? 1 : 0, getterUnique ? 1 : 0,
+                typeHit ? 1 : 0, typeUnique ? 1 : 0);
+            return;
+        }
+
+        // The TLS index lives in the matched native body: the `mov edx,[rip+d]`
+        // at +0x1A ends at +0x20 (docs/ODST-VEHICLE-EVIDENCE.md O-E2a). Decode
+        // it here rather than shipping +0xA8FB1C.
+        const uintptr_t tlsInstruction = nativeHit + 0x1A;
+        uint32_t* tlsIndex = reinterpret_cast<uint32_t*>(
+            tlsInstruction + 6 +
+            *reinterpret_cast<const int32_t*>(tlsInstruction + 2));
+        const uintptr_t tlsAddress = reinterpret_cast<uintptr_t>(tlsIndex);
+        // Same self-anchoring the Halo 3 accessor uses: instance table from the
+        // disp32 at body +3, tag data base from the one at +25.
+        void** instanceTable = reinterpret_cast<void**>(
+            typeHit + 7 + *reinterpret_cast<const int32_t*>(typeHit + 3));
+        void** tagBase = reinterpret_cast<void**>(
+            typeHit + 29 + *reinterpret_cast<const int32_t*>(typeHit + 25));
+        const uintptr_t instanceAddress =
+            reinterpret_cast<uintptr_t>(instanceTable);
+        const uintptr_t tagBaseAddress = reinterpret_cast<uintptr_t>(tagBase);
+        if (tlsAddress < base || tlsAddress + sizeof(uint32_t) > base + size ||
+            *tlsIndex >= 256 ||
+            instanceAddress < base ||
+            instanceAddress + sizeof(void*) > base + size ||
+            tagBaseAddress < base ||
+            tagBaseAddress + sizeof(void*) > base + size)
+        {
+            g_odstVehicleBinding.store(
+                static_cast<uint8_t>(OdstVehicleBindingState::StockFallback),
+                std::memory_order_release);
+            LOG("ODST vehicle evidence: decoded globals failed their in-module "
+                "bounds proof (tls=+0x%llX instance=+0x%llX tagBase=+0x%llX); "
+                "no vehicle evidence is collected",
+                (unsigned long long)(tlsAddress - base),
+                (unsigned long long)(instanceAddress - base),
+                (unsigned long long)(tagBaseAddress - base));
+            return;
+        }
+
+        g_odstEngineTlsIndex = tlsIndex;
+        g_odstUnitInVehicle =
+            reinterpret_cast<Halo3UnitInVehicleFn>(nativeHit);
+        g_odstPlayerUnitGetter =
+            reinterpret_cast<Halo3PlayerUnitGetterFn>(getterHit);
+        g_odstVehicleTypeAccessor =
+            reinterpret_cast<Halo3VehicleTypeFn>(typeHit);
+        g_odstTagInstanceTable = instanceTable;
+        g_odstTagDataBase = tagBase;
+        g_odstVehicleBinding.store(
+            static_cast<uint8_t>(OdstVehicleBindingState::Installed),
+            std::memory_order_release);
+        LOG("ODST vehicle evidence: resolved unit_in_vehicle=+0x%llX "
+            "player_unit=+0x%llX type_accessor=+0x%llX "
+            "[unique; expected +0x%llX/+0x%llX/+0x%llX]; decoded tls=+0x%llX "
+            "instanceTable=+0x%llX tagBase=+0x%llX [expected tls +0x%llX]",
+            (unsigned long long)(nativeHit - base),
+            (unsigned long long)(getterHit - base),
+            (unsigned long long)(typeHit - base),
+            (unsigned long long)kOdstUnitInVehicleNativeRva,
+            (unsigned long long)kOdstPlayerUnitGetterRva,
+            (unsigned long long)kOdstVehicleTypeAccessorRva,
+            (unsigned long long)(tlsAddress - base),
+            (unsigned long long)(instanceAddress - base),
+            (unsigned long long)(tagBaseAddress - base),
+            (unsigned long long)kOdstEngineTlsIndexRva);
+
+        // The render-node pair is a second, independent transaction: both
+        // patterns also match once in halo3.dll, so they are only meaningful
+        // because the camera core already pinned this module's identity.
+        // Losing them costs the node/marker evidence, not the binding above.
+        const uintptr_t nodeHit =
+            sig::Find(base, size, kOdstInterpolatedNodesSig);
+        const uintptr_t markerHit =
+            sig::Find(base, size, kOdstMarkersInternalSig);
+        const bool nodeUnique = nodeHit && !sig::Find(
+            nodeHit + 1, base + size - nodeHit - 1,
+            kOdstInterpolatedNodesSig);
+        const bool markerUnique = markerHit && !sig::Find(
+            markerHit + 1, base + size - markerHit - 1,
+            kOdstMarkersInternalSig);
+        if (nodeUnique && markerUnique)
+        {
+            g_odstInterpolatedNodes =
+                reinterpret_cast<Halo3InterpolatedNodesFn>(nodeHit);
+            g_odstMarkersInternal =
+                reinterpret_cast<Halo3MarkersInternalFn>(markerHit);
+            g_odstNodeBinding.store(
+                static_cast<uint8_t>(OdstVehicleBindingState::Installed),
+                std::memory_order_release);
+            LOG("ODST vehicle render nodes: resolved provider=+0x%llX "
+                "markers=+0x%llX [unique; expected +0x%llX/+0x%llX]",
+                (unsigned long long)(nodeHit - base),
+                (unsigned long long)(markerHit - base),
+                (unsigned long long)kOdstInterpolatedNodesRva,
+                (unsigned long long)kOdstMarkersInternalRva);
+        }
+        else
+        {
+            g_odstNodeBinding.store(
+                static_cast<uint8_t>(OdstVehicleBindingState::StockFallback),
+                std::memory_order_release);
+            LOG("ODST vehicle render nodes: signature resolve failed "
+                "(provider=%d/%d markers=%d/%d found/unique); node evidence "
+                "absent, base vehicle evidence unaffected",
+                nodeHit ? 1 : 0, nodeUnique ? 1 : 0,
+                markerHit ? 1 : 0, markerUnique ? 1 : 0);
+        }
+    }
+
     bool ValidateOdstCameraLayout()
     {
         const auto& layout = kOdstCameraProfile.layout;
@@ -12990,6 +13671,9 @@ namespace
         // failure leaves the complete immersive camera core unchanged.
         LocateCinematicState(base, size);
         LocateOdstCinematicUserInputState(base, size);
+        // O1: the ODST vehicle evidence binding. Optional and read-only —
+        // failure logs loudly and leaves every camera behavior untouched.
+        ResolveOdstVehicleBinding(base, size);
 
         struct HookSpec
         {

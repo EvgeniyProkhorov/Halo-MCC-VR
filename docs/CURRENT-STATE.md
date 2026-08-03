@@ -23,6 +23,18 @@ are evidence, not instructions.
 > instead of checked. If a comment or doc says a title cannot do something,
 > verify it against the code before building on it.
 
+## NOTE: Halo 3 vehicle view-follow user-stated working - 2026-08-03
+
+The user stated "view follow works" and directed development (ODST first-person
+vehicles, then Reach) to continue on `feature/halo3-vehicle-view-follow`. The
+last build the user ran is source `1d6dcb6` (contains the C25 pitch-follow and
+wheel-turn candidate; DLL SHA-256 `B5B5CAC1...`, Steam edition,
+VirtualDesktopXR 1.0.10, Quest 3, session 2026-08-02 15:07). No preserved log
+shows a `H3 vehicle pitch follow:` transition and the live config ends with
+`vehicle_view_follow = 0`, so this is recorded as a user endorsement of the
+follow experience, not a component-level C25 acceptance; the baseline pointer
+below is unchanged. Details in `docs/HALO3-VEHICLE-EVIDENCE.md` C25 status.
+
 ## PUBLIC RELEASE: MCC VR Alpha 0.3.1 - 2026-07-30
 
 **The public known-good product is now `MCC_VR_ALPHA_0.3.1`, a hotfixes update

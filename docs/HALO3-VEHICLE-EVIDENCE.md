@@ -1965,4 +1965,23 @@ Unit coverage fixes the hill composition order, invalid-sample fallback, full
 aircraft-family pitch exclusion, snap takeover re-arming, and the four-state
 steering/wheel turn-ownership truth table.
 
-**Status: C25 candidate - NOT HEADSET ACCEPTED.**
+**Status: C25 candidate - user-stated working, not formally accepted.**
+
+2026-08-03: while approving the ODST vehicle plan the user stated "view follow
+works" and directed development to continue on this branch. The last build the
+user ran is source `1d6dcb6d6a15a8d3664cf4a0d77c7fcb6b36b5b7` (contains C25;
+DLL SHA-256 `B5B5CAC121BB934213DB82536CB3580F1A5592C58466B5495227A10ABF22A369`,
+Steam edition, VirtualDesktopXR 1.0.10, Quest 3, session 2026-08-02 15:07).
+Evidence caveat, recorded so this is never mistaken for a component-level
+acceptance: that session's log shows a vehicle entry but no
+`H3 vehicle pitch follow:` transition, no preserved log (live, `.prev`, or any
+`out/deploy-backups` capture) contains one either, and the live config ends
+with `vehicle_view_follow = 0`. The statement therefore confirms the follow
+experience the user has exercised, but no logged run demonstrates the C25
+pitch component specifically. The Microsoft Store edition's live log
+(`N:\XBOX\Halo- The Master Chief Collection\Content\Halo_MCC_VR\halo3xr.log`,
+same `1d6dcb6` build, session 2026-08-02 14:56) and its `.prev` were also
+checked: no pitch-follow transition there either. Treat the C25 pitch-follow
+and wheel-turn behaviors as user-endorsed to build on, and fold their formal
+confirmation into the next headset session that runs with the follow toggle
+on.
