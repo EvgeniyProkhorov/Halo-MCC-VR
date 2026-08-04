@@ -466,9 +466,11 @@ seat-marker fallback because its declared driver_camera marker is absent.
 
 The external and embedded reach_vr_seats.py helper builds 25 VR landmarks,
 steps between seats, disables positional tracking for exact-base inspection,
-and lets the user mark a translated camera as placed. It never moves a camera
-itself. In Blender, run the embedded text, press N in the 3D view, and use the
-Reach Seats panel.
+and exposes the active camera's Forward (+X), Left (+Y), and Up (+Z)
+translation fields directly in the Reach Seats panel. Rotation and scale stay
+locked. Rebuild and Prev/Next never move a camera, and placement acknowledgement
+remains explicit. In Blender, run the embedded text, press N in the 3D view,
+and use the Reach Seats panel.
 
 The source manifest and embedded REACH_SOURCE_EVIDENCE.json use schema 1.
 HREK's DirectX mesh axes map as (x, y, z) to Reach/Blender (x, z, y), with

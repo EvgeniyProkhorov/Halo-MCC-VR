@@ -1,12 +1,12 @@
 # Halo: Reach vehicle-seat cameras -> VR landmarks and seat jumper.
 #
-# Run from Blender's Text Editor. Re-running is safe. The script never moves a
-# camera: it only builds VR landmarks, isolates collections, and reports the
-# selected base point/config key.
+# Run from Blender's Text Editor. Re-running is safe. Rebuild and seat jumping
+# never move a camera; the Reach Seats panel exposes translation-only controls
+# for the active eye point.
 bl_info = {
     "name": "Reach Vehicle Seat Authoring",
     "author": "Halo MCC VR",
-    "version": (1, 0, 0),
+    "version": (1, 1, 0),
     "blender": (4, 3, 0),
     "category": "3D View",
 }
@@ -106,6 +106,10 @@ def goto_index(context, index):
             collection.name for collection in camera.users_collection]
         if collections:
             isolate_collection(collections[0])
+            # Excluded collections can retain a stale matrix_world after a
+            # file load. Refresh now so VR Preview and the readout immediately
+            # see the newly selected camera at its authored location.
+            context.view_layer.update()
         for obj in context.view_layer.objects:
             obj.select_set(False)
         if camera.name in context.view_layer.objects:
@@ -164,7 +168,7 @@ class REACH_OT_mark_placed(bpy.types.Operator):
     bl_idname = "reach.mark_vehicle_seat_placed"
     bl_label = "Mark this seat placed"
     bl_description = (
-        "Clear the needs-user-placement label; the camera is not moved")
+        "Mark this camera ready for export; the seed reference is retained")
     bl_options = {'REGISTER', 'UNDO'}
 
     camera_name: bpy.props.StringProperty(default="")
@@ -175,6 +179,18 @@ class REACH_OT_mark_placed(bpy.types.Operator):
             return {'CANCELLED'}
         camera["reach_needs_user_placement"] = False
         return {'FINISHED'}
+
+
+def draw_camera_translation(layout, camera):
+    """Draw the only transform components the runtime/exporter consumes."""
+    box = layout.box()
+    box.label(text="Eye position (metres)")
+    box.use_property_split = True
+    box.use_property_decorate = False
+    box.prop(camera, "location", index=0, text="Forward (+X)")
+    box.prop(camera, "location", index=1, text="Left (+Y)")
+    box.prop(camera, "location", index=2, text="Up (+Z)")
+    box.label(text="Rotation and scale stay locked")
 
 
 class REACH_PT_vehicle_seats(bpy.types.Panel):
@@ -210,19 +226,11 @@ class REACH_PT_vehicle_seats(bpy.types.Panel):
             scene.vr_landmarks_active, len(scene.vr_landmarks) - 1)
         camera = scene.vr_landmarks[active].base_pose_object
         if camera is not None:
-            position = camera.matrix_world.translation
+            # Cameras are deliberately unparented, so location is the authored
+            # world position even while another collection is excluded.
+            position = camera.location
             vehicle, seat = camera_parts(camera)
-            box = layout.box()
-            box.label(text="Blender base point (metres)")
-            box.label(text="fwd %+.3f  left %+.3f  up %+.3f" % tuple(position))
-            box.label(text="Reach world units")
-            box.label(text="x %+.4f  y %+.4f  z %+.4f" % (
-                position.x / WU_TO_M,
-                position.y / WU_TO_M,
-                position.z / WU_TO_M))
-            box.label(text="Config suffix: %s_%s" % (vehicle, seat))
-            source = camera.get("reach_seed_source", "unknown")
-            box.label(text="Initial HREK seed: %s" % source)
+            draw_camera_translation(layout, camera)
             if camera.get("reach_needs_user_placement", True):
                 warn = layout.box()
                 warn.alert = True
@@ -231,6 +239,15 @@ class REACH_PT_vehicle_seats(bpy.types.Panel):
                 op = warn.operator(
                     "reach.mark_vehicle_seat_placed", icon='CHECKMARK')
                 op.camera_name = camera.name
+            box = layout.box()
+            box.label(text="Reach world units")
+            box.label(text="x %+.4f  y %+.4f  z %+.4f" % (
+                position.x / WU_TO_M,
+                position.y / WU_TO_M,
+                position.z / WU_TO_M))
+            box.label(text="Config suffix: %s_%s" % (vehicle, seat))
+            source = camera.get("reach_seed_source", "unknown")
+            box.label(text="Initial HREK seed: %s" % source)
 
         layout.separator()
         column = layout.column(align=True)

@@ -350,8 +350,9 @@ mesh inverse-transformed around that child. Do not flatten them to carrier
 coordinates.
 
 For 1:1 VR authoring, run embedded reach_vr_seats.py in Blender's Text Editor,
-press N in the 3D View, and open Reach Seats. The helper never moves cameras.
-Mark each adjusted camera placed with the panel, then save the .blend.
+press N in the 3D View, and open Reach Seats. Edit Forward, Left, and Up
+directly in that panel; Rebuild and Prev/Next never move cameras. Mark each
+adjusted camera placed with the panel, then save the .blend.
 
 To export audited deltas from those seed points, run Blender in this directory:
   blender.exe --background --factory-startup reach_vehicle_cameras_v1.blend

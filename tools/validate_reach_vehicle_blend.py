@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate the generated Halo: Reach vehicle-camera Blender authoring kit."""
+"""Validate a generated or in-progress Reach vehicle-camera authoring kit."""
 
 from __future__ import annotations
 
@@ -54,10 +54,16 @@ def main():
     check(extractor is not None, "embedded point extractor is missing", problems)
     check(evidence_text is not None, "embedded source evidence is missing", problems)
     if helper is not None:
-        check("use_positional_tracking = False" in helper.as_string(),
+        helper_source = helper.as_string()
+        check("use_positional_tracking = False" in helper_source,
               "helper does not disable positional tracking", problems)
-        check("reach.mark_vehicle_seat_placed" in helper.as_string(),
+        check("reach.mark_vehicle_seat_placed" in helper_source,
               "helper lacks placement acknowledgement", problems)
+        check('"version": (1, 1, 0)' in helper_source and
+              "def draw_camera_translation" in helper_source and
+              all('"location", index=%d' % axis in helper_source
+                  for axis in range(3)),
+              "helper lacks the inline translation-only controls", problems)
     if evidence_text is None:
         evidence = {"identities": [], "source": {}, "warnings": []}
     else:
@@ -154,16 +160,19 @@ def main():
         if camera is None:
             continue
         check(finite_matrix(camera.matrix_world), "%s matrix is non-finite" % name, problems)
-        check(camera.get("reach_needs_user_placement") is True,
-              "%s initial placement warning was cleared" % name, problems)
+        check(isinstance(
+                  camera.get("reach_needs_user_placement", None), bool),
+              "%s placement acknowledgement is missing or invalid" % name,
+              problems)
         rotation = camera.matrix_world.to_3x3()
         check(abs(rotation.determinant() - 1.0) < 1e-5,
               "%s camera basis is reflected or scaled" % name, problems)
 
     layers = list(bpy.context.view_layer.layer_collection.children)
     enabled = [layer.name for layer in layers if not layer.exclude]
-    check(enabled == expected_collections[:1],
-          "initial enabled collection is not only the first identity", problems)
+    check(len(enabled) == 1 and enabled[0] in expected_collections,
+          "authoring view must isolate exactly one known identity collection",
+          problems)
     check(evidence.get("warnings") == [
         "wraith seat0 camera marker driver_camera absent; seat marker used"],
         "unexpected HREK marker warnings", problems)
