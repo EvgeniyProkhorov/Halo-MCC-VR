@@ -5,9 +5,10 @@ pointer. Detailed pre-cleanup experiments remain available in Git history; they
 are evidence, not instructions.
 
 > **Start here: "PUBLIC RELEASE: MCC VR Alpha 0.3.1 - 2026-07-30" below is the
-> current published state, and "ACCEPTED DEVELOPMENT BASELINE: Reach crosshair
-> survives its own bloom - 2026-08-02" is the current development baseline that
-> the next hotfix/feature update builds on. It descends from the Halo 3
+> current published state, and "DEVELOPMENT BASELINE: ODST first-person
+> vehicles - 2026-08-04" is the current development baseline that the next
+> hotfix/feature update builds on. Read its headset-UNVERIFIED list before
+> relying on anything in it. It descends from the Halo 3
 > animated CHUD crosshair baseline recorded under it, which in turn descends
 > from the Halo 3 first-person vehicle baseline.**
 > Everything dated earlier is history.
@@ -22,6 +23,51 @@ are evidence, not instructions.
 > - were false when read, and each cost hours because they were believed
 > instead of checked. If a comment or doc says a title cannot do something,
 > verify it against the code before building on it.
+
+## DEVELOPMENT BASELINE: ODST first-person vehicles - 2026-08-04
+
+**The development baseline is now source `118b8bde850d17a147e99ecff7f9d9214b6ca380`
+(`halo3xr.dll` SHA-256 `7CB49B543A9D70B3AF2B60847A4618980A5D7E0E24B5A4DC24726FCEBC2B9690`).**
+The user directed this on 2026-08-04: "lets push forward this is our new
+baseline". Installed and hash-verified in both the Steam and Microsoft Store
+`Halo_MCC_VR` folders. Development of Halo: Reach first-person vehicles builds
+on this.
+
+| Identity | Value |
+| --- | --- |
+| Runtime source | `118b8bde850d17a147e99ecff7f9d9214b6ca380` |
+| Build | Release x64, preset `release`, ODST ON, Reach ON, ReachRender ON |
+| Candidate package | `out/candidates/118b8bd-reach-fp-parity-20260804-042612769Z` |
+| `halo3xr.dll` SHA-256 | `7CB49B543A9D70B3AF2B60847A4618980A5D7E0E24B5A4DC24726FCEBC2B9690` |
+| `halo3xr_launcher.exe` SHA-256 | `A2AF02477EA2BD6947F4468CB43168BA7DE132A433B6945591A4F69E75633E11` |
+| Title coverage | Halo 3, Halo 3: ODST, Halo: Reach |
+| Installed editions | Steam and Microsoft Store; hashes verified independently after install |
+
+**What is headset-CONFIRMED in this line:** ODST first-person vehicle seats
+(seat parenting, hidden body, hands on the vehicle, per-seat F1 trims, view
+follow) and the ODST crosshair updating on a weapon switch. The user confirmed
+the seat experience and stopped reporting the crosshair fault.
+
+**What is headset-UNVERIFIED in this build - do not treat as working:**
+
+1. **Seat exposure hold** (O6). The previous two attempts were provably inert
+   or mislabelled; this one writes the copy the engine propagates from. Never
+   observed in a headset. The log now prints either `hold verified against the
+   engine's own copy` or `the hold is NOT taking`, which settles it from one
+   session.
+2. **Passenger shot origin** (O6). Moves the shot line onto the sight line at
+   the firing call site. Never observed in a headset.
+
+The user's words when setting this baseline were "I'll come back to it when
+users complain of your failure" - i.e. these two were explicitly NOT tested,
+not accepted. If either is reported broken, `docs/ODST-VEHICLE-EVIDENCE.md`
+section O-E6 has the full binary evidence and O-E6d names the one remaining
+untested mechanism (the luminance history advancing 3x per frame from
+alternating eyes).
+
+**Also open on this line:** the ODST/Halo 3 level-load lockout, parked by user
+choice; see `docs/ODST-LEVEL-LOAD-LOCKOUT.md`. Its undone decisive test is a
+no-mod control run.
 
 ## NOTE: Halo 3 vehicle view-follow user-stated working - 2026-08-03
 
