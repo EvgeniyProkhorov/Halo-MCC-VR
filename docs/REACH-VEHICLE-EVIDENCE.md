@@ -54,13 +54,13 @@ This is experience parity, not implementation parity. Reach does not share
 Halo 3's vehicle definition layout, seat stride, string IDs, marker resolver,
 or object collection layout, and no such value is copied.
 
-One limitation is deliberate: this candidate does **not** claim a Reach
-passenger shot-origin transaction. The bit-4 change exists only while the
-stock outer render call is executing. It is not left installed for simulation
-or firing code, and no claim is made that it moves projectile or effect
-origins. ODST's separate passenger-shot-origin work is itself listed as
-headset-unverified in docs/CURRENT-STATE.md, so copying it would not be a valid
-parity target.
+One limitation was deliberate at first writing: the initial candidate did
+**not** claim a Reach passenger shot-origin transaction. The bit-4 change
+exists only while the stock outer render call is executing, is not left
+installed for simulation or firing code, and moves no projectile or effect
+origin. **Superseded 2026-08-04 by R-V12**, which establishes the Reach
+firing-origin transaction from Reach-native HREK evidence rather than by
+copying ODST's (itself headset-unverified) O6 work.
 
 ## R-V1 - official HREK discovery
 
@@ -540,6 +540,154 @@ The exported marker-to-eye deltas range from -3.70 to +42.43 m forward,
 close-range clamp would have silently truncated valid authored seats. The
 Reach bank now has title-specific bounds large enough for the complete strict
 export; Halo 3, ODST, and universal placement limits are unchanged.
+
+## R-V10 - 2026-08-04: every structurally proven seat gets the camera
+
+The 2026-08-04 Steam session on ca741d9 (DLL 0208E2EF...05BB9B) is the
+controlling runtime evidence: of ~30 seat entries, only eight went active
+(ghost, revenant x2, forklift, wraith, banshee, falcon seat 0) and **21 seated
+periods stayed stock with no logged reason** - the census-mismatch line dedups
+once per generation and names nothing. Two logged faults: one exact-identity
+mismatch (07:48:46) and one bounds-guard rejection during the wraith ride
+(07:52:33). This violated the no-silent-fallbacks policy in exactly the way
+the log could not attribute.
+
+Three changes, in one candidate line:
+
+1. **The census no longer gates the camera.** Halo 3 and ODST switch the FP
+   camera on seat flags alone and key only authored eye points and policy on
+   identity (HALO3-VEHICLE-EVIDENCE.md C20; the mod's own H3 seat patch
+   consults no identity). Reach now matches that experience: an unmatched
+   tuple or an out-of-census seat keeps the camera, provided **every
+   structural proof still passes** - object kind, vehi tag fetch, seat count
+   1..16, packed 0x12C seat element whose +0x70 equals the pointer the
+   engine's own unit_get_camera_info returned (the strongest live layout
+   proof), marker validity, finite composition, bounds guard. Unmatched
+   identities ride the universal trims with no-follow/no-steer/no-wheel
+   policy and publish the sentinel identity code 0xFF in the trim snapshot,
+   which keeps FpActive/recenter/body-hide live while every identity-keyed
+   decoder (F1 slot, wheel, steering, seat log name) fails closed. A seat
+   whose authored camera and attachment markers are both missing (the
+   space_phantom beam turret authors neither) degrades to the proven
+   identity-root basis instead of losing the camera.
+2. **Loud per-vehicle diagnostics.** The frame builder publishes each
+   distinct unmatched tuple / out-of-census seat into one of eight lock-free
+   fixed slots (tuple words, observed native type, raw seat, seat count); the
+   50 ms worker logs each exactly once per generation:
+   `unmatched vehicle tuple XXXXXXXX/... type T raw seat S (of N authored)`.
+   No allocation, no logging on the hot path.
+3. **The bounds guard honors the authored ranges.** ca741d9 widened only the
+   config clamps and F1 sliders; the runtime guard still allowed only
+   `bounding radius + 2 wu`, so the authored Sabre eye (+42.43 m forward =
+   13.92 wu against a 7.21 wu limit) could never arm, and the wraith slider
+   hit the 3.8 wu = 11.58 m ceiling the user's config still shows. The guard
+   now widens its sphere by exactly the trim magnitude this frame applies:
+   the pre-trim anchor stays held to the 2 wu wrong-frame margin, and a
+   config-legal authored trim can no longer be rejected.
+
+Also from the census sweep: a walk-up turret tag can ship mounted on a moving
+carrier - all four falcon side-turret tags author plasma_turret's exact
+tuple+type. The frame builder now consults the engine's own
+object_get_ultimate_parent: a real carrier (ultimate parent != direct parent)
+grants the walk-up seat the attached-weapon carrier frame and yaw follow; a
+self-parented emplacement claims no hull frame, exactly as before.
+
+## R-V11 - 2026-08-04: the complete official vehicle census
+
+out/hrek-evidence/reach-vehicle-census/ holds the machine-readable sweep of
+**all 69 official .vehicle tags** in the pinned HREK tree (census_tool.py,
+reach_vehicle_census.json, seats_report.txt, plus every newly exported
+vehicle/model XML). The pipeline recomputed all 20 known R-V3 rows first and
+reproduced every tuple bit-exactly, every physics type, and the exact 25-seat
+census before any new row was trusted. Because tool.exe prints only six
+significant digits, bit-exact words were recovered from the raw tag binaries.
+
+Fourteen new player-usable identities join the table (IDs 21-34):
+
+| ID | Config identity | Player seats | Type | Tuple | Class |
+| ---: | --- | --- | ---: | --- | --- |
+| 21 | mac_cannon | 0 | 16 | 41200000,0,0,0 | walk-up (the Pillar of Autumn Onager) |
+| 22 | scorpion_anti_infantry | 0 | 16 | 3ED28405,3DB8AD5D,B8A6B78A,3D8A1BD8 | attached (Scorpion MG) |
+| 23 | seraph | 0 | 13 | 410F9AAB,C02DAE74,B625B5D0,3F8295A1 | aircraft (covers seraph_in_atmosphere - bit-identical) |
+| 24 | pelican | 4,5,9,10 | 2 | 40B33333,0,0,0 | aircraft (four benches; driver seat authored invalid-for-player) |
+| 25 | pelican_chin_gun | 0 | 16 | 3F2BC474,3EC52CD6,B3C52CD6,BE7D391F | attached |
+| 26 | corvette_cannon | 0 | 6 | 40400000,0,0,0 | walk-up (Long Night of Solace) |
+| 27 | space_phantom_chin_gun | 0 | 16 | 3F666666,3F666666,0,0 | attached |
+| 28 | space_phantom_beam_turret | 0 | 16 | 3F906FE2,3F8275C2,374C2C51,3BA3D9C0 | attached (authors NO markers - root-basis fallback) |
+| 29 | cargo_truck | 0,1 | 1 | 3FAE222F,3C709BBD,BC1C81E3,3F19FF3B | ground, look-steer + wheel |
+| 30 | military_truck | 0,1 | 1 | 3FD4EDB9,BDAC5C6F,3BA35FAA,3F39CE19 | ground, look-steer + wheel |
+| 31 | oni_van | 0,1 | 1 | 3FD46CE8,BDB33F17,3BA3612C,3F39C761 | ground, look-steer + wheel |
+| 32 | pickup | 0,1 | 1 | 3F9FCD09,BDA6FD71,B329BF5D,3ECB6694 | ground, look-steer + wheel |
+| 33 | truck_cab_large | 0,1 | 1 | 3FE2557B,BD4C676F,3ACF7265,3F6831B4 | ground, look-steer + wheel |
+| 34 | squad_drop_pod | 0-3 | 16 | 3FDAB04B,BD31519F,390792C5,3F912A02 | scripted prop, no hull frame |
+
+That is 34 identities and 50 tag-authored player seats. New identities ship
+with **unset** trim slots (universal fallback, live F1 tuning); no Blender
+cameras exist for them yet. Types 2 (human plane) and 6 (turret physics) have
+no prior R-V3 policy precedent; their classifications are tag-family
+inferences pending headset proof.
+
+Negative findings that explain "missing" vehicles honestly: **warthog_troop's
+three rear seats are authored invalid-for-player in Reach's own tags**, as is
+the Pelican driver seat, every phantom/spirit seat, and every AI emplacement
+(anti-air/anti-infantry/frigate/POA/scarab/BFG turrets). Those staying stock
+is tag-correct. test_fbx_mongoose differs from mongoose by one ULP and is
+deliberately not a row - the generic path covers it. Aliases resolve to one
+row on purpose: falcon side guns = plasma_turret, shade_anti_air_cannon =
+shade_flak, seraph_in_atmosphere = seraph, and each alias group shares its
+per-seat F1 trims.
+
+## R-V12 - 2026-08-04: the shot line
+
+Reach parallel of ODST O-E6c, proven from HREK before touching retail. Inside
+the pinned projectile transaction (HREK 0xDE4290, weapons.cpp; retail homolog
+0x4C2710), the per-barrel flow queries weapon marker SID 0x103
+(`safe_trigger`), walks the deepest +0x390 occupant, and calls the
+unit-adjust function (HREK 0xD67EE0 - named by the engine's own
+`unit adjusted origin (offset? %s)` debug strings), whose body proves:
+camera := marker-0x103, else head 0xC2 when anim-mode==6, else **call the
+unit camera-position evaluator**; forward := unit aiming vector [unit+0x214];
+then `origin := camera + forward * dot(origin - camera, forward)` -
+byte-for-byte the same projection O-E6c proved for Halo 3/ODST - then the
+authored barrel FP offset and a camera->origin collision clip.
+
+The evaluator (HREK 0xD76E60, consumed by pinned unit_get_camera_info at
+0xD76BBE, containing the `player->last_controlled_unit_data.valid` assert of
+units.cpp:9178) is the Reach homolog of ODST's unit_get_camera_position:
+seated, it reads the parent's 0x12C seat record camera marker (+0x74) and,
+when seat bit 4 is clear - the bit vehicle_hide_body clears - substitutes the
+occupant's own head 0xC2. Retail verification on the pinned image:
+
+| Construct | Retail RVA | Identity |
+| --- | ---: | --- |
+| unit camera-position evaluator | 0x48A1C0 | body [0x48A1C0,0x48A4B3) 0x2F3 bytes, SHA-256 9C9344F0D83EEABBD035A426F6469B49C848DE78C9C5634DBB108674F6175895; sits immediately before pinned unit_get_camera_info 0x48A4B4, which calls it at 0x48A696 |
+| unit-adjust (firing consumer A) | 0x484F24 | body [0x484F24,0x48529F) 0x37B bytes, SHA-256 6EF679F2C9553B7F9CD942DAEF78CD1F17F262C93AB340C6E9B56B6ECDFEEFA3; exactly ONE caller in the whole image (the projectile transaction at 0x4C303A) |
+| evaluator call inside A | 0x484FDC | inside the unique block `83 3C 30 06 75 07 E8 .. EB 05 E8 .. 80 7D 77 00` @ 0x484FCF; return address 0x484FE1 |
+| direct evaluator call (consumer B) | 0x4C3107 | inside the unique block `8B 5C 24 68 39 7C 24 7C 7F 0E ... E8 .. 8B CB E8 .. 44 8B C8` @ 0x4C30F4; return address 0x4C310C; its second E8 targets pinned object_get_ultimate_parent 0x473DC0 |
+
+An exhaustive rel32 census over retail .text: the evaluator has **34 direct
+call sites, of which exactly two are firing**; both copy the result into
+private stack buffers, so substituting at those two return addresses cannot
+feed back into the engine camera - the exact property O-E6c's design needs.
+
+**The implementation** detours the evaluator and substitutes the published
+Reach rendered center-eye (Reach world units, published by the camera
+transaction after head look; Reach does not feed the shared g_camX globals)
+only when ALL of: the return address matches one of the two runtime-derived
+firing returns; no authored cinematic (published per frame from the camera
+thread); the unit is the seated local player's own (low-16 handle compare
+against the frame-published seat state); and the occupied seat's flags author
+bit 5 `allows weapons` - drivers and mounted gunners fire from vehicle
+barrels and keep the stock origin, as do all 32 non-firing consumers, remote
+units, AI, and every seat on foot. The original always runs first and its
+register result is preserved. Counters (moves/skips) are worker-logged once
+per generation. Teardown releases the detour with the module.
+
+**Headset-unverified.** Nothing above proves the substituted origin feels
+right; ODST's own O6 equivalent is itself still headset-unverified. The
+`safe_trigger`-marker path and anim-mode-6 path bypass both call sites by
+design and keep stock behavior; whether any player-usable Reach weapon
+authors them was not censused.
 
 ## R-V9 - acceptance still required
 

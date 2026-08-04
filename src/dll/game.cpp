@@ -15984,6 +15984,156 @@ namespace
     std::atomic<uint32_t> g_reachVehicleSeatPatchFailures{0};
     std::atomic<uint32_t> g_reachVehicleSeatRecenters{0};
     std::atomic<uint32_t> g_reachSeatAuthorsSteering{0};
+
+    // The 2026-08-04 session produced 21 seated periods that stayed stock with
+    // no logged reason: the identity-miss line dedups once per generation and
+    // names nothing. These fixed slots let the hot frame builder publish the
+    // exact tuple/type/seat the engine holds for each distinct unmatched or
+    // out-of-census seat, and the 50 ms worker logs each one exactly once.
+    // Allocation-free and lock-free by construction; slots never recycle
+    // within a generation (8 distinct offenders per session is generous).
+    struct ReachVehicleCensusMissSample
+    {
+        // 0 empty, 1 claimed (being filled), 2 ready to log, 3 logged.
+        std::atomic<uint32_t> state{0};
+        ReachVehicleFingerprint fingerprint{};
+        int32_t observedType = 0;
+        int32_t seatIndex = -1;
+        int32_t seatCount = -1;
+        uint8_t knownIdentity = 0;
+    };
+    std::array<ReachVehicleCensusMissSample, 8> g_reachVehicleCensusMisses;
+
+    void ReachPublishVehicleCensusMiss(
+        const ReachVehicleFingerprint& fingerprint, int32_t observedType,
+        int32_t seatIndex, int32_t seatCount, uint8_t knownIdentity)
+    {
+        for (auto& slot : g_reachVehicleCensusMisses)
+        {
+            if (slot.state.load(std::memory_order_acquire) < 2)
+                continue;
+            if (ReachVehicleFingerprintEqual(slot.fingerprint, fingerprint) &&
+                slot.seatIndex == seatIndex &&
+                slot.knownIdentity == knownIdentity)
+            {
+                return;
+            }
+        }
+        for (auto& slot : g_reachVehicleCensusMisses)
+        {
+            uint32_t expected = 0;
+            if (!slot.state.compare_exchange_strong(
+                    expected, 1, std::memory_order_acq_rel))
+            {
+                continue;
+            }
+            slot.fingerprint = fingerprint;
+            slot.observedType = observedType;
+            slot.seatIndex = seatIndex;
+            slot.seatCount = seatCount;
+            slot.knownIdentity = knownIdentity;
+            slot.state.store(2, std::memory_order_release);
+            return;
+        }
+    }
+
+    // The Reach shot line, the exact O-E6c design with Reach-native evidence
+    // (docs/REACH-VEHICLE-EVIDENCE.md R-V10). HREK proves a seated occupant's
+    // shots leave (unit camera-position evaluator result, unit aiming vector):
+    // the firing path copies the evaluator's answer into a PRIVATE stack
+    // buffer and projects the muzzle onto that ray, so the shot origin can
+    // move without feeding back into the engine camera. The evaluator has 34
+    // retail call sites and only TWO are firing; substitution happens only
+    // when the return address matches one of those two, the unit is the
+    // seated local player's own, the seat's tag allows a personal weapon
+    // (drivers and mounted gunners fire from a vehicle barrel), no authored
+    // cinematic is running, and a fresh finite rendered eye exists.
+    using ReachUnitCameraPositionFn = uint64_t(__fastcall*)(int32_t, float*);
+    ReachUnitCameraPositionFn g_origReachUnitCameraPosition = nullptr;
+    void* g_reachUnitCameraPositionTarget = nullptr;
+    uintptr_t g_reachFiringOriginReturnA = 0; // inside the unit-adjust body
+    uintptr_t g_reachFiringOriginReturnB = 0; // projectile-transaction call
+    std::atomic<uint32_t> g_reachCinematicLocked{0};
+    // [unit handle:32][bit1 seat-allows-weapons][bit0 frame active]. One
+    // atomic so the firing thread can never pair a stale unit with a fresh
+    // flag.
+    std::atomic<uint64_t> g_reachSeatedShotState{0};
+    std::atomic<uint32_t> g_reachFiringOriginMoves{0};
+    std::atomic<uint32_t> g_reachFiringOriginSkips{0};
+    // The rendered center-eye position in Reach world units, published by the
+    // Reach camera transaction after head look each frame. Reach does not
+    // feed the shared g_camX globals, so it publishes its own.
+    std::atomic<uint64_t> g_reachEyeSampleMs{0};
+    std::atomic<float> g_reachEyeX{0.0f};
+    std::atomic<float> g_reachEyeY{0.0f};
+    std::atomic<float> g_reachEyeZ{0.0f};
+
+    // Runs on the engine's own weapon path. Relaxed loads of our state plus
+    // three float stores: no locks, no allocation, no logging. The original
+    // always runs first and its register result is preserved.
+    __declspec(noinline) uint64_t __fastcall ReachUnitCameraPositionHook(
+        int32_t unitIndex, float* out)
+    {
+        const uintptr_t caller =
+            reinterpret_cast<uintptr_t>(_ReturnAddress());
+        const uint64_t stockResult =
+            g_origReachUnitCameraPosition(unitIndex, out);
+        if (!out)
+            return stockResult;
+        const uintptr_t returnA = g_reachFiringOriginReturnA;
+        const uintptr_t returnB = g_reachFiringOriginReturnB;
+        if (caller != returnA && caller != returnB)
+            return stockResult;           // not the shot line; leave it alone
+        if (g_reachCinematicLocked.load(std::memory_order_relaxed))
+            return stockResult;           // authored camera owns the view
+        const uint64_t seatState =
+            g_reachSeatedShotState.load(std::memory_order_relaxed);
+        if ((seatState & 3u) != 3u)
+            return stockResult;   // no active seat frame or a barrel weapon
+        const int32_t seated =
+            static_cast<int32_t>(static_cast<uint32_t>(seatState >> 32));
+        // The engine keys units by the low 16 bits of the handle.
+        if (((seated ^ unitIndex) & 0xFFFF) != 0)
+            return stockResult;           // somebody else's weapon
+        const uint64_t sampleMs =
+            g_reachEyeSampleMs.load(std::memory_order_acquire);
+        const uint64_t nowMs = GetTickCount64();
+        if (!sampleMs || nowMs < sampleMs || nowMs - sampleMs > 500)
+        {
+            g_reachFiringOriginSkips.fetch_add(1, std::memory_order_relaxed);
+            return stockResult;
+        }
+        const float eyeX = g_reachEyeX.load(std::memory_order_relaxed);
+        const float eyeY = g_reachEyeY.load(std::memory_order_relaxed);
+        const float eyeZ = g_reachEyeZ.load(std::memory_order_relaxed);
+        if (!isfinite(eyeX) || !isfinite(eyeY) || !isfinite(eyeZ))
+        {
+            g_reachFiringOriginSkips.fetch_add(1, std::memory_order_relaxed);
+            return stockResult;
+        }
+        out[0] = eyeX;
+        out[1] = eyeY;
+        out[2] = eyeZ;
+        g_reachFiringOriginMoves.fetch_add(1, std::memory_order_relaxed);
+        return stockResult;
+    }
+
+    // The shot-origin hook must come out with the module: the detour reads
+    // only our own atomics, but the trampoline points into haloreach.dll.
+    void ReleaseReachFiringOriginHook()
+    {
+        g_reachFiringOriginReturnA = 0;
+        g_reachFiringOriginReturnB = 0;
+        g_reachSeatedShotState.store(0, std::memory_order_relaxed);
+        g_reachEyeSampleMs.store(0, std::memory_order_relaxed);
+        if (!g_reachUnitCameraPositionTarget)
+            return;
+        MH_DisableHook(g_reachUnitCameraPositionTarget);
+        MH_RemoveHook(g_reachUnitCameraPositionTarget);
+        g_reachUnitCameraPositionTarget = nullptr;
+        g_origReachUnitCameraPosition = nullptr;
+    }
+
     Halo3VehicleDebounce g_reachVehicleFpDebounce;
     Halo3SeatYaw g_reachSeatYaw;
     Halo3SeatPositionKey g_reachYawSeat;
@@ -18669,6 +18819,12 @@ namespace
                 reachCinematicControl, GetTickCount64());
         }
         memcpy(headCenter, stockCompact, kReachCompactCameraBytes);
+        // The firing hook runs on the engine's weapon path and must not read
+        // cinematic state from that thread; publish it from here instead.
+        g_reachCinematicLocked.store(
+            reachCinematicControl == CinematicControlState::AuthoredLocked
+                ? 1u : 0u,
+            std::memory_order_relaxed);
         authoredTheater =
             reachCinematicControl == CinematicControlState::AuthoredLocked &&
             VR_IsCutsceneTheaterActive();
@@ -18684,6 +18840,21 @@ namespace
             ApplyVrTurn(tracking.pad);
             if (!ReachApplyHeadLook(headCenter, tracking))
                 return false;
+            // The tracked center-eye position in Reach world units: the
+            // sight-line origin the firing hook substitutes. Published only
+            // on gameplay frames, so a stale seat can never fire from a
+            // theatre pose.
+            const float* trackedEye =
+                reinterpret_cast<const float*>(headCenter);
+            if (isfinite(trackedEye[0]) && isfinite(trackedEye[1]) &&
+                isfinite(trackedEye[2]))
+            {
+                g_reachEyeX.store(trackedEye[0], std::memory_order_relaxed);
+                g_reachEyeY.store(trackedEye[1], std::memory_order_relaxed);
+                g_reachEyeZ.store(trackedEye[2], std::memory_order_relaxed);
+                g_reachEyeSampleMs.store(
+                    GetTickCount64(), std::memory_order_release);
+            }
         }
         if (!authoredTheater)
             *reinterpret_cast<float*>(headCenter + 0x28) = cullCover.verticalFov;
@@ -20223,7 +20394,9 @@ namespace
     }
 
     ReachVehicleId ReachResolveVehicleDefinition(
-        const unsigned char* definition, uint32_t definitionDatum)
+        const unsigned char* definition, uint32_t definitionDatum,
+        ReachVehicleFingerprint* outFingerprint = nullptr,
+        int32_t* outObservedType = nullptr)
     {
         if (!definition || !g_reachCamera.vehicleType)
             return ReachVehicleId::Unknown;
@@ -20240,11 +20413,16 @@ namespace
         memcpy(&fingerprint.offsetZ,
                definition + kReachVehicleBoundsOffsetZ,
                sizeof(fingerprint.offsetZ));
+        const int32_t observedType =
+            g_reachCamera.vehicleType(definitionDatum);
+        if (outFingerprint)
+            *outFingerprint = fingerprint;
+        if (outObservedType)
+            *outObservedType = observedType;
         const ReachVehicleId identity =
             ReachResolveVehicleFingerprint(fingerprint);
         if (identity == ReachVehicleId::Unknown ||
-            g_reachCamera.vehicleType(definitionDatum) !=
-                ReachVehicleExpectedPhysicsType(identity))
+            observedType != ReachVehicleExpectedPhysicsType(identity))
         {
             return ReachVehicleId::Unknown;
         }
@@ -20600,15 +20778,12 @@ namespace
                     identityMiss = true;
                     break;
                 }
+                ReachVehicleFingerprint fingerprint{};
+                int32_t observedType = -1;
                 const ReachVehicleId identity =
                     ReachResolveVehicleDefinition(
-                        definition, definitionDatum);
-                if (identity == ReachVehicleId::Unknown ||
-                    !ReachVehicleSeatIsPlayer(identity, info.seatIndex))
-                {
-                    identityMiss = true;
-                    break;
-                }
+                        definition, definitionDatum, &fingerprint,
+                        &observedType);
 
                 const int32_t seatCount =
                     *reinterpret_cast<const int32_t*>(
@@ -20616,6 +20791,20 @@ namespace
                 const uint32_t packedSeats =
                     *reinterpret_cast<const uint32_t*>(
                         definition + kReachVehicleSeatsBlockOffset + 4);
+                // Halo 3 and ODST admit any seat whose loaded layout proves
+                // itself and key only trims/policy on identity; Reach now
+                // matches that experience. An unmatched tuple or an
+                // out-of-census seat keeps the camera, with universal trims
+                // and no-follow/no-steer policy for unmatched content, and is
+                // named loudly (tuple, type, seat) by the worker exactly once.
+                // Every structural proof below still gates the frame.
+                if (identity == ReachVehicleId::Unknown ||
+                    !ReachVehicleSeatIsPlayer(identity, info.seatIndex))
+                {
+                    ReachPublishVehicleCensusMiss(
+                        fingerprint, observedType, info.seatIndex, seatCount,
+                        static_cast<uint8_t>(identity));
+                }
                 if (seatCount <= 0 || seatCount > kReachVehicleSeatLimit ||
                     info.seatIndex >= seatCount)
                 {
@@ -20670,12 +20859,19 @@ namespace
                 }
                 if (!anchorValid)
                 {
-                    markerFailure = true;
-                    break;
+                    // space_phantom_beam_turret authors neither a camera nor
+                    // an attachment marker, and unmatched content may not
+                    // either. The identity-root basis was already proven
+                    // valid above, so seat placement degrades to the root
+                    // point plus trims instead of losing the whole camera.
+                    anchorMarker = rootMarker;
+                    anchorValid = true;
                 }
-                const int trimSlot = ConfigReachSeatTrimSlot(
-                    static_cast<int>(identity), info.seatIndex);
-                if (trimSlot < 0)
+                const int trimSlot = identity != ReachVehicleId::Unknown
+                    ? ConfigReachSeatTrimSlot(
+                          static_cast<int>(identity), info.seatIndex)
+                    : -1;
+                if (identity != ReachVehicleId::Unknown && trimSlot < 0)
                 {
                     identityMiss = true;
                     break;
@@ -20719,11 +20915,22 @@ namespace
                 memcpy(boundsLocal,
                        definition + kReachVehicleBoundsOffsetX,
                        sizeof(boundsLocal));
+                // The guard exists to catch a point composed in a wrong frame
+                // (tens of wu off), not to veto the authored seat range: the
+                // Reach bank deliberately allows trims far outside any bounding
+                // sphere (the authored Sabre eye is 42 m ahead of its marker).
+                // Hold the pre-trim anchor to the 2 wu margin and widen the
+                // sphere by exactly the trim this frame applies.
+                const float boundsMarginUnits = 2.0f +
+                    authoredBasis.scale * sqrtf(
+                        trimForward * trimForward + trimRight * trimRight +
+                        trimUp * trimUp);
                 float boundsWorld[3]{};
                 if (!Halo3MatrixTransformPoint(
                         rootMarker.matrix, boundsLocal, boundsWorld) ||
                     !Halo3AnchorWithinBounds(
-                        handsBase, boundsWorld, boundsRadius, 2.0f))
+                        handsBase, boundsWorld, boundsRadius,
+                        boundsMarginUnits))
                 {
                     boundsFailure = true;
                     break;
@@ -20797,7 +21004,7 @@ namespace
                                 bouncedCamera) &&
                             Halo3AnchorWithinBounds(
                                 bouncedCamera, boundsWorld,
-                                boundsRadius, 2.0f))
+                                boundsRadius, boundsMarginUnits))
                         {
                             memcpy(frame.cameraBase, bouncedCamera,
                                    sizeof(frame.cameraBase));
@@ -20814,33 +21021,52 @@ namespace
                     bounceFallback = true;
                 }
 
-                if (ReachVehicleIsWalkUpTurret(identity))
+                if (identity == ReachVehicleId::Unknown ||
+                    ReachVehicleIsWalkUpTurret(identity) ||
+                    ReachVehicleIsAttachedWeapon(identity))
                 {
-                    frame.carrierBasisValid = false;
-                }
-                else if (ReachVehicleIsAttachedWeapon(identity))
-                {
+                    // An attached gun always follows its ultimate carrier. A
+                    // walk-up turret tag can also ship mounted on a moving
+                    // carrier (the four falcon side guns author
+                    // plasma_turret's exact tuple), so the engine's own
+                    // parent chain decides: a real carrier grants the
+                    // attached-weapon frame, a self-parented emplacement and
+                    // unmatched content claim no hull frame — no view
+                    // follow, no steering authorship, no wheel.
                     const int32_t carrier =
-                        g_reachCamera.objectUltimateParent
+                        (identity != ReachVehicleId::Unknown &&
+                         g_reachCamera.objectUltimateParent)
                         ? g_reachCamera.objectUltimateParent(
                               info.directParent)
                         : -1;
-                    Halo3ObjectMarker carrierRoot{};
-                    frame.carrier = carrier;
-                    frame.carrierBasisValid = carrier != -1 &&
-                        g_reachCamera.objectMarkers(
-                            carrier, 0, &carrierRoot,
-                            1, true, interpolate) > 0 &&
-                        Halo3MatrixValid(carrierRoot.matrix);
-                    if (frame.carrierBasisValid)
+                    const bool wantsCarrier =
+                        ReachVehicleIsAttachedWeapon(identity) ||
+                        (ReachVehicleIsWalkUpTurret(identity) &&
+                         carrier != -1 && carrier != info.directParent);
+                    if (!wantsCarrier)
                     {
-                        memcpy(frame.rawCarrierForward,
-                               carrierRoot.matrix.forward,
-                               sizeof(frame.rawCarrierForward));
+                        frame.carrierBasisValid = false;
                     }
-                    else if (g_config.vehicle_view_follow)
+                    else
                     {
-                        followFallback = true;
+                        Halo3ObjectMarker carrierRoot{};
+                        frame.carrier = carrier;
+                        frame.carrierBasisValid = carrier != -1 &&
+                            g_reachCamera.objectMarkers(
+                                carrier, 0, &carrierRoot,
+                                1, true, interpolate) > 0 &&
+                            Halo3MatrixValid(carrierRoot.matrix);
+                        if (frame.carrierBasisValid)
+                        {
+                            memcpy(frame.rawCarrierForward,
+                                   carrierRoot.matrix.forward,
+                                   sizeof(frame.rawCarrierForward));
+                        }
+                        else if (g_config.vehicle_view_follow &&
+                                 ReachVehicleIsAttachedWeapon(identity))
+                        {
+                            followFallback = true;
+                        }
                     }
                 }
                 else
@@ -20869,6 +21095,7 @@ namespace
         if (faulted)
         {
             g_reachVehicleTrimSnapshot.store(0, std::memory_order_release);
+            g_reachSeatedShotState.store(0, std::memory_order_relaxed);
             g_reachVehicleCameraFaults.fetch_add(
                 1, std::memory_order_relaxed);
             g_reachCamera.vehicleCameraBindingState.store(
@@ -20910,6 +21137,7 @@ namespace
         if (!complete)
         {
             g_reachVehicleTrimSnapshot.store(0, std::memory_order_release);
+            g_reachSeatedShotState.store(0, std::memory_order_relaxed);
             g_reachHeadReference = {};
             ReachUpdateVehicleTransition(
                 unitKnown ? Halo3VehicleState::OnFoot
@@ -20922,6 +21150,17 @@ namespace
             frame.active
                 ? ReachVehicleTrimSnapshot(
                       generation, frame.identity, frame.seatIndex)
+                : 0,
+            std::memory_order_release);
+        // The firing hook compares this against the unit the engine hands it,
+        // so somebody else's weapon can never take our seat's origin, and only
+        // an authored allows-weapons seat qualifies at all.
+        g_reachSeatedShotState.store(
+            frame.active
+                ? ((static_cast<uint64_t>(
+                        static_cast<uint32_t>(frame.unitHandle)) << 32) |
+                   ((frame.seatFlags & kReachSeatAllowsWeaponsBit) ? 2u : 0u) |
+                   1u)
                 : 0,
             std::memory_order_release);
         ReachUpdateVehicleTransition(Halo3VehicleState::Vehicle, nowMs);
@@ -21006,11 +21245,19 @@ namespace
     {
         const uint32_t generation = g_reachCamera.generation.load(
             std::memory_order_relaxed);
+        // A walk-up turret riding a real carrier (falcon side guns resolve to
+        // plasma_turret's tuple) earned a carrier basis in the frame builder;
+        // it follows that carrier's yaw exactly like an attached weapon.
+        const bool mountedWalkUp =
+            ReachVehicleIsWalkUpTurret(frame.identity) &&
+            frame.carrierBasisValid &&
+            frame.carrier != frame.directParent;
         const bool follows = frame.active && ReachVehicleFpActive() &&
             frame.carrierBasisValid &&
             g_config.vehicle_view_follow &&
-            ReachVehicleSeatFollowsHull(
-                frame.identity, frame.seatIndex);
+            (ReachVehicleSeatFollowsHull(
+                 frame.identity, frame.seatIndex) ||
+             mountedWalkUp);
         if (!follows)
         {
             g_reachYawSeat = {};
@@ -21020,7 +21267,8 @@ namespace
             Halo3ClearRollStableFollow();
             return;
         }
-        const bool mounted = ReachVehicleIsAttachedWeapon(frame.identity);
+        const bool mounted =
+            ReachVehicleIsAttachedWeapon(frame.identity) || mountedWalkUp;
         if (!g_reachYawSeat.Matches(
                 generation, frame.carrier, frame.seatIndex,
                 static_cast<uint32_t>(frame.identity), mounted))
@@ -21748,6 +21996,10 @@ namespace
 
     bool DisableAndRemoveReachHooks()
     {
+        // The optional shot-origin detour reads only our own atomics, so it
+        // is released first and on its own: its trampoline points into the
+        // module being torn down.
+        ReleaseReachFiringOriginHook();
         bool disabledAll = true;
         void* const targets[] = {
             g_reachCamera.rainRenderTarget,
@@ -22204,6 +22456,66 @@ namespace
         const uintptr_t next=first+1;
         const uintptr_t end=base+size;
         return next>=end || sig::Find(next,static_cast<size_t>(end-next),pattern)==0;
+    }
+
+    // Optional shot-line feature only (R-V10). HREK proves the unit
+    // camera-position evaluator (HREK 0xD76E60, consumed by pinned
+    // unit_get_camera_info) and its two firing consumers: the unit-adjust
+    // body (retail homolog 0x484F24, whole-body SHA-256 pinned in the
+    // evidence doc) calling the evaluator inside a mode-6 head-helper/else
+    // block, and the projectile transaction's direct clip-anchor call. Both
+    // return addresses are derived at runtime from their unique call-site
+    // blocks by decoding the E8 rel32 edges and requiring them to target the
+    // AOB-verified evaluator — never hardcoded. Failure keeps only this
+    // feature stock; the camera core is untouched.
+    bool ResolveReachFiringOriginBinding(
+        uintptr_t base, size_t size, uintptr_t& outEvaluator,
+        uintptr_t& outReturnA, uintptr_t& outReturnB)
+    {
+        outEvaluator = 0;
+        outReturnA = 0;
+        outReturnB = 0;
+        static constexpr char kEvaluatorAob[] =
+            "48 8B C4 48 89 58 08 48 89 70 10 48 89 78 18 55 41 54 41 55 41 56 41 57 48 8D 68 A1 48 81 EC B0 00 00 00 44 8B 05 ?? ?? ?? ?? 41 83 CF FF 65 48 8B 04 25 58 00 00 00";
+        // 83 3C 30 06 (anim mode == 6?) / 75 07 / E8 head-helper / EB 05 /
+        // E8 evaluator / 80 7D 77 00. The SECOND call is the shot line.
+        static constexpr char kAdjustCallBlockAob[] =
+            "83 3C 30 06 75 07 E8 ?? ?? ?? ?? EB 05 E8 ?? ?? ?? ?? 80 7D 77 00";
+        // The projectile transaction's guarded direct call: E8 evaluator then
+        // E8 object_get_ultimate_parent. The FIRST call is the shot line.
+        static constexpr char kDirectCallBlockAob[] =
+            "8B 5C 24 68 39 7C 24 7C 7F 0E 48 8D 95 A8 01 00 00 8B CB E8 ?? ?? ?? ?? 8B CB E8 ?? ?? ?? ?? 44 8B C8";
+        constexpr uintptr_t kEvaluatorRva = 0x48A1C0;
+        constexpr uintptr_t kAdjustBlockRva = 0x484FCF;
+        constexpr uintptr_t kDirectBlockRva = 0x4C30F4;
+        constexpr uintptr_t kAdjustCallOffset = 13;
+        constexpr uintptr_t kDirectCallOffset = 19;
+        if (!ReachColdExactSignatureAt(base, size, kEvaluatorRva,
+                                       kEvaluatorAob) ||
+            !ReachColdExactSignatureAt(base, size, kAdjustBlockRva,
+                                       kAdjustCallBlockAob) ||
+            !ReachColdExactSignatureAt(base, size, kDirectBlockRva,
+                                       kDirectCallBlockAob))
+            return false;
+        const auto rel32Target = [](uintptr_t call) {
+            int32_t rel = 0;
+            memcpy(&rel, reinterpret_cast<const void*>(call + 1),
+                   sizeof(rel));
+            return static_cast<uintptr_t>(
+                static_cast<intptr_t>(call + 5) + rel);
+        };
+        const uintptr_t evaluator = base + kEvaluatorRva;
+        const uintptr_t adjustCall =
+            base + kAdjustBlockRva + kAdjustCallOffset;
+        const uintptr_t directCall =
+            base + kDirectBlockRva + kDirectCallOffset;
+        if (rel32Target(adjustCall) != evaluator ||
+            rel32Target(directCall) != evaluator)
+            return false;
+        outEvaluator = evaluator;
+        outReturnA = adjustCall + 5;
+        outReturnB = directCall + 5;
+        return true;
     }
 
     // Optional input feature only. HREK supplies the semantics and ABIs; retail
@@ -23761,9 +24073,73 @@ namespace
         g_reachYawSeat = {};
         if (reachVehicleCameraResolved)
         {
-            LOG("Reach first-person vehicles: Installed; 20 exact HREK "
-                "identities, 25 player seats, rendered marker placement, "
-                "body hide, bounce, hands, trims and view follow are armed");
+            LOG("Reach first-person vehicles: Installed; every structurally "
+                "proven seat gets the camera (%d exact HREK identities carry "
+                "per-seat trims and policy, unmatched vehicles ride the "
+                "universal trims), rendered marker placement, body hide, "
+                "bounce, hands and view follow are armed",
+                kReachVehicleIdentityCount);
+        }
+
+        // The shot line (R-V10). Resolve the camera-position evaluator and
+        // its two firing call sites; their return addresses are what tell the
+        // hook it is on the firing path rather than one of the evaluator's 32
+        // other consumers — including the engine's own camera placement,
+        // which must keep the stock value.
+        ReleaseReachFiringOriginHook();
+        g_reachFiringOriginMoves.store(0, std::memory_order_relaxed);
+        g_reachFiringOriginSkips.store(0, std::memory_order_relaxed);
+        {
+            uintptr_t firingEvaluator = 0;
+            uintptr_t firingReturnA = 0;
+            uintptr_t firingReturnB = 0;
+            const bool firingResolved = reachVehicleCameraResolved &&
+                ResolveReachFiringOriginBinding(
+                    base, size, firingEvaluator, firingReturnA,
+                    firingReturnB);
+            if (firingResolved)
+            {
+                g_reachUnitCameraPositionTarget =
+                    reinterpret_cast<void*>(firingEvaluator);
+                const MH_STATUS created = MH_CreateHook(
+                    g_reachUnitCameraPositionTarget,
+                    reinterpret_cast<void*>(&ReachUnitCameraPositionHook),
+                    reinterpret_cast<void**>(
+                        &g_origReachUnitCameraPosition));
+                const bool enabled = created == MH_OK &&
+                    MH_EnableHook(g_reachUnitCameraPositionTarget) == MH_OK;
+                if (enabled)
+                {
+                    g_reachFiringOriginReturnA = firingReturnA;
+                    g_reachFiringOriginReturnB = firingReturnB;
+                    LOG("Reach seat aim: shot origin follows the rendered eye "
+                        "(evaluator +0x%llX, firing returns +0x%llX/+0x%llX); "
+                        "only an allows-weapons seat's own personal fire "
+                        "moves, so the engine camera, vehicle barrels and "
+                        "cutscenes keep the stock position",
+                        (unsigned long long)(firingEvaluator - base),
+                        (unsigned long long)(firingReturnA - base),
+                        (unsigned long long)(firingReturnB - base));
+                }
+                else
+                {
+                    MH_RemoveHook(g_reachUnitCameraPositionTarget);
+                    g_reachUnitCameraPositionTarget = nullptr;
+                    g_origReachUnitCameraPosition = nullptr;
+                    LOG("Reach seat aim: FAILED to install the shot-origin "
+                        "hook (create=%d); seated personal-weapon shots keep "
+                        "firing from the engine's own eye point and will not "
+                        "follow the crosshair exactly",
+                        (int)created);
+                }
+            }
+            else if (reachVehicleCameraResolved)
+            {
+                LOG("Reach seat aim: shot-origin signatures missing or "
+                    "ambiguous; seated personal-weapon shots keep firing from "
+                    "the engine's own eye point and will not follow the "
+                    "crosshair exactly");
+            }
         }
         g_reachRainDecoupled.store(0, std::memory_order_relaxed);
         g_reachRainSkipped.store(0, std::memory_order_relaxed);
@@ -24162,6 +24538,8 @@ namespace
         static bool loggedFollowFallback = false;
         static bool loggedPatchActivity = false;
         static bool loggedPatchFailure = false;
+        static bool loggedShotMove = false;
+        static bool loggedShotSkip = false;
         static uint32_t loggedRecenters = 0;
         static uint64_t loggedSeat = 0;
         const uint32_t generation = g_reachCamera.generation.load(
@@ -24181,6 +24559,25 @@ namespace
             loggedPatchFailure = false;
             loggedRecenters = 0;
             loggedSeat = 0;
+            loggedShotMove = false;
+            loggedShotSkip = false;
+            for (auto& missSlot : g_reachVehicleCensusMisses)
+                missSlot.state.store(0, std::memory_order_release);
+        }
+        if (!loggedShotMove &&
+            g_reachFiringOriginMoves.load(std::memory_order_relaxed) != 0)
+        {
+            loggedShotMove = true;
+            LOG("Reach seat aim: seated personal-weapon shots are leaving the "
+                "rendered eye (first substitution observed)");
+        }
+        if (!loggedShotSkip &&
+            g_reachFiringOriginSkips.load(std::memory_order_relaxed) != 0)
+        {
+            loggedShotSkip = true;
+            LOG("Reach seat aim: a firing-path substitution was SKIPPED "
+                "(stale or non-finite rendered eye); those shots kept the "
+                "stock origin");
         }
         if (!loggedCameraFault &&
             g_reachVehicleCameraFaults.load(std::memory_order_relaxed) != 0)
@@ -24194,9 +24591,37 @@ namespace
             g_reachVehicleIdentityMisses.load(std::memory_order_relaxed) != 0)
         {
             loggedIdentityMiss = true;
-            LOG("Reach first-person vehicles: an occupied vehicle/seat did not "
-                "match the exact HREK identity, physics type and player-seat "
-                "census; that seat remains stock");
+            LOG("Reach first-person vehicles: an occupied seat failed the "
+                "structural layout proofs (object kind, vehi tag, seat block "
+                "or seat-camera pointer); that seat remains stock");
+        }
+        for (auto& missSlot : g_reachVehicleCensusMisses)
+        {
+            uint32_t expected = 2;
+            if (!missSlot.state.compare_exchange_strong(
+                    expected, 3, std::memory_order_acq_rel))
+                continue;
+            if (missSlot.knownIdentity != 0 &&
+                missSlot.knownIdentity <= kReachVehicleTrimCount)
+            {
+                LOG("Reach first-person vehicles: %s raw seat %d (of %d "
+                    "authored) is outside the proven player-seat census; the "
+                    "seat camera is applied with that seat's own per-seat "
+                    "trims",
+                    kReachVehicleTrimNames[missSlot.knownIdentity - 1],
+                    missSlot.seatIndex, missSlot.seatCount);
+            }
+            else
+            {
+                LOG("Reach first-person vehicles: unmatched vehicle tuple "
+                    "%08X/%08X/%08X/%08X type %d raw seat %d (of %d authored); "
+                    "the universal seat camera is applied with no-follow/"
+                    "no-steer policy",
+                    missSlot.fingerprint.radius, missSlot.fingerprint.offsetX,
+                    missSlot.fingerprint.offsetY, missSlot.fingerprint.offsetZ,
+                    missSlot.observedType, missSlot.seatIndex,
+                    missSlot.seatCount);
+            }
         }
         if (!loggedMarkerFailure &&
             g_reachVehicleMarkerFailures.load(std::memory_order_relaxed) != 0)
@@ -24276,6 +24701,16 @@ namespace
                     ConfigReachSeatCamForward(g_config, slot),
                     ConfigReachSeatCamRight(g_config, slot),
                     ConfigReachSeatCamUp(g_config, slot));
+            }
+            else if (identity == kReachVehicleGenericIdentityCode && seat >= 0)
+            {
+                LOG("Reach first-person vehicles: active unmatched vehicle raw "
+                    "seat %d; marker smoothing=%d universal trims "
+                    "F/R/U=%.3f/%.3f/%.3f m",
+                    seat, static_cast<int>(g_config.vehicle_cam_smoothing),
+                    ConfigReachSeatCamForward(g_config, -1),
+                    ConfigReachSeatCamRight(g_config, -1),
+                    ConfigReachSeatCamUp(g_config, -1));
             }
         }
         if (g_reachVehicleInputFaults.load(std::memory_order_relaxed) != 0 &&

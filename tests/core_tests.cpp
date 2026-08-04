@@ -1121,6 +1121,31 @@ int main()
               ReachVehicleIsWalkUpTurret(ReachVehicleId::Machinegun) &&
               ReachVehicleIsAttachedWeapon(ReachVehicleId::WarthogGauss),
             "Reach HREK player-seat census and vehicle families stay explicit");
+        // The 2026-08-04 full-census identities: the Pelican flies with four
+        // passenger benches and no player driver, the Onager and corvette gun
+        // are walk-up emplacements, the Scorpion's secondary MG is an
+        // attached child gun, and the civilian line steers like the warthog.
+        Check(ReachVehicleSeatIsPlayer(ReachVehicleId::Pelican, 4) &&
+              ReachVehicleSeatIsPlayer(ReachVehicleId::Pelican, 10) &&
+              !ReachVehicleSeatIsPlayer(ReachVehicleId::Pelican, 0) &&
+              ReachVehicleSeatIsPlayer(ReachVehicleId::SquadDropPod, 3) &&
+              ReachVehicleSeatIsPlayer(ReachVehicleId::CargoTruck, 1) &&
+              ReachVehicleIsAircraft(ReachVehicleId::Seraph) &&
+              ReachVehicleIsAircraft(ReachVehicleId::Pelican) &&
+              ReachVehicleIsWalkUpTurret(ReachVehicleId::MacCannon) &&
+              ReachVehicleIsWalkUpTurret(ReachVehicleId::CorvetteCannon) &&
+              ReachVehicleIsAttachedWeapon(
+                  ReachVehicleId::ScorpionAntiInfantry) &&
+              ReachVehicleIsAttachedWeapon(
+                  ReachVehicleId::SpacePhantomBeamTurret) &&
+              ReachVehicleIsLookSteered(ReachVehicleId::OniVan) &&
+              ReachVehicleUsesWheel(ReachVehicleId::Pickup) &&
+              !ReachVehicleSeatIsDriver(ReachVehicleId::Pelican, 4) &&
+              ReachVehicleExpectedPhysicsType(ReachVehicleId::Pelican) == 2 &&
+              ReachVehicleExpectedPhysicsType(
+                  ReachVehicleId::CorvetteCannon) == 6 &&
+              ReachVehicleExpectedPhysicsType(ReachVehicleId::Seraph) == 13,
+            "The census identities carry their HREK-derived policy families");
         bool reachFingerprintsUnique = true;
         int reachPlayerSeatCount = 0;
         for (const auto& entry : kReachVehicleFingerprints)
@@ -1135,10 +1160,10 @@ int main()
         ReachVehicleFingerprint alteredReachFingerprint =
             kReachVehicleFingerprints[0].fingerprint;
         alteredReachFingerprint.offsetZ ^= 1u;
-        Check(reachFingerprintsUnique && reachPlayerSeatCount == 25 &&
+        Check(reachFingerprintsUnique && reachPlayerSeatCount == 50 &&
               ReachResolveVehicleFingerprint(alteredReachFingerprint) ==
                   ReachVehicleId::Unknown,
-            "Reach HREK fingerprints resolve 20 identities/25 player seats and fail closed on mutation");
+            "Reach HREK fingerprints resolve 34 identities/50 player seats and fail closed on mutation");
         Check(ReachVehicleSeatIsDriver(ReachVehicleId::Warthog, 0) &&
               !ReachVehicleSeatIsDriver(ReachVehicleId::Warthog, 1) &&
               !ReachVehicleSeatIsDriver(
@@ -1146,6 +1171,11 @@ int main()
               ReachVehicleIsLookSteered(ReachVehicleId::Revenant) &&
               !ReachVehicleIsLookSteered(ReachVehicleId::Wraith) &&
               ReachVehicleSeatFollowsHull(ReachVehicleId::Warthog, 1) &&
+              // The census no longer gates the camera, so an out-of-census
+              // seat on a proven identity rides its hull too; Unknown and
+              // walk-up turrets still claim no hull frame.
+              ReachVehicleSeatFollowsHull(ReachVehicleId::Warthog, 2) &&
+              !ReachVehicleSeatFollowsHull(ReachVehicleId::Unknown, 0) &&
               !ReachVehicleSeatFollowsHull(ReachVehicleId::Machinegun, 0) &&
               !ReachVehicleSeatFollowsPitch(ReachVehicleId::Sabre, 0) &&
               ReachVehicleSeatAuthorsSteering(
@@ -1184,6 +1214,24 @@ int main()
                   reachTrimSnapshot, reachTrimGeneration + 1,
                   kReachVehicleSeatSlots) == -1,
             "Reach menu trim publication is generation-bound and slot-compatible");
+        // An unmatched vehicle publishes the generic sentinel: the snapshot
+        // stays generation-live (so FpActive, recenter and body hide keep
+        // working) while every identity-keyed decoder fails closed to the
+        // universal trim.
+        constexpr uint64_t reachGenericSnapshot = ReachVehicleTrimSnapshot(
+            reachTrimGeneration, ReachVehicleId::Unknown, 2);
+        Check(reachGenericSnapshot != 0 &&
+              static_cast<uint32_t>(reachGenericSnapshot >> 32) ==
+                  reachTrimGeneration &&
+              ((reachGenericSnapshot >> 8) & 0xFFu) ==
+                  kReachVehicleGenericIdentityCode &&
+              ReachVehicleTrimSnapshotSlot(
+                  reachGenericSnapshot, reachTrimGeneration,
+                  kReachVehicleSeatSlots) == -1 &&
+              ReachVehicleTrimSnapshot(0, ReachVehicleId::Unknown, 2) == 0 &&
+              ReachVehicleTrimSnapshot(
+                  reachTrimGeneration, ReachVehicleId::Unknown, 16) == 0,
+            "An unmatched Reach seat stays live under the generic sentinel and binds F1 to the universal trim");
 
         constexpr float kReachTestIpdMeters = 0.064f;
         Check(std::isfinite(kReachWorldUnitsPerMeter) &&
@@ -4513,13 +4561,17 @@ int main()
     const int reachBanshee0 = ConfigReachSeatTrimSlot(1, 0);
     const int reachFalcon10 = ConfigReachSeatTrimSlot(12, 10);
     const int reachMachinegun15 = ConfigReachSeatTrimSlot(20, 15);
+    const int reachDropPod15 = ConfigReachSeatTrimSlot(34, 15);
     Check(reachBanshee0 == 0 &&
-              reachMachinegun15 == kReachVehicleTrimSlots - 1 &&
+              reachDropPod15 == kReachVehicleTrimSlots - 1 &&
+              reachMachinegun15 == 20 * kReachVehicleSeatSlots - 1 &&
               reachFalcon10 != reachBanshee0 &&
               !strcmp(kReachVehicleTrimNames[0], "banshee") &&
               !strcmp(kReachVehicleTrimNames[19], "machinegun") &&
+              !strcmp(kReachVehicleTrimNames[20], "mac_cannon") &&
+              !strcmp(kReachVehicleTrimNames[33], "squad_drop_pod") &&
               ConfigReachSeatTrimSlot(0, 0) == -1 &&
-              ConfigReachSeatTrimSlot(21, 0) == -1 &&
+              ConfigReachSeatTrimSlot(35, 0) == -1 &&
               ConfigReachSeatTrimSlot(12, -1) == -1 &&
               ConfigReachSeatTrimSlot(12, 16) == -1,
         "Reach vehicle names and raw seat indices map to a bounded independent bank");
@@ -4536,7 +4588,7 @@ int main()
         file << "vehicle_cam_up_m_reach_cart_seat15 = -99.0\n";
         file << "vehicle_cam_right_m_reach_cart_seat15 = 99.0\n";
         file << "vehicle_cam_forward_m_reach_falcon_seat16 = 0.99\n";
-        file << "vehicle_cam_forward_m_reach_pelican_seat0 = 0.99\n";
+        file << "vehicle_cam_forward_m_reach_prowler_seat0 = 0.99\n";
         file << "vehicle_cam_up_m_reach_ghost_seat0 = broken\n";
     }
     ConfigLoad(primary.c_str());
@@ -4575,7 +4627,7 @@ int main()
               CountText(reachSeatConfig,
               "\nvehicle_cam_right_m_reach_warthog_chaingun_seat0 = -0.19") == 1 &&
               CountText(reachSeatConfig, "reach_falcon_seat16") == 0 &&
-              CountText(reachSeatConfig, "reach_pelican") == 0,
+              CountText(reachSeatConfig, "reach_prowler") == 0,
         "Saving writes only valid Reach seat overrides with stable Reach prefixes");
     ConfigLoad(primary.c_str());
     Check(ConfigReachSeatCamForward(g_config, reachFalcon10) == 0.42f &&

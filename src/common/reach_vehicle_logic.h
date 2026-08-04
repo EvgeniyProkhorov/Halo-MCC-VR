@@ -7,7 +7,16 @@
 // Reach vehicle identities are an explicit contract shared by the runtime,
 // per-seat config bank and Blender authoring kit. The order mirrors the
 // official HREK tag census; zero always means that identity could not be
-// proven, in which case the optional vehicle feature stays stock.
+// proven, in which case the seat camera runs generically on universal trims.
+// The first 20 rows are the original Blender-authored lineup; the rows from
+// MacCannon on are the 2026-08-04 full-census sweep of every official HREK
+// .vehicle tag (out/hrek-evidence/reach-vehicle-census/), whose pipeline
+// reproduced all 20 known tuples, types and the 25-seat census bit-exactly
+// before any new row was trusted. Aliases resolve to one row on purpose:
+// the four falcon side turrets author plasma_turret's exact tuple+type,
+// shade_anti_air_cannon authors shade_flak's, seraph covers
+// seraph_in_atmosphere, and no row exists for tags whose every seat is
+// authored invalid-for-player (phantoms, troop-hog bed, AI emplacements).
 enum class ReachVehicleId : uint8_t
 {
     Unknown = 0,
@@ -31,10 +40,24 @@ enum class ReachVehicleId : uint8_t
     ShadeFlak,
     PlasmaTurret,
     Machinegun,
+    MacCannon,
+    ScorpionAntiInfantry,
+    Seraph,
+    Pelican,
+    PelicanChinGun,
+    CorvetteCannon,
+    SpacePhantomChinGun,
+    SpacePhantomBeamTurret,
+    CargoTruck,
+    MilitaryTruck,
+    OniVan,
+    Pickup,
+    TruckCabLarge,
+    SquadDropPod,
 };
 
 inline constexpr int kReachVehicleIdentityCount =
-    static_cast<int>(ReachVehicleId::Machinegun);
+    static_cast<int>(ReachVehicleId::SquadDropPod);
 
 // Reach's vehicle postprocess retains a positive vehicle-authored bounding
 // sphere, otherwise it copies the referenced model's exact runtime sphere into
@@ -98,6 +121,34 @@ inline constexpr std::array<ReachVehicleFingerprintEntry,
          {0x3F000000, 0x00000000, 0x00000000, 0x3DCCCCCD}},
         {ReachVehicleId::Machinegun,
          {0x3EE99B18, 0x3D9811F2, 0xB9914460, 0x3E8589DB}},
+        {ReachVehicleId::MacCannon,
+         {0x41200000, 0x00000000, 0x00000000, 0x00000000}},
+        {ReachVehicleId::ScorpionAntiInfantry,
+         {0x3ED28405, 0x3DB8AD5D, 0xB8A6B78A, 0x3D8A1BD8}},
+        {ReachVehicleId::Seraph,
+         {0x410F9AAB, 0xC02DAE74, 0xB625B5D0, 0x3F8295A1}},
+        {ReachVehicleId::Pelican,
+         {0x40B33333, 0x00000000, 0x00000000, 0x00000000}},
+        {ReachVehicleId::PelicanChinGun,
+         {0x3F2BC474, 0x3EC52CD6, 0xB3C52CD6, 0xBE7D391F}},
+        {ReachVehicleId::CorvetteCannon,
+         {0x40400000, 0x00000000, 0x00000000, 0x00000000}},
+        {ReachVehicleId::SpacePhantomChinGun,
+         {0x3F666666, 0x3F666666, 0x00000000, 0x00000000}},
+        {ReachVehicleId::SpacePhantomBeamTurret,
+         {0x3F906FE2, 0x3F8275C2, 0x374C2C51, 0x3BA3D9C0}},
+        {ReachVehicleId::CargoTruck,
+         {0x3FAE222F, 0x3C709BBD, 0xBC1C81E3, 0x3F19FF3B}},
+        {ReachVehicleId::MilitaryTruck,
+         {0x3FD4EDB9, 0xBDAC5C6F, 0x3BA35FAA, 0x3F39CE19}},
+        {ReachVehicleId::OniVan,
+         {0x3FD46CE8, 0xBDB33F17, 0x3BA3612C, 0x3F39C761}},
+        {ReachVehicleId::Pickup,
+         {0x3F9FCD09, 0xBDA6FD71, 0xB329BF5D, 0x3ECB6694}},
+        {ReachVehicleId::TruckCabLarge,
+         {0x3FE2557B, 0xBD4C676F, 0x3ACF7265, 0x3F6831B4}},
+        {ReachVehicleId::SquadDropPod,
+         {0x3FDAB04B, 0xBD31519F, 0x390792C5, 0x3F912A02}},
     }};
 
 inline constexpr bool ReachVehicleFingerprintEqual(
@@ -130,7 +181,11 @@ inline constexpr uint8_t kReachObjectKindVehicle = 1;
 inline constexpr uint32_t kReachVehicleGroupTag = 0x76656869;
 
 // Raw seat indices come from each Reach unit tag. Do not replace these with
-// inferred roles: Falcon's player seats, for example, are 0, 3 and 4.
+// inferred roles: Falcon's player seats are 0, 3 and 4, and Pelican's are
+// its four passenger benches - its driver seat is authored invalid-for-player.
+// Since the 2026-08-04 generic-coverage change this census no longer gates
+// the camera; it names which seats the official tags author player-valid so
+// the worker can log an out-of-census seat precisely.
 inline constexpr bool ReachVehicleSeatIsPlayer(ReachVehicleId id, int seat)
 {
     if (seat < 0 || seat >= 16)
@@ -140,9 +195,18 @@ inline constexpr bool ReachVehicleSeatIsPlayer(ReachVehicleId id, int seat)
     case ReachVehicleId::Revenant:
     case ReachVehicleId::Mongoose:
     case ReachVehicleId::Warthog:
+    case ReachVehicleId::CargoTruck:
+    case ReachVehicleId::MilitaryTruck:
+    case ReachVehicleId::OniVan:
+    case ReachVehicleId::Pickup:
+    case ReachVehicleId::TruckCabLarge:
         return seat == 0 || seat == 1;
     case ReachVehicleId::Falcon:
         return seat == 0 || seat == 3 || seat == 4;
+    case ReachVehicleId::Pelican:
+        return seat == 4 || seat == 5 || seat == 9 || seat == 10;
+    case ReachVehicleId::SquadDropPod:
+        return seat >= 0 && seat <= 3;
     case ReachVehicleId::Banshee:
     case ReachVehicleId::SpaceBanshee:
     case ReachVehicleId::Ghost:
@@ -159,6 +223,13 @@ inline constexpr bool ReachVehicleSeatIsPlayer(ReachVehicleId id, int seat)
     case ReachVehicleId::ShadeFlak:
     case ReachVehicleId::PlasmaTurret:
     case ReachVehicleId::Machinegun:
+    case ReachVehicleId::MacCannon:
+    case ReachVehicleId::ScorpionAntiInfantry:
+    case ReachVehicleId::Seraph:
+    case ReachVehicleId::PelicanChinGun:
+    case ReachVehicleId::CorvetteCannon:
+    case ReachVehicleId::SpacePhantomChinGun:
+    case ReachVehicleId::SpacePhantomBeamTurret:
         return seat == 0;
     default:
         return false;
@@ -169,15 +240,24 @@ inline constexpr bool ReachVehicleIsAircraft(ReachVehicleId id)
 {
     return id == ReachVehicleId::Banshee ||
         id == ReachVehicleId::SpaceBanshee ||
-        id == ReachVehicleId::Falcon || id == ReachVehicleId::Sabre;
+        id == ReachVehicleId::Falcon || id == ReachVehicleId::Sabre ||
+        id == ReachVehicleId::Seraph || id == ReachVehicleId::Pelican;
 }
 
+// SquadDropPod is a scripted prop, not a turret, but it claims no hull-follow
+// frame either, which is exactly this class's behavior. A walk-up tag can
+// also ship mounted on a moving carrier (the falcon side guns author
+// plasma_turret's exact tuple); the frame builder detects that through the
+// engine's own ultimate-parent chain and grants the attached-weapon frame.
 inline constexpr bool ReachVehicleIsWalkUpTurret(ReachVehicleId id)
 {
     return id == ReachVehicleId::ShadePlasma ||
         id == ReachVehicleId::ShadeFlak ||
         id == ReachVehicleId::PlasmaTurret ||
-        id == ReachVehicleId::Machinegun;
+        id == ReachVehicleId::Machinegun ||
+        id == ReachVehicleId::MacCannon ||
+        id == ReachVehicleId::CorvetteCannon ||
+        id == ReachVehicleId::SquadDropPod;
 }
 
 inline constexpr bool ReachVehicleIsAttachedWeapon(ReachVehicleId id)
@@ -185,7 +265,11 @@ inline constexpr bool ReachVehicleIsAttachedWeapon(ReachVehicleId id)
     return id == ReachVehicleId::WraithGunner ||
         id == ReachVehicleId::WarthogChaingun ||
         id == ReachVehicleId::WarthogGauss ||
-        id == ReachVehicleId::WarthogRocket;
+        id == ReachVehicleId::WarthogRocket ||
+        id == ReachVehicleId::ScorpionAntiInfantry ||
+        id == ReachVehicleId::PelicanChinGun ||
+        id == ReachVehicleId::SpacePhantomChinGun ||
+        id == ReachVehicleId::SpacePhantomBeamTurret;
 }
 
 // Reach's official vehicle tags put the controllable seat at raw seat 0. An
@@ -216,16 +300,26 @@ inline constexpr bool ReachVehicleIsLookSteered(ReachVehicleId id)
     case ReachVehicleId::Sabre:
     case ReachVehicleId::Forklift:
     case ReachVehicleId::Cart:
+    case ReachVehicleId::Seraph:
+    case ReachVehicleId::CargoTruck:
+    case ReachVehicleId::MilitaryTruck:
+    case ReachVehicleId::OniVan:
+    case ReachVehicleId::Pickup:
+    case ReachVehicleId::TruckCabLarge:
         return true;
     default:
         return false;
     }
 }
 
+// Hull follow is keyed on the identity's policy class, not on census
+// membership: a proven identity can expose more seats than the 25-seat
+// census (campaign variants), and those seats ride the same hull. Unknown
+// identities claim no hull frame at all.
 inline constexpr bool ReachVehicleSeatFollowsHull(
     ReachVehicleId id, int seat)
 {
-    return ReachVehicleSeatIsPlayer(id, seat) &&
+    return id != ReachVehicleId::Unknown && seat >= 0 && seat < 16 &&
         !ReachVehicleIsWalkUpTurret(id);
 }
 
@@ -256,14 +350,22 @@ inline constexpr int ReachVehicleExpectedPhysicsType(ReachVehicleId id)
     case ReachVehicleId::Mongoose:
     case ReachVehicleId::Warthog:
     case ReachVehicleId::Forklift:
-    case ReachVehicleId::Cart: return 1;
+    case ReachVehicleId::Cart:
+    case ReachVehicleId::CargoTruck:
+    case ReachVehicleId::MilitaryTruck:
+    case ReachVehicleId::OniVan:
+    case ReachVehicleId::Pickup:
+    case ReachVehicleId::TruckCabLarge: return 1;
+    case ReachVehicleId::Pelican: return 2;
     case ReachVehicleId::Ghost:
     case ReachVehicleId::Revenant:
     case ReachVehicleId::Wraith: return 4;
     case ReachVehicleId::Banshee:
     case ReachVehicleId::SpaceBanshee: return 5;
+    case ReachVehicleId::CorvetteCannon: return 6;
     case ReachVehicleId::Falcon: return 8;
-    case ReachVehicleId::Sabre: return 13;
+    case ReachVehicleId::Sabre:
+    case ReachVehicleId::Seraph: return 13;
     case ReachVehicleId::WraithGunner:
     case ReachVehicleId::WarthogChaingun:
     case ReachVehicleId::WarthogGauss:
@@ -271,12 +373,22 @@ inline constexpr int ReachVehicleExpectedPhysicsType(ReachVehicleId id)
     case ReachVehicleId::ShadePlasma:
     case ReachVehicleId::ShadeFlak:
     case ReachVehicleId::PlasmaTurret:
-    case ReachVehicleId::Machinegun: return 16;
+    case ReachVehicleId::Machinegun:
+    case ReachVehicleId::MacCannon:
+    case ReachVehicleId::ScorpionAntiInfantry:
+    case ReachVehicleId::PelicanChinGun:
+    case ReachVehicleId::SpacePhantomChinGun:
+    case ReachVehicleId::SpacePhantomBeamTurret:
+    case ReachVehicleId::SquadDropPod: return 16;
     default: return -1;
     }
 }
 
 inline constexpr uint32_t kReachSeatThirdPersonCameraBit = 1u << 4;
+// R-V1: seat-flags bit 5 is Reach's authored "allows weapons". Only such a
+// seat fires the occupant's own weapon from the camera ray; every other seat
+// fires from a vehicle barrel and its shot origin must not be re-aimed.
+inline constexpr uint32_t kReachSeatAllowsWeaponsBit = 1u << 5;
 inline constexpr int kReachVehicleSeatLimit = 16;
 
 // HREK's generic datum collection and tag-block layouts, matched to the pinned
@@ -357,12 +469,22 @@ inline bool ReachComposeSeatCameraPoint(
 // Menu readers need only identity and raw seat; render-thread transforms stay
 // in their bounded same-thread transaction. The generation in the upper half
 // prevents a stale Reach module from naming a seat after title teardown.
+// An unmatched (generic) vehicle publishes the sentinel identity code so the
+// consumer chain (FpActive, recenter, body hide) still sees a live seat while
+// every identity-keyed decoder fail-closes: ReachVehicleTrimSnapshotSlot and
+// ReachCurrentSeat both reject codes above kReachVehicleIdentityCount, which
+// binds the F1 sliders to the universal trim and keeps wheel/steering off.
+inline constexpr uint8_t kReachVehicleGenericIdentityCode = 0xFF;
+
 inline constexpr uint64_t ReachVehicleTrimSnapshot(
     uint32_t generation, ReachVehicleId id, int seat)
 {
-    return generation && id != ReachVehicleId::Unknown && seat >= 0 && seat < 16
+    return generation && seat >= 0 && seat < 16
         ? (static_cast<uint64_t>(generation) << 32) |
-              (static_cast<uint64_t>(static_cast<uint8_t>(id)) << 8) |
+              (static_cast<uint64_t>(
+                   id != ReachVehicleId::Unknown
+                       ? static_cast<uint8_t>(id)
+                       : kReachVehicleGenericIdentityCode) << 8) |
               static_cast<uint8_t>(seat + 1)
         : 0;
 }

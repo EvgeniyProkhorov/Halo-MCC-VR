@@ -99,13 +99,21 @@ inline constexpr int kOdstVehicleTrimSlots =
 // so the bank reserves sixteen raw indices without assigning roles to unused
 // slots. Keep the keys role-neutral: seat 0 is not always a
 // driver and later assigning a role must not change an existing config key.
-inline constexpr int kReachVehicleTrimCount = 20;
+// Rows 21-34 are the 2026-08-04 full official census
+// (out/hrek-evidence/reach-vehicle-census/): every remaining player-usable
+// HREK vehicle tag. Their slots ship unset, so they follow the universal trim
+// until tuned live in F1. Existing keys keep their exact spelling.
+inline constexpr int kReachVehicleTrimCount = 34;
 inline constexpr const char* kReachVehicleTrimNames[kReachVehicleTrimCount] = {
     "banshee", "space_banshee", "ghost", "revenant", "wraith",
     "wraith_gunner", "mongoose", "warthog", "warthog_chaingun",
     "warthog_gauss", "warthog_rocket", "falcon", "sabre", "scorpion",
     "forklift", "cart", "shade_plasma", "shade_flak", "plasma_turret",
-    "machinegun"};
+    "machinegun", "mac_cannon", "scorpion_anti_infantry", "seraph",
+    "pelican", "pelican_chin_gun", "corvette_cannon",
+    "space_phantom_chin_gun", "space_phantom_beam_turret", "cargo_truck",
+    "military_truck", "oni_van", "pickup", "truck_cab_large",
+    "squad_drop_pod"};
 inline constexpr int kReachVehicleSeatSlots = 16;
 inline constexpr const char*
     kReachVehicleSeatNames[kReachVehicleSeatSlots] = {
