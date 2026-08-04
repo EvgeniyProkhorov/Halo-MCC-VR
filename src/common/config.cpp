@@ -269,13 +269,13 @@ static void Clamp()
     {
         g_config.reach_vehicle_cam_forward_v[i] = std::clamp(
             g_config.reach_vehicle_cam_forward_v[i],
-            kVehicleCamForwardMin, kVehicleCamForwardMax);
+            kReachVehicleCamForwardMin, kReachVehicleCamForwardMax);
         g_config.reach_vehicle_cam_up_v[i] = std::clamp(
             g_config.reach_vehicle_cam_up_v[i],
-            kVehicleCamUpMin, kVehicleCamUpMax);
+            kReachVehicleCamUpMin, kReachVehicleCamUpMax);
         g_config.reach_vehicle_cam_right_v[i] = std::clamp(
             g_config.reach_vehicle_cam_right_v[i],
-            kVehicleCamRightMin, kVehicleCamRightMax);
+            kReachVehicleCamRightMin, kReachVehicleCamRightMax);
     }
     g_config.vehicle_wheel_max_deg =
         std::clamp(g_config.vehicle_wheel_max_deg, 30.0f, 180.0f);

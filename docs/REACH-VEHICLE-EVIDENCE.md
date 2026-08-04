@@ -363,13 +363,20 @@ universal trim live; setting forward does not freeze up or right. Save writes
 only axes that were explicitly set. Fresh Reach slots are all unset, so no
 unverified Reach seat placement is shipped as a tuned default.
 
-All universal, Halo 3, ODST, and Reach placement values share these clamps:
+Halo 3, ODST, and the universal placement values retain their close-range
+clamps. Reach's validated user-authored lineup requires larger marker-to-eye
+deltas (most notably the Sabre), so only Reach's per-seat bank uses the wider
+limits below. This does not alter another title's F1 controls.
 
 | Axis | Minimum | Maximum |
 | --- | ---: | ---: |
 | forward | -1.00 m | +1.50 m |
 | up | -1.00 m | +1.50 m |
 | right | -1.00 m | +1.00 m |
+
+Reach per-seat limits are forward -64..+64 m, up -16..+16 m, and right
+-16..+16 m. These bounds contain all 25 strict Blender exports while retaining
+finite-value, identity, seat, and vehicle-bounds validation at runtime.
 
 The F1 panel selects one of three independent banks. While a generation-valid
 Reach seat snapshot is active, the same three sliders bind to that exact
@@ -510,6 +517,29 @@ tools/validate_reach_vehicle_blend.py independently checks the exact identity
 and camera counts, collection order, node counts, source hashes, locked
 references, six direct-child frames, metric scale, embedded tools/evidence,
 and translation-only camera locks. The current file reports VALIDATION_OK.
+
+### User-authored 25-seat lineup (2026-08-04)
+
+The user completed and explicitly marked all 25 cameras placed in Blender.
+The strict extractor and independent validator both passed against the saved
+artifact:
+
+~~~text
+reach_vehicle_cameras_v1.blend
+SHA-256 3937AF50C963A94D9440FCA9DA338739D6C5FD3E4070F2DFCF3A1B9126E50CDF
+
+reach_vehicle_camera_points.json (schema 2, 75 config values)
+SHA-256 3CBA4AF66A83B04138F816F965EBB1F1056088A3B38E0E371CDD04C61D9AF574
+
+REACH_POINTS_READY: cameras=25 placed=25
+VALIDATION_OK: collections=20 cameras=25 source_assets=21 child_frames=6
+~~~
+
+The exported marker-to-eye deltas range from -3.70 to +42.43 m forward,
+-8.18 to +3.52 m up, and -0.73 to +0.21 m right. The earlier shared
+close-range clamp would have silently truncated valid authored seats. The
+Reach bank now has title-specific bounds large enough for the complete strict
+export; Halo 3, ODST, and universal placement limits are unchanged.
 
 ## R-V9 - acceptance still required
 

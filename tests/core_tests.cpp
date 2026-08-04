@@ -4532,9 +4532,9 @@ int main()
         file << "vehicle_cam_right_m_reach_machinegun_seat15 = 0.31\n";
         file << "vehicle_cam_up_m_reach_wraith_gunner_seat0 = 0.17\n";
         file << "vehicle_cam_right_m_reach_warthog_chaingun_seat0 = -0.19\n";
-        file << "vehicle_cam_forward_m_reach_cart_seat15 = 9.0\n";
-        file << "vehicle_cam_up_m_reach_cart_seat15 = -9.0\n";
-        file << "vehicle_cam_right_m_reach_cart_seat15 = 9.0\n";
+        file << "vehicle_cam_forward_m_reach_cart_seat15 = 99.0\n";
+        file << "vehicle_cam_up_m_reach_cart_seat15 = -99.0\n";
+        file << "vehicle_cam_right_m_reach_cart_seat15 = 99.0\n";
         file << "vehicle_cam_forward_m_reach_falcon_seat16 = 0.99\n";
         file << "vehicle_cam_forward_m_reach_pelican_seat0 = 0.99\n";
         file << "vehicle_cam_up_m_reach_ghost_seat0 = broken\n";
@@ -4551,11 +4551,11 @@ int main()
               ConfigReachSeatCamUp(g_config, reachWraithGunner0) == 0.17f &&
               ConfigReachSeatCamRight(g_config, reachHogChaingun0) == -0.19f &&
               ConfigReachSeatCamForward(g_config, reachCart15) ==
-                  kVehicleCamForwardMax &&
+                  kReachVehicleCamForwardMax &&
               ConfigReachSeatCamUp(g_config, reachCart15) ==
-                  kVehicleCamUpMin &&
+                  kReachVehicleCamUpMin &&
               ConfigReachSeatCamRight(g_config, reachCart15) ==
-                  kVehicleCamRightMax &&
+                  kReachVehicleCamRightMax &&
               ConfigReachSeatCamForward(g_config, reachBanshee0) == 0.20f &&
               !g_config.reach_vehicle_cam_up_set[reachGhost0] &&
               ConfigSeatCamForward(g_config, hogDriver) != 0.42f &&

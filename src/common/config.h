@@ -127,6 +127,18 @@ inline constexpr float kVehicleCamUpMax = 1.50f;
 inline constexpr float kVehicleCamRightMin = -1.00f;
 inline constexpr float kVehicleCamRightMax = 1.00f;
 
+// Reach's HREK marker seeds are not consistently authored at the player's
+// eye. The validated 25-seat Blender lineup therefore contains legitimate
+// marker-to-eye deltas much larger than the close-range trims used by Halo 3
+// and ODST (the Sabre is the largest). Keep this title-specific so the
+// established sliders and clamps for the other engines do not change.
+inline constexpr float kReachVehicleCamForwardMin = -64.0f;
+inline constexpr float kReachVehicleCamForwardMax = 64.0f;
+inline constexpr float kReachVehicleCamUpMin = -16.0f;
+inline constexpr float kReachVehicleCamUpMax = 16.0f;
+inline constexpr float kReachVehicleCamRightMin = -16.0f;
+inline constexpr float kReachVehicleCamRightMax = 16.0f;
+
 // The storage slot for one seat, or -1 when the seat cannot be keyed (on
 // foot, unidentified vehicle, or a seat index Halo 3 never authors).
 inline constexpr int ConfigSeatTrimSlot(int vehicleId, int seatIndex,
