@@ -725,6 +725,47 @@ exactly what the next session decides. If sliding survives THIS change, the
 next suspect in the evidence chain is the pre-render sampling phase of the
 outer hook, not the marker animation.
 
+## R-V14 - 2026-08-04: the hull never chases the resting hand
+
+Second user headset report, against d032252: "sliding everywhere cant drive
+in a stright line". The session log is again clean (no faults, no anchor
+fallbacks - R-V13's rigid parenting held every frame), the live config is
+bit-identical across all three sliding sessions, so the defect is in the
+input design, not a failure path or a setting.
+
+**Mechanism.** With vehicle_view_follow OFF (the user's setting), no Reach
+seat authored steering: ReachVehicleSeatAuthorsSteering requires
+followEnabled, mirroring Halo 3's coupling ("steering ownership switches on
+exactly the condition that removes the closed loop's feedback"). In every
+look-steered driver seat the closed-loop hand aim therefore kept writing the
+right stick - and in Reach's look-steered ground vehicles the right stick IS
+hull steering, so the hull permanently steered toward wherever the right
+controller happened to point. A controller resting in the lap is a standing
+turn command: "cannot drive in a straight line". The loop is stable (its
+feedback exists) - it is simply steering a vehicle with the player's idle
+hand. Halo 3's ACCEPTED driving sessions ran with follow ON, i.e. with
+native-stick steering; the coupling, not the loop, is what Reach inherited
+wrongly for a follow-off player.
+
+**Change.** A look-steered GROUND driver seat (ReachVehicleSeatIsDriver and
+ReachVehicleUsesWheel - ghost, revenant, mongoose, warthog, forklift, cart
+and the R-V11 civilian line) now authors steering whenever its frame is
+active, independent of view follow. Through the existing shared ownership
+plumbing that means: Halo's own turn stick (or the two-hand wheel when
+vehicle_motion grants it) steers the hull, ApplyVrTurn releases the stick
+(the world-locked view stays HMD-owned), and the closed-loop hand aim keeps
+only the pitch/gun. A centred stick is now a straight line by construction.
+Aircraft (banshee, falcon, sabre, seraph) deliberately keep their accepted
+hand-aim climb/dive flying; Wraith and Scorpion keep their independently
+aimed turrets; passengers and gunners keep hand aim, which never steered the
+hull. Halo 3 and ODST are untouched and keep their accepted follow-coupled
+ownership.
+
+Headset-unverified: whether stick-owned steering reads as "like Halo 3" in
+the user's hands. If ground driving is cured but the user also wants the
+view to travel with the hull, that is vehicle_view_follow = 1, which now
+composes with this ownership rule unchanged.
+
 ## R-V9 - acceptance still required
 
 Nothing in this document changes the accepted pointer. Packaging, successful

@@ -21319,6 +21319,19 @@ namespace
     {
         const uint32_t generation = g_reachCamera.generation.load(
             std::memory_order_relaxed);
+        // R-V14: a look-steered GROUND driver's hull must never chase the
+        // resting hand. In these seats steering ownership no longer requires
+        // view follow: Halo's own turn stick (or the wheel) steers the hull,
+        // ApplyVrTurn releases the stick, and the closed-loop hand aim keeps
+        // only the gun. With the closed loop steering, any hand offset - a
+        // controller resting in the lap - became a standing hull turn, the
+        // reported "sliding everywhere / cannot drive in a straight line".
+        // Aircraft keep their accepted hand-aim climb/dive flying, and the
+        // Halo 3 title keeps its own accepted follow-coupled ownership.
+        const bool groundDriverAuthors = frame.active &&
+            ReachVehicleSeatIsDriver(frame.identity, frame.seatIndex) &&
+            ReachVehicleUsesWheel(frame.identity) &&
+            ReachVehicleFpActive();
         // A walk-up turret riding a real carrier (falcon side guns resolve to
         // plasma_turret's tuple) earned a carrier basis in the frame builder;
         // it follows that carrier's yaw exactly like an attached weapon.
@@ -21337,7 +21350,7 @@ namespace
             g_reachYawSeat = {};
             g_reachSeatYaw = {};
             g_reachSeatAuthorsSteering.store(
-                0, std::memory_order_release);
+                groundDriverAuthors ? 1u : 0u, std::memory_order_release);
             Halo3ClearRollStableFollow();
             return;
         }
@@ -21372,9 +21385,10 @@ namespace
         {
             Halo3ClearRollStableFollow();
         }
-        const bool authors = ReachVehicleSeatAuthorsSteering(
-            frame.identity, frame.seatIndex,
-            g_config.vehicle_view_follow);
+        const bool authors = groundDriverAuthors ||
+            ReachVehicleSeatAuthorsSteering(
+                frame.identity, frame.seatIndex,
+                g_config.vehicle_view_follow);
         g_reachSeatAuthorsSteering.store(
             authors ? 1u : 0u, std::memory_order_release);
     }
