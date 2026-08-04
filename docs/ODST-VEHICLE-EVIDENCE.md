@@ -641,3 +641,124 @@ everything except the four gaps above. No Halo 3 constant is carried into ODST
 anywhere: the `+0x20` structure shift, the differing TLS slot, seat word, node
 bank cluster and physics/seat block offsets are each independently derived,
 and the H3-exact byte patterns provably match zero times here.
+
+## O-E6 -- why O4 and O5 both failed, and what the binary actually says
+
+Candidates O4 and O5 each shipped a fix for the seat exposure and each was
+reported still broken with a *clean* diagnostic. That combination is the
+finding: a mechanism that is merely leaky produces a noisy log, so a clean log
+plus a live symptom means the mechanism was wrong.
+
+### O-E6a The exposure lock was 100% inert (PROVEN)
+
+`halo3odst.dll+0x8F0D70` is `c_screen_postprocess::x_settings_internal.
+m_auto_exposure_lock` -- the copy the eye-adaptation integrator really reads,
+at its single read site `+0x2B21BD`. It is also the *destination* of a
+0x38-byte global-to-global copy from `x_editable_settings` (`+0x2D7E210`),
+which is `accept_edited_settings` inlined into `main_render` at `+0x1B4D9E`.
+
+Order inside `main_render` (`+0x1B4708..+0x1B4F2A`, one straight-line function):
+
+| RVA | what |
+|---|---|
+| `+0x1B49B7` | setup_camera pass -> reaches our camera-copy hook, **we write 1** |
+| `+0x1B4D9E` | the 0x38-byte copy editable -> internal, **erases it to 0** |
+| `+0x1B4E1E` | the per-window render loop -> integrator reads **0** |
+
+An exhaustive rip-relative scan finds exactly three instructions touching
+`+0x8F0D70` in the whole 7 MB module -- the CRT seed read, the copy store, and
+the integrator read. The copy is the only writer. The one branch that skips the
+copy (`+0x1B4C2C`) also skips the render loop, so no frame renders without it.
+
+A rescue path was considered and refuted: `+0x2CAAF0` (our hooked camera copy)
+has five call sites, and two are reachable after the copy in the same frame --
+but the in-render one (`+0x2D111C`, via `+0x2AF71C`) receives a **stack**
+address, so our ownership gate is false there and we never write inside the
+window.
+
+**Fix:** assert the editable copy at `+0x2D7E240`, which the engine itself then
+propagates into the internal copy every frame. Both blocks are derived from the
+copy instruction, and the result is accepted only if its internal address
+equals the address the independent `kOdstExposureLockSig` decode produces.
+
+```
+editableBase = hit + 7  + disp32@(hit+3)    -> +0x2D7E210
+internalBase = hit + 14 + disp32@(hit+10)   -> +0x8F0D40
+editableLock = hit + 50 + disp32@(hit+46)   -> +0x2D7E240
+internalLock = hit + 58 + disp32@(hit+54)   -> +0x8F0D70   (must match)
+```
+
+The accept-copy signature matches once in halo3odst.dll (`+0x1B4D9E`), once in
+halo3.dll (`+0x185CFD`) and once in haloreach.dll (`+0xC3593`): unique, but NOT
+title-discriminating. **The scan must stay scoped to the pinned ODST module.**
+
+**Lifecycle is now load-bearing.** The old write was self-healing -- the engine
+wiped it every frame, so a leak cost nothing. The editable copy has no engine
+writer at all, so a latched engage would survive a title exit and freeze
+auto-exposure for the menus and the next level. Released on both teardown
+paths, pointers dropped after the release.
+
+### O-E6b The VISR write was a shipped regression (REMOVED)
+
+`+0x8E6CA4` is correctly *named* -- the module's own debug-var record at
+`+0x8E6D58` binds it to `vision_mode_automatic_overbrightness_adaptation`. But
+it is not scene exposure, it has no engine writer, and O4/O5 had no teardown
+release. Engage #9 of the 2026-08-03 session (21:47:14) never released, so VISR
+adaptation stayed disabled for the remainder of that process, including on
+foot. Removed entirely.
+
+### O-E6c Passenger aim: the shot line, exactly (PROVEN)
+
+`unit_get_camera_position` = `halo3odst.dll+0x399DC4` (`.pdata` size `0x2A9`;
+the Halo 3 homolog is `+0x3555EC`, **not** `+0x399DC4` as an earlier revision
+of this document stated). The weapon-barrel firing-data function `+0x396B7C`
+calls it into its OWN stack buffer and then projects the muzzle onto that ray:
+
+```
+396C10  call 0x399dc4               ; camPos -> local [rbp-0x59]
+396C36..396C96                      ; origin := camPos + dir*dot(origin-camPos, dir)
+```
+
+So a seated occupant's shot line is exactly `(camPos, aiming_vector)`. Because
+the firing path takes a *private* copy, the shot origin can be moved without
+touching the camera the engine places.
+
+That distinction is the whole design. `+0x399DC4` **is** the engine's
+first-person camera source: `+0x242340` tests the seat's third-person bit and,
+when clear -- which is exactly the bit we clear to hide the body -- calls
+`+0x1AC670`, which takes its camera position from `+0x399DC4` and its forward
+from `unit->aiming_vector` at `[unit+0x1A4]`. Overriding the evaluator
+wholesale would therefore feed our own output back in as the next frame's
+camera origin, and would also move the hand origin (seeded from `g_baseCam`),
+the cutscene camera and the chase camera.
+
+**Fix:** hook `+0x399DC4` and substitute the rendered eye only when the return
+address is the firing call site (`+0x396C15`, derived at runtime by finding the
+unique `E8` in `+0x396B7C` that targets the evaluator), the unit is the seated
+player's own, the seat's tag allows a personal weapon, and no authored
+cinematic is running. Everything else keeps the stock value.
+
+The O5 one-distance re-origin in `Game_ComputeAimStick` is REMOVED with it: it
+made the two lines cross at `crosshair_distance_m` and would now
+double-correct. Its known limitation (~5 deg residual at 5 m, recorded in the
+previous section) no longer applies -- the lines are coincident at every range,
+so the seat height trim no longer trades comfort against accuracy.
+
+### O-E6d Recorded, NOT fixed: the integrator runs 3x per frame
+
+`c_camera_fx_values` is at `*(player_view + 0x2B0) + 0xE4`; its leading
+`c_exposure` carries a 60-entry rolling luminance history. The integrator at
+`+0x2B1E90` is reached only through `c_player_view::render_` (`+0x2AE13C`,
+vtable slot 0), and `prepareView` is not hooked -- the engine calls it once at
+`+0x1B4E1E` and our renderView hook calls it twice more. So the history
+advances **three times per frame per window** (270/s at 90 fps) against an
+engine design of one per 30 Hz tick, fed from alternating eye viewpoints. In a
+seat the hull splits the eyes' luminance asymmetrically, which is a plausible
+oscillator.
+
+This is real but **unmeasured as a cause**, and the obvious rewind fix
+snapshots after the engine's own advance and uses offsets that differ in Halo 3
+(fx at `window+0x170`, sizeof `0x114`), so it would touch the accepted Halo 3
+baseline. Left for a separate candidate. O6's read-back telemetry is what
+decides it: if the log now reports the hold verified against the engine's own
+copy and the brightness still moves, this is the remaining mechanism.
