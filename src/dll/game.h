@@ -153,11 +153,17 @@ bool Game_Halo3VehicleWheelActive();
 // per-seat menu. Game_Halo3SeatTrimName is menu-thread only.
 int Game_Halo3CurrentSeatTrimSlot();
 const char* Game_Halo3SeatTrimName(int slot);
-// O2: the same binding across titles. `outIsOdst` reports which bank the slot
-// indexes, because ODST keeps its own wider table (its Scorpion riders are
-// player seats and it adds the Shade). Menu thread only, same as above.
-int Game_VehicleSeatTrimSlotEx(int* outIsOdst);
-const char* Game_VehicleSeatTrimName(int slot, int isOdst);
+// The F1 seat sliders need the title bank as well as the integer slot; slot 3
+// in each title is unrelated storage. Keep this explicit as title coverage
+// grows rather than encoding it in another boolean.
+enum class VehicleTrimBank : uint8_t
+{
+    Halo3 = 0,
+    Odst,
+    Reach,
+};
+int Game_VehicleSeatTrimSlotEx(VehicleTrimBank* outBank);
+const char* Game_VehicleSeatTrimName(int slot, VehicleTrimBank bank);
 // True while a vehicle seat's own angular limit is holding the weapon short of
 // where the hand points (a warthog rider seat authors yaw +/-90, pitch +/-45
 // relative to the hull). `outDir` then carries the engine's ACTUAL aim as a

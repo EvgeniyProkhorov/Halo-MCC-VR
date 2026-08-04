@@ -161,6 +161,32 @@ static void ParseOdstSeatTrim(const char* key, const char* suffix,
     LOG("config: unknown ODST vehicle in '%s' ignored", key);
 }
 
+// Reach uses role-neutral seat0..seat15 keys because raw indices do not imply
+// the same driver/passenger/gunner role across its official HREK tags.
+static void ParseReachSeatTrim(const char* key, const char* suffix,
+                              const char* val, float* values, bool* setFlags)
+{
+    for (int v = 0; v < kReachVehicleTrimCount; ++v)
+    {
+        const size_t nameLen = strlen(kReachVehicleTrimNames[v]);
+        if (strncmp(suffix, kReachVehicleTrimNames[v], nameLen) != 0)
+            continue;
+        const char* rest = suffix + nameLen;
+        if (*rest != '_')
+            continue;
+        ++rest;
+        for (int s = 0; s < kReachVehicleSeatSlots; ++s)
+            if (!strcmp(rest, kReachVehicleSeatNames[s]))
+            {
+                const int slot = v * kReachVehicleSeatSlots + s;
+                if (ParseFloatSetting(key, val, values[slot]))
+                    setFlags[slot] = true;
+                return;
+            }
+    }
+    LOG("config: unknown Reach vehicle or seat in '%s' ignored", key);
+}
+
 static bool FileExists(const wchar_t* path)
 {
     const DWORD attributes = GetFileAttributesW(path);
@@ -238,6 +264,18 @@ static void Clamp()
         g_config.odst_vehicle_cam_right_v[i] =
             std::clamp(g_config.odst_vehicle_cam_right_v[i],
                        kVehicleCamRightMin, kVehicleCamRightMax);
+    }
+    for (int i = 0; i < kReachVehicleTrimSlots; ++i)
+    {
+        g_config.reach_vehicle_cam_forward_v[i] = std::clamp(
+            g_config.reach_vehicle_cam_forward_v[i],
+            kVehicleCamForwardMin, kVehicleCamForwardMax);
+        g_config.reach_vehicle_cam_up_v[i] = std::clamp(
+            g_config.reach_vehicle_cam_up_v[i],
+            kVehicleCamUpMin, kVehicleCamUpMax);
+        g_config.reach_vehicle_cam_right_v[i] = std::clamp(
+            g_config.reach_vehicle_cam_right_v[i],
+            kVehicleCamRightMin, kVehicleCamRightMax);
     }
     g_config.vehicle_wheel_max_deg =
         std::clamp(g_config.vehicle_wheel_max_deg, 30.0f, 180.0f);
@@ -404,18 +442,27 @@ void ConfigLoad(const wchar_t* path)
         // A malformed value must NOT invent an override (the seat keeps
         // following the universal trim), and an unknown suffix is reported,
         // not silently swallowed.
-        // ODST's own bank: vehicle_cam_forward_m_odst_warthog_passenger.
-        // These MUST be tested before the Halo 3 forms below, whose prefixes
-        // they share -- otherwise "odst_warthog_passenger" reaches the Halo 3
-        // parser, which would report an unknown vehicle and drop the line.
+        // Title banks must be tested before the generic Halo 3 prefix.
+        else if (!strncmp(key, "vehicle_cam_forward_m_reach_", 28))
+            ParseReachSeatTrim(key, key + 28, val,
+                g_config.reach_vehicle_cam_forward_v,
+                g_config.reach_vehicle_cam_forward_set);
         else if (!strncmp(key, "vehicle_cam_forward_m_odst_", 27))
             ParseOdstSeatTrim(key, key + 27, val,
                               g_config.odst_vehicle_cam_forward_v,
                               g_config.odst_vehicle_cam_forward_set);
+        else if (!strncmp(key, "vehicle_cam_up_m_reach_", 23))
+            ParseReachSeatTrim(key, key + 23, val,
+                g_config.reach_vehicle_cam_up_v,
+                g_config.reach_vehicle_cam_up_set);
         else if (!strncmp(key, "vehicle_cam_up_m_odst_", 22))
             ParseOdstSeatTrim(key, key + 22, val,
                               g_config.odst_vehicle_cam_up_v,
                               g_config.odst_vehicle_cam_up_set);
+        else if (!strncmp(key, "vehicle_cam_right_m_reach_", 26))
+            ParseReachSeatTrim(key, key + 26, val,
+                g_config.reach_vehicle_cam_right_v,
+                g_config.reach_vehicle_cam_right_set);
         else if (!strncmp(key, "vehicle_cam_right_m_odst_", 25))
             ParseOdstSeatTrim(key, key + 25, val,
                               g_config.odst_vehicle_cam_right_v,
@@ -866,7 +913,7 @@ void ConfigSave()
     fprintf(f, "#  FIRST-PERSON VEHICLES\n");
     fprintf(f, "#  Sit in the seat instead of floating behind the vehicle.\n");
     fprintf(f, "# -------------------------------------------------------------------\n\n");
-    fprintf(f, "# First-person vehicle camera (currently Halo 3). The position is your\n");
+    fprintf(f, "# First-person vehicle camera. The position is your title-specific\n");
     fprintf(f, "# Blender-authored point for each seat; head look and leaning stay\n");
     fprintf(f, "# live. 0 = the stock behind-the-vehicle view.\n");
     fprintf(f, "# (default %d)\n", d.vehicle_first_person ? 1 : 0);
@@ -933,6 +980,30 @@ void ConfigSave()
                 fprintf(f, "vehicle_cam_right_m_odst_%s_%s = %.2f\n",
                         kOdstVehicleTrimNames[v], kOdstVehicleSeatNames[s],
                         g_config.odst_vehicle_cam_right_v[i]);
+        }
+    fprintf(f, "# Reach uses role-neutral raw seat indices:\n");
+    fprintf(f, "#   vehicle_cam_forward_m_reach_<vehicle>_seat<number>\n");
+    fprintf(f, "#   vehicles: banshee space_banshee ghost revenant wraith wraith_gunner\n");
+    fprintf(f, "#             mongoose warthog warthog_chaingun warthog_gauss\n");
+    fprintf(f, "#             warthog_rocket falcon sabre scorpion forklift cart\n");
+    fprintf(f, "#             shade_plasma shade_flak plasma_turret machinegun\n");
+    fprintf(f, "#   seats: seat0 through seat15 (only authored seats are used)\n");
+    for (int v = 0; v < kReachVehicleTrimCount; ++v)
+        for (int s = 0; s < kReachVehicleSeatSlots; ++s)
+        {
+            const int i = v * kReachVehicleSeatSlots + s;
+            if (g_config.reach_vehicle_cam_forward_set[i])
+                fprintf(f, "vehicle_cam_forward_m_reach_%s_%s = %.2f\n",
+                    kReachVehicleTrimNames[v], kReachVehicleSeatNames[s],
+                    g_config.reach_vehicle_cam_forward_v[i]);
+            if (g_config.reach_vehicle_cam_up_set[i])
+                fprintf(f, "vehicle_cam_up_m_reach_%s_%s = %.2f\n",
+                    kReachVehicleTrimNames[v], kReachVehicleSeatNames[s],
+                    g_config.reach_vehicle_cam_up_v[i]);
+            if (g_config.reach_vehicle_cam_right_set[i])
+                fprintf(f, "vehicle_cam_right_m_reach_%s_%s = %.2f\n",
+                    kReachVehicleTrimNames[v], kReachVehicleSeatNames[s],
+                    g_config.reach_vehicle_cam_right_v[i]);
         }
     fprintf(f, "\n");
     fprintf(f, "# ON follows ground-vehicle yaw/pitch; aircraft stay yaw-only.\n");

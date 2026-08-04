@@ -1,5 +1,9 @@
 # Halo: Reach signature evidence
 
+The optional first-person vehicle bindings, HREK layouts, 20-identity/25-seat
+census, and headset-pending candidate are recorded separately in
+`docs/REACH-VEHICLE-EVIDENCE.md`.
+
 Status: **camera/culling and screen-aligned patchy-fog transaction headset-passed;
 physical-scale calibration and cumulative regressions pending**. The proven
 signatures below are wired into a permanent, all-or-nothing Reach per-eye camera core

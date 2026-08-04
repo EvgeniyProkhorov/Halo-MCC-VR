@@ -30,6 +30,7 @@
 #include "reach_render_preflight.h"
 #endif
 #include "reach_render_logic.h"
+#include "reach_vehicle_logic.h"
 #include "scope_logic.h"
 #include "title_registry.h"
 #include "title_runtime_state.h"
@@ -1097,6 +1098,92 @@ int main()
                   vehicleSnapshot, vehicleGeneration + 1) &&
               !ReachVehicleInputSnapshotIsVehicle(vehicleSnapshot, 0),
             "Reach vehicle input pins the HREK-matched retail identities and rejects stale generations");
+
+        Check(kReachUnitGetCameraInfoRva == 0x0048A4B4 &&
+              kReachUnitGetCameraInfoBodySize == 0x45A &&
+              kReachObjectMarkerResolverRva == 0x0047044C &&
+              kReachObjectMarkerResolverBodySize == 0x2DB &&
+              kReachObjectUltimateParentRva == 0x00473DC0 &&
+              kReachObjectUltimateParentBodySize == 0x3F &&
+              kReachVehicleTypeAccessorRva == 0x004AC1E4 &&
+              kReachVehicleTypeAccessorBodySize == 0x51 &&
+              kReachTagGetRva == 0x00031AE8 &&
+              kReachTagGetBodySize == 0x7B,
+            "Reach native seat-camera, marker, carrier, type and tag bindings are pinned");
+        Check(kReachVehicleIdentityCount == kReachVehicleTrimCount &&
+              ReachVehicleSeatIsPlayer(ReachVehicleId::Falcon, 0) &&
+              ReachVehicleSeatIsPlayer(ReachVehicleId::Falcon, 3) &&
+              ReachVehicleSeatIsPlayer(ReachVehicleId::Falcon, 4) &&
+              !ReachVehicleSeatIsPlayer(ReachVehicleId::Falcon, 1) &&
+              ReachVehicleSeatIsPlayer(ReachVehicleId::Warthog, 1) &&
+              !ReachVehicleSeatIsPlayer(ReachVehicleId::Scorpion, 1) &&
+              ReachVehicleIsAircraft(ReachVehicleId::SpaceBanshee) &&
+              ReachVehicleIsWalkUpTurret(ReachVehicleId::Machinegun) &&
+              ReachVehicleIsAttachedWeapon(ReachVehicleId::WarthogGauss),
+            "Reach HREK player-seat census and vehicle families stay explicit");
+        bool reachFingerprintsUnique = true;
+        int reachPlayerSeatCount = 0;
+        for (const auto& entry : kReachVehicleFingerprints)
+        {
+            reachFingerprintsUnique = reachFingerprintsUnique &&
+                ReachResolveVehicleFingerprint(entry.fingerprint) ==
+                    entry.identity;
+            for (int seat = 0; seat < kReachVehicleSeatLimit; ++seat)
+                if (ReachVehicleSeatIsPlayer(entry.identity, seat))
+                    ++reachPlayerSeatCount;
+        }
+        ReachVehicleFingerprint alteredReachFingerprint =
+            kReachVehicleFingerprints[0].fingerprint;
+        alteredReachFingerprint.offsetZ ^= 1u;
+        Check(reachFingerprintsUnique && reachPlayerSeatCount == 25 &&
+              ReachResolveVehicleFingerprint(alteredReachFingerprint) ==
+                  ReachVehicleId::Unknown,
+            "Reach HREK fingerprints resolve 20 identities/25 player seats and fail closed on mutation");
+        Check(ReachVehicleSeatIsDriver(ReachVehicleId::Warthog, 0) &&
+              !ReachVehicleSeatIsDriver(ReachVehicleId::Warthog, 1) &&
+              !ReachVehicleSeatIsDriver(
+                  ReachVehicleId::WarthogChaingun, 0) &&
+              ReachVehicleIsLookSteered(ReachVehicleId::Revenant) &&
+              !ReachVehicleIsLookSteered(ReachVehicleId::Wraith) &&
+              ReachVehicleSeatFollowsHull(ReachVehicleId::Warthog, 1) &&
+              !ReachVehicleSeatFollowsHull(ReachVehicleId::Machinegun, 0) &&
+              !ReachVehicleSeatFollowsPitch(ReachVehicleId::Sabre, 0) &&
+              ReachVehicleSeatAuthorsSteering(
+                  ReachVehicleId::Ghost, 0, true) &&
+              !ReachVehicleSeatAuthorsSteering(
+                  ReachVehicleId::Ghost, 0, false) &&
+              ReachVehicleUsesWheel(ReachVehicleId::Forklift) &&
+              !ReachVehicleUsesWheel(ReachVehicleId::Banshee),
+            "Reach view-follow and steering ownership remain seat-explicit");
+        ReachSeatCameraBasis reachBasis{};
+        reachBasis.forward[0] = 1.0f;
+        reachBasis.left[1] = 1.0f;
+        reachBasis.up[2] = 1.0f;
+        const float reachBase[3] = {10.0f, 20.0f, 30.0f};
+        float reachPoint[3]{};
+        Check(ReachComposeSeatCameraPoint(
+                  reachBase, reachBasis, 2.0f, 3.0f, 4.0f, reachPoint) &&
+              reachPoint[0] == 12.0f && reachPoint[1] == 17.0f &&
+              reachPoint[2] == 34.0f,
+            "Reach camera trims use Blender +forward/+right/+up axes");
+        reachBasis.scale = 2.0f;
+        Check(ReachComposeSeatCameraPoint(
+                  reachBase, reachBasis, 2.0f, 3.0f, 4.0f, reachPoint) &&
+              reachPoint[0] == 14.0f && reachPoint[1] == 14.0f &&
+              reachPoint[2] == 38.0f,
+            "Reach camera trims honor authored marker uniform scale");
+        constexpr uint32_t reachTrimGeneration = 0x11223344;
+        constexpr uint64_t reachTrimSnapshot = ReachVehicleTrimSnapshot(
+            reachTrimGeneration, ReachVehicleId::Falcon, 4);
+        Check(ReachVehicleTrimSnapshotSlot(
+                  reachTrimSnapshot, reachTrimGeneration,
+                  kReachVehicleSeatSlots) ==
+                  ConfigReachSeatTrimSlot(
+                      static_cast<int>(ReachVehicleId::Falcon), 4) &&
+              ReachVehicleTrimSnapshotSlot(
+                  reachTrimSnapshot, reachTrimGeneration + 1,
+                  kReachVehicleSeatSlots) == -1,
+            "Reach menu trim publication is generation-bound and slot-compatible");
 
         constexpr float kReachTestIpdMeters = 0.064f;
         Check(std::isfinite(kReachWorldUnitsPerMeter) &&
@@ -4419,6 +4506,84 @@ int main()
               !g_config.vehicle_cam_right_set[hogDriver] &&
               g_config.vehicle_view_follow,
         "Per-seat trim overrides survive a save/load round trip");
+
+    // Reach has its own role-neutral bank. These endpoints pin the runtime
+    // ReachVehicleId order and prove all sixteen stable seat indices are
+    // collision-free without claiming title-specific driver/gunner roles.
+    const int reachBanshee0 = ConfigReachSeatTrimSlot(1, 0);
+    const int reachFalcon10 = ConfigReachSeatTrimSlot(12, 10);
+    const int reachMachinegun15 = ConfigReachSeatTrimSlot(20, 15);
+    Check(reachBanshee0 == 0 &&
+              reachMachinegun15 == kReachVehicleTrimSlots - 1 &&
+              reachFalcon10 != reachBanshee0 &&
+              !strcmp(kReachVehicleTrimNames[0], "banshee") &&
+              !strcmp(kReachVehicleTrimNames[19], "machinegun") &&
+              ConfigReachSeatTrimSlot(0, 0) == -1 &&
+              ConfigReachSeatTrimSlot(21, 0) == -1 &&
+              ConfigReachSeatTrimSlot(12, -1) == -1 &&
+              ConfigReachSeatTrimSlot(12, 16) == -1,
+        "Reach vehicle names and raw seat indices map to a bounded independent bank");
+    {
+        std::ofstream file(primary);
+        file << "config_version = 5\n";
+        file << "vehicle_cam_forward_m = 0.20\n";
+        file << "vehicle_cam_forward_m_reach_falcon_seat10 = 0.42\n";
+        file << "vehicle_cam_up_m_reach_space_banshee_seat0 = -0.23\n";
+        file << "vehicle_cam_right_m_reach_machinegun_seat15 = 0.31\n";
+        file << "vehicle_cam_up_m_reach_wraith_gunner_seat0 = 0.17\n";
+        file << "vehicle_cam_right_m_reach_warthog_chaingun_seat0 = -0.19\n";
+        file << "vehicle_cam_forward_m_reach_cart_seat15 = 9.0\n";
+        file << "vehicle_cam_up_m_reach_cart_seat15 = -9.0\n";
+        file << "vehicle_cam_right_m_reach_cart_seat15 = 9.0\n";
+        file << "vehicle_cam_forward_m_reach_falcon_seat16 = 0.99\n";
+        file << "vehicle_cam_forward_m_reach_pelican_seat0 = 0.99\n";
+        file << "vehicle_cam_up_m_reach_ghost_seat0 = broken\n";
+    }
+    ConfigLoad(primary.c_str());
+    const int reachSpaceBanshee0 = ConfigReachSeatTrimSlot(2, 0);
+    const int reachGhost0 = ConfigReachSeatTrimSlot(3, 0);
+    const int reachWraithGunner0 = ConfigReachSeatTrimSlot(6, 0);
+    const int reachHogChaingun0 = ConfigReachSeatTrimSlot(9, 0);
+    const int reachCart15 = ConfigReachSeatTrimSlot(16, 15);
+    Check(ConfigReachSeatCamForward(g_config, reachFalcon10) == 0.42f &&
+              ConfigReachSeatCamUp(g_config, reachSpaceBanshee0) == -0.23f &&
+              ConfigReachSeatCamRight(g_config, reachMachinegun15) == 0.31f &&
+              ConfigReachSeatCamUp(g_config, reachWraithGunner0) == 0.17f &&
+              ConfigReachSeatCamRight(g_config, reachHogChaingun0) == -0.19f &&
+              ConfigReachSeatCamForward(g_config, reachCart15) ==
+                  kVehicleCamForwardMax &&
+              ConfigReachSeatCamUp(g_config, reachCart15) ==
+                  kVehicleCamUpMin &&
+              ConfigReachSeatCamRight(g_config, reachCart15) ==
+                  kVehicleCamRightMax &&
+              ConfigReachSeatCamForward(g_config, reachBanshee0) == 0.20f &&
+              !g_config.reach_vehicle_cam_up_set[reachGhost0] &&
+              ConfigSeatCamForward(g_config, hogDriver) != 0.42f &&
+              ConfigOdstSeatCamForward(g_config,
+                  ConfigOdstSeatTrimSlot(2, 0, false)) != 0.42f,
+        "Reach trim keys load per axis and never modify Halo 3 or ODST storage");
+    ConfigSave();
+    const std::string reachSeatConfig = ReadTextFile(primary);
+    Check(CountText(reachSeatConfig,
+              "\nvehicle_cam_forward_m_reach_falcon_seat10 = 0.42") == 1 &&
+              CountText(reachSeatConfig,
+              "\nvehicle_cam_up_m_reach_space_banshee_seat0 = -0.23") == 1 &&
+              CountText(reachSeatConfig,
+              "\nvehicle_cam_right_m_reach_machinegun_seat15 = 0.31") == 1 &&
+              CountText(reachSeatConfig,
+              "\nvehicle_cam_up_m_reach_wraith_gunner_seat0 = 0.17") == 1 &&
+              CountText(reachSeatConfig,
+              "\nvehicle_cam_right_m_reach_warthog_chaingun_seat0 = -0.19") == 1 &&
+              CountText(reachSeatConfig, "reach_falcon_seat16") == 0 &&
+              CountText(reachSeatConfig, "reach_pelican") == 0,
+        "Saving writes only valid Reach seat overrides with stable Reach prefixes");
+    ConfigLoad(primary.c_str());
+    Check(ConfigReachSeatCamForward(g_config, reachFalcon10) == 0.42f &&
+              ConfigReachSeatCamUp(g_config, reachSpaceBanshee0) == -0.23f &&
+              ConfigReachSeatCamRight(g_config, reachMachinegun15) == 0.31f &&
+              ConfigReachSeatCamUp(g_config, reachWraithGunner0) == 0.17f &&
+              ConfigReachSeatCamRight(g_config, reachHogChaingun0) == -0.19f,
+        "Reach per-seat trims survive a save/load round trip");
     {
         std::ofstream file(primary);
         file << "config_version = 5\n";

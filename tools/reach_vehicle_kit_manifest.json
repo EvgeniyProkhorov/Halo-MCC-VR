@@ -1,0 +1,127 @@
+{
+  "schema": 1,
+  "title": "Halo: Reach",
+  "hrek_build": "2023.07.17.176677.1-QFE1",
+  "world_units_to_metres": 3.048,
+  "directx_to_tag_axes": ["x", "z", "y"],
+  "reference_assets": [
+    {
+      "id": "shade_base",
+      "tag": "objects\\vehicles\\covenant\\turrets\\shade\\shade"
+    }
+  ],
+  "identities": [
+    {
+      "id": "banshee",
+      "tag": "objects\\vehicles\\covenant\\banshee\\banshee",
+      "seats": [0]
+    },
+    {
+      "id": "space_banshee",
+      "tag": "objects\\vehicles\\covenant\\space_banshee\\space_banshee",
+      "seats": [0]
+    },
+    {
+      "id": "ghost",
+      "tag": "objects\\vehicles\\covenant\\ghost\\ghost",
+      "seats": [0]
+    },
+    {
+      "id": "revenant",
+      "tag": "objects\\vehicles\\covenant\\revenant\\revenant",
+      "seats": [0, 1]
+    },
+    {
+      "id": "wraith",
+      "tag": "objects\\vehicles\\covenant\\wraith\\wraith",
+      "seats": [0]
+    },
+    {
+      "id": "wraith_gunner",
+      "tag": "objects\\vehicles\\covenant\\wraith\\turrets\\wraith_anti_infantry\\wraith_anti_infantry",
+      "carrier": "objects\\vehicles\\covenant\\wraith\\wraith",
+      "carrier_marker": "turret_gunner",
+      "seats": [0]
+    },
+    {
+      "id": "mongoose",
+      "tag": "objects\\vehicles\\human\\mongoose\\mongoose",
+      "seats": [0, 1]
+    },
+    {
+      "id": "warthog",
+      "tag": "objects\\vehicles\\human\\warthog\\warthog",
+      "seats": [0, 1]
+    },
+    {
+      "id": "warthog_chaingun",
+      "tag": "objects\\vehicles\\human\\warthog\\weapons\\warthog_chaingun\\warthog_chaingun",
+      "carrier": "objects\\vehicles\\human\\warthog\\warthog",
+      "carrier_marker": "turret",
+      "seats": [0]
+    },
+    {
+      "id": "warthog_gauss",
+      "tag": "objects\\vehicles\\human\\warthog\\weapons\\warthog_gauss\\warthog_gauss",
+      "carrier": "objects\\vehicles\\human\\warthog\\warthog",
+      "carrier_marker": "turret_2",
+      "seats": [0]
+    },
+    {
+      "id": "warthog_rocket",
+      "tag": "objects\\vehicles\\human\\warthog\\weapons\\warthog_rocket\\warthog_rocket",
+      "carrier": "objects\\vehicles\\human\\warthog\\warthog",
+      "carrier_marker": "turret_2",
+      "seats": [0]
+    },
+    {
+      "id": "falcon",
+      "tag": "objects\\vehicles\\human\\falcon\\falcon",
+      "seats": [0, 3, 4]
+    },
+    {
+      "id": "sabre",
+      "tag": "objects\\vehicles\\human\\sabre\\sabre",
+      "seats": [0]
+    },
+    {
+      "id": "scorpion",
+      "tag": "objects\\vehicles\\human\\scorpion\\scorpion",
+      "seats": [0]
+    },
+    {
+      "id": "forklift",
+      "tag": "objects\\vehicles\\human\\civilian\\forklift\\forklift",
+      "seats": [0]
+    },
+    {
+      "id": "cart",
+      "tag": "objects\\vehicles\\human\\civilian\\cart_electric\\cart_electric",
+      "seats": [0]
+    },
+    {
+      "id": "shade_plasma",
+      "tag": "objects\\vehicles\\covenant\\turrets\\shade\\weapons\\shade_plasma_cannon\\shade_plasma_cannon",
+      "carrier": "objects\\vehicles\\covenant\\turrets\\shade\\shade",
+      "carrier_marker": "turret",
+      "seats": [0]
+    },
+    {
+      "id": "shade_flak",
+      "tag": "objects\\vehicles\\covenant\\turrets\\shade\\weapons\\shade_flak_cannon\\shade_flak_cannon",
+      "carrier": "objects\\vehicles\\covenant\\turrets\\shade\\shade",
+      "carrier_marker": "turret",
+      "seats": [0]
+    },
+    {
+      "id": "plasma_turret",
+      "tag": "objects\\vehicles\\covenant\\turrets\\plasma_turret\\plasma_turret_mounted",
+      "seats": [0]
+    },
+    {
+      "id": "machinegun",
+      "tag": "objects\\vehicles\\human\\turrets\\machinegun\\machinegun",
+      "seats": [0]
+    }
+  ]
+}

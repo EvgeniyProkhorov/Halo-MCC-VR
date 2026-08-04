@@ -34,12 +34,12 @@ inline constexpr const char* kReachRetailModuleSha256[] = {
     "F9F39CF058FF28C298CC05964BC40898A57C30D33848FA54D950D8D6C2697E20",
 };
 
-// Reach's title-native all-vehicle input proof. Official HREK names and defines
-// player_mapping_get_unit_by_output_user and unit_in_vehicle; the latter means
-// that the unit is seated on a parent unit, so the same predicate covers every
-// vehicle seat and vehicle type (including the Banshee). The pinned retail
-// homologs and the script evaluator edge are documented in
-// docs/REACH-SIGNATURE-EVIDENCE.md and are re-verified cold before use.
+// Reach's original title-native vehicle-input proof. Official HREK names and
+// defines player_mapping_get_unit_by_output_user and unit_in_vehicle. The
+// latter deliberately excludes vehicle type 6, so it covers ordinary vehicles
+// (including the Banshee) but not every mounted/walk-up turret. Camera ownership
+// below therefore uses unit_get_camera_info instead; this older predicate stays
+// only as the fail-open input refinement until that richer sample is installed.
 inline constexpr uintptr_t kReachPlayerUnitByOutputUserRva = 0x00053EF8;
 inline constexpr uintptr_t kReachUnitInVehicleRva = 0x004F9368;
 inline constexpr uintptr_t kReachUnitInVehicleEvaluatorRva = 0x0019EF28;
@@ -47,6 +47,44 @@ inline constexpr uintptr_t kReachUnitInVehicleEvaluatorCallRva = 0x0019EF5E;
 inline constexpr uintptr_t kReachUnitInVehicleNameRva = 0x009FB710;
 inline constexpr uintptr_t kReachUnitInVehicleDescriptorRva = 0x00A22B60;
 inline constexpr uintptr_t kReachEngineTlsIndexRva = 0x00C17B18;
+
+// HREK's unit_get_camera_info is the native seat-camera transaction. Its retail
+// homolog returns the direct seated parent, signed raw seat index, a pointer to
+// the occupied seat's camera struct (seat record +0x70), and the engine-computed
+// world camera point. Unlike unit_in_vehicle it does not reject type-6 turrets.
+// The exact body and ABI are pinned in REACH-SIGNATURE-EVIDENCE.md.
+inline constexpr uintptr_t kReachUnitGetCameraInfoRva = 0x0048A4B4;
+inline constexpr size_t kReachUnitGetCameraInfoBodySize = 0x45A;
+inline constexpr char kReachUnitGetCameraInfoBodySha256[] =
+    "455196B8372C26DBED9B067D42DC146FD7C71F3762C9AC784099C683A065E601";
+
+// object_get_markers_by_string_id is the stock authored-marker primitive used
+// by unit_get_camera_info itself. Its final boolean selects Reach's live
+// render-interpolated node bank, so vehicle_cam_smoothing can choose the same
+// native rendered/raw A/B without a synthetic predictor.
+inline constexpr uintptr_t kReachObjectMarkerResolverRva = 0x0047044C;
+inline constexpr size_t kReachObjectMarkerResolverBodySize = 0x2DB;
+inline constexpr char kReachObjectMarkerResolverBodySha256[] =
+    "10656BEFDF01B629240E0AD0C3E4774844232EC66C8DB810A2616B550BD8160E";
+
+// object_get_ultimate_parent walks object datum +0x14 until the carrier root.
+// This is distinct from the direct parent returned above: a Warthog/Wraith gun
+// seat belongs to the attached gun object, while view-follow belongs to its
+// carrier. The leaf function is 0x3F bytes (the PE's coarse unwind interval
+// includes adjacent leaves).
+inline constexpr uintptr_t kReachObjectUltimateParentRva = 0x00473DC0;
+inline constexpr size_t kReachObjectUltimateParentBodySize = 0x3F;
+inline constexpr char kReachObjectUltimateParentBodySha256[] =
+    "4786C758FBDA4D57A52956164BA701811FC414BF980CE9F92DA7357F4DA13568";
+
+inline constexpr uintptr_t kReachVehicleTypeAccessorRva = 0x004AC1E4;
+inline constexpr size_t kReachVehicleTypeAccessorBodySize = 0x51;
+inline constexpr char kReachVehicleTypeAccessorBodySha256[] =
+    "61C18948736356611DF19F8DF2C0E2254B1C7D97D84DEF24EE0AA2B4496FECF4";
+inline constexpr uintptr_t kReachTagGetRva = 0x00031AE8;
+inline constexpr size_t kReachTagGetBodySize = 0x7B;
+inline constexpr char kReachTagGetBodySha256[] =
+    "1319ABAA28A84AA78172538E6D84A90D437BA9A8C5E4729C2FD769DA41792EC1";
 
 enum class ReachVehicleInputState : uint32_t
 {

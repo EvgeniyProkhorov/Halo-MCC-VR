@@ -90,6 +90,32 @@ inline constexpr const char*
 inline constexpr int kOdstVehicleTrimSlots =
     kOdstVehicleTrimCount * kOdstVehicleSeatSlots;
 
+// Reach keeps a third, independent trim bank under `_reach_`-prefixed keys.
+// The vehicle order is the ReachVehicleId runtime contract. Every name below
+// is a stable top-level vehicle identity present in the pinned official HREK
+// tag tree. Attached child tags stay distinct when HREK gives them their own
+// model/seat parent (Wraith gunner, Warthog weapons and Shade weapons); these
+// are not guessed Halo 3 mounted-gunner variants. Falcon authors eleven seats,
+// so the bank reserves sixteen raw indices without assigning roles to unused
+// slots. Keep the keys role-neutral: seat 0 is not always a
+// driver and later assigning a role must not change an existing config key.
+inline constexpr int kReachVehicleTrimCount = 20;
+inline constexpr const char* kReachVehicleTrimNames[kReachVehicleTrimCount] = {
+    "banshee", "space_banshee", "ghost", "revenant", "wraith",
+    "wraith_gunner", "mongoose", "warthog", "warthog_chaingun",
+    "warthog_gauss", "warthog_rocket", "falcon", "sabre", "scorpion",
+    "forklift", "cart", "shade_plasma", "shade_flak", "plasma_turret",
+    "machinegun"};
+inline constexpr int kReachVehicleSeatSlots = 16;
+inline constexpr const char*
+    kReachVehicleSeatNames[kReachVehicleSeatSlots] = {
+        "seat0",  "seat1",  "seat2",  "seat3",
+        "seat4",  "seat5",  "seat6",  "seat7",
+        "seat8",  "seat9",  "seat10", "seat11",
+        "seat12", "seat13", "seat14", "seat15"};
+inline constexpr int kReachVehicleTrimSlots =
+    kReachVehicleTrimCount * kReachVehicleSeatSlots;
+
 // Vehicle placement controls are authored in metres, then converted to Halo
 // world units at the same boundary as the Blender seat point. Forward/height
 // have a little more travel than the original -0.5..1.0 sliders; lateral trim
@@ -133,6 +159,18 @@ inline constexpr int ConfigOdstSeatTrimSlot(int vehicleId, int seatIndex,
     if (seatIndex < 0 || seatIndex >= kOdstVehicleGunnerSlot)
         return -1;
     return v * kOdstVehicleSeatSlots + seatIndex;
+}
+
+// Reach indexes the adapter's stable HREK parent identity and seat index
+// directly. Distinct child seat parents already have distinct identities, so
+// no Halo 3-style synthetic mounted flag is needed here.
+inline constexpr int ConfigReachSeatTrimSlot(int vehicleId, int seatIndex)
+{
+    const int v = vehicleId - 1;
+    if (v < 0 || v >= kReachVehicleTrimCount ||
+        seatIndex < 0 || seatIndex >= kReachVehicleSeatSlots)
+        return -1;
+    return v * kReachVehicleSeatSlots + seatIndex;
 }
 
 // Seat placements the maintainer tuned in the headset and which therefore ship
@@ -296,6 +334,15 @@ struct Config
     bool odst_vehicle_cam_forward_set[kOdstVehicleTrimSlots] = {};
     bool odst_vehicle_cam_up_set[kOdstVehicleTrimSlots] = {};
     bool odst_vehicle_cam_right_set[kOdstVehicleTrimSlots] = {};
+    // Reach's own bank, written as vehicle_cam_*_m_reach_<vehicle>_<seat>.
+    // It deliberately ships unset until the Blender-authored camera lineup is
+    // headset-tuned; every unset Reach seat follows the universal trim.
+    float reach_vehicle_cam_forward_v[kReachVehicleTrimSlots] = {};
+    float reach_vehicle_cam_up_v[kReachVehicleTrimSlots] = {};
+    float reach_vehicle_cam_right_v[kReachVehicleTrimSlots] = {};
+    bool reach_vehicle_cam_forward_set[kReachVehicleTrimSlots] = {};
+    bool reach_vehicle_cam_up_set[kReachVehicleTrimSlots] = {};
+    bool reach_vehicle_cam_right_set[kReachVehicleTrimSlots] = {};
     // Optional vehicle-frame view: ON follows ground-vehicle yaw and pitch
     // while keeping roll out of the horizon; aircraft stay yaw-only. OFF keeps
     // the world-locked view Alpha 0.3.1 shipped; it remains the default.
@@ -718,6 +765,32 @@ inline float ConfigOdstSeatCamRight(const Config& c, int slot)
     if (slot >= 0 && slot < kOdstVehicleTrimSlots &&
         c.odst_vehicle_cam_right_set[slot])
         return c.odst_vehicle_cam_right_v[slot];
+    return c.vehicle_cam_right_m;
+}
+
+// Reach's bank follows the same universal fallback contract without sharing
+// storage with Halo 3 or ODST.
+inline float ConfigReachSeatCamForward(const Config& c, int slot)
+{
+    if (slot >= 0 && slot < kReachVehicleTrimSlots &&
+        c.reach_vehicle_cam_forward_set[slot])
+        return c.reach_vehicle_cam_forward_v[slot];
+    return c.vehicle_cam_forward_m;
+}
+
+inline float ConfigReachSeatCamUp(const Config& c, int slot)
+{
+    if (slot >= 0 && slot < kReachVehicleTrimSlots &&
+        c.reach_vehicle_cam_up_set[slot])
+        return c.reach_vehicle_cam_up_v[slot];
+    return c.vehicle_cam_up_m;
+}
+
+inline float ConfigReachSeatCamRight(const Config& c, int slot)
+{
+    if (slot >= 0 && slot < kReachVehicleTrimSlots &&
+        c.reach_vehicle_cam_right_set[slot])
+        return c.reach_vehicle_cam_right_v[slot];
     return c.vehicle_cam_right_m;
 }
 

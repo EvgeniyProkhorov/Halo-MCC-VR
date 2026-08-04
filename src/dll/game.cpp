@@ -17,6 +17,7 @@
 #include "../common/authored_reticle_logic.h"
 #include "../common/reach_chud_logic.h"
 #include "../common/reach_render_logic.h"
+#include "../common/reach_vehicle_logic.h"
 #ifndef HALOMCCVR_EXPERIMENTAL_REACH_RENDER_CANDIDATE
 #define HALOMCCVR_EXPERIMENTAL_REACH_RENDER_CANDIDATE 0
 #endif
@@ -230,6 +231,13 @@ namespace
     // consume the same roll-free transform contract. A short freshness bound
     // makes a missing pitch sample retain the accepted yaw-only follow.
     constexpr uint64_t kHalo3RollStableFollowFreshMs = 100;
+    enum class VehicleFollowOwner : uint32_t
+    {
+        Halo3 = 0,
+        Odst = 1,
+        Reach = 2,
+    };
+
     struct Halo3RollStableFollowPublication
     {
         std::atomic<uint32_t> sequence{0}; // even = stable, odd = writer active
@@ -243,13 +251,17 @@ namespace
         // untouched -- but the reader must still verify the sample came from
         // the title that is actually driving, or a stale cross-title sample
         // could pitch the wrong camera.
-        std::atomic<uint32_t> odstOwner{0};
+        std::atomic<uint32_t> owner{
+            static_cast<uint32_t>(VehicleFollowOwner::Halo3)};
         bool writerHasValue = false; // camera-thread writer only
     };
 #if HALOMCCVR_EXPERIMENTAL_ODST_BRINGUP
     // Defined with the ODST vehicle block far below; declared here because the
     // follow reader runs long before it.
     bool OdstFollowContextValid(uint32_t& outGeneration);
+#endif
+#if HALOMCCVR_EXPERIMENTAL_REACH_RENDER_CANDIDATE
+    bool ReachFollowContextValid(uint32_t& outGeneration);
 #endif
     Halo3RollStableFollowPublication g_halo3RollStableFollow;
     enum class Halo3PitchFollowState : uint8_t
@@ -276,8 +288,9 @@ namespace
         g_halo3PitchFollowSerial.fetch_add(1, std::memory_order_release);
     }
 
-    void Halo3PublishRollStableFollowFor(uint32_t generation, bool odstOwner,
-                                        float hullYaw, float hullPitch)
+    void Halo3PublishRollStableFollowFor(
+        uint32_t generation, VehicleFollowOwner owner,
+        float hullYaw, float hullPitch)
     {
         if (!generation || !std::isfinite(hullYaw) ||
             !std::isfinite(hullPitch))
@@ -288,8 +301,8 @@ namespace
         published.sampleMs.store(GetTickCount64(), std::memory_order_relaxed);
         published.hullYaw.store(hullYaw, std::memory_order_relaxed);
         published.hullPitch.store(hullPitch, std::memory_order_relaxed);
-        published.odstOwner.store(odstOwner ? 1u : 0u,
-                                  std::memory_order_relaxed);
+        published.owner.store(static_cast<uint32_t>(owner),
+                              std::memory_order_relaxed);
         published.sequence.fetch_add(1, std::memory_order_release);
         published.writerHasValue = true;
     }
@@ -297,7 +310,8 @@ namespace
     void Halo3PublishRollStableFollow(float hullYaw, float hullPitch)
     {
         Halo3PublishRollStableFollowFor(
-            g_halo3RuntimeGeneration.load(std::memory_order_relaxed), false,
+            g_halo3RuntimeGeneration.load(std::memory_order_relaxed),
+            VehicleFollowOwner::Halo3,
             hullYaw, hullPitch);
     }
 
@@ -335,7 +349,13 @@ namespace
 #if HALOMCCVR_EXPERIMENTAL_ODST_BRINGUP
         else if (OdstFollowContextValid(generation))
         {
-            expectedOwner = 1;
+            expectedOwner = static_cast<uint32_t>(VehicleFollowOwner::Odst);
+        }
+#endif
+#if HALOMCCVR_EXPERIMENTAL_REACH_RENDER_CANDIDATE
+        else if (ReachFollowContextValid(generation))
+        {
+            expectedOwner = static_cast<uint32_t>(VehicleFollowOwner::Reach);
         }
 #endif
         if (!generation)
@@ -357,7 +377,7 @@ namespace
             const float samplePitch =
                 published.hullPitch.load(std::memory_order_relaxed);
             const uint32_t sampleOwner =
-                published.odstOwner.load(std::memory_order_relaxed);
+                published.owner.load(std::memory_order_relaxed);
             if (published.sequence.load(std::memory_order_acquire) != before)
                 continue;
             if (sampleOwner != expectedOwner ||
@@ -7550,23 +7570,35 @@ namespace
     // the plain flight stick, not a wheel.
     bool OdstSeatUsesWheel();
     bool OdstSeatAuthorsSteeringNow();
+#if HALOMCCVR_EXPERIMENTAL_REACH_RENDER_CANDIDATE
+    bool ReachSeatUsesWheel();
+    bool ReachSeatAuthorsSteeringNow();
+#endif
 
     bool Halo3SeatUsesWheel()
     {
-        if (!g_halo3SeatAuthorsSteering.load(std::memory_order_acquire))
+        // The authored flag can outlive Halo 3's module during an in-process
+        // title switch.  It owns the shared wheel only while Halo 3's vehicle
+        // path is still live; otherwise let ODST or Reach answer for its seat.
+        if (g_halo3SeatAuthorsSteering.load(std::memory_order_acquire) != 0 &&
+            Halo3VehicleFpActive())
         {
-#if HALOMCCVR_EXPERIMENTAL_ODST_BRINGUP
-            // O3: the wheel is title-agnostic once a seat authors steering.
-            return OdstSeatUsesWheel();
-#else
-            return false;
-#endif
+            Halo3SeatSnapshot seat;
+            if (!Halo3ReadSeatSnapshot(seat))
+                return false;
+            return Halo3VehicleUsesWheel(
+                static_cast<Halo3VehicleId>(seat.identity));
         }
-        Halo3SeatSnapshot seat;
-        if (!Halo3ReadSeatSnapshot(seat))
-            return false;
-        return Halo3VehicleUsesWheel(
-            static_cast<Halo3VehicleId>(seat.identity));
+#if HALOMCCVR_EXPERIMENTAL_ODST_BRINGUP
+        // O3: the wheel is title-agnostic once a seat authors steering.
+        if (OdstSeatUsesWheel())
+            return true;
+#endif
+#if HALOMCCVR_EXPERIMENTAL_REACH_RENDER_CANDIDATE
+        return ReachSeatUsesWheel();
+#else
+        return false;
+#endif
     }
 
     // ApplyVrTurn and the aim author are shared with ODST and Reach, so this
@@ -7579,7 +7611,11 @@ namespace
             Halo3VehicleFpActive())
             return true;
 #if HALOMCCVR_EXPERIMENTAL_ODST_BRINGUP
-        return OdstSeatAuthorsSteeringNow();
+        if (OdstSeatAuthorsSteeringNow())
+            return true;
+#endif
+#if HALOMCCVR_EXPERIMENTAL_REACH_RENDER_CANDIDATE
+        return ReachSeatAuthorsSteeringNow();
 #else
         return false;
 #endif
@@ -9792,7 +9828,9 @@ namespace
         if (pitchEligible && g_odstSeatYaw.armed &&
             Halo3RollStablePitchFromForward(seat.rawFwd, hullPitch))
         {
-            Halo3PublishRollStableFollowFor(generation, true,
+            Halo3PublishRollStableFollowFor(
+                                            generation,
+                                            VehicleFollowOwner::Odst,
                                             g_odstSeatYaw.lastYaw, hullPitch);
         }
         else
@@ -15605,11 +15643,55 @@ namespace
     using ReachPlayerUnitByOutputUserFn = int(__fastcall*)(int);
     using ReachUnitInVehicleFn = bool(__fastcall*)(int);
 
+    struct ReachNativeUnitCameraInfo
+    {
+        int32_t directParent = -1;
+        int16_t seatIndex = -1;
+        int16_t reserved06 = 0;
+        const void* seatCamera = nullptr;
+        float worldCameraPoint[3]{};
+        int32_t relatedDatum = -1;
+    };
+    static_assert(sizeof(ReachNativeUnitCameraInfo) == 0x20);
+    static_assert(offsetof(ReachNativeUnitCameraInfo, seatCamera) == 0x08);
+    static_assert(offsetof(ReachNativeUnitCameraInfo, worldCameraPoint) == 0x10);
+    using ReachUnitGetCameraInfoFn =
+        void(__fastcall*)(int32_t, ReachNativeUnitCameraInfo*);
+    using ReachObjectMarkersFn = int16_t(__fastcall*)(
+        int32_t, int32_t, Halo3ObjectMarker*, int32_t, bool, bool);
+    using ReachObjectUltimateParentFn = int32_t(__fastcall*)(int32_t);
+    using ReachVehicleTypeFn = int32_t(__fastcall*)(uint32_t);
+    using ReachTagGetFn = void*(__fastcall*)(uint32_t, uint32_t);
+
     enum class ReachVehicleInputBindingState : uint8_t
     {
         StockFallback = 0,
         CleanupRequired = 1,
         Installed = 2,
+    };
+
+    enum class ReachVehicleCameraBindingState : uint8_t
+    {
+        StockFallback = 0,
+        CleanupRequired = 1,
+        Installed = 2,
+    };
+
+    struct ReachVehicleFrame
+    {
+        bool active = false;
+        bool carrierBasisValid = false;
+        int32_t unitHandle = -1;
+        int32_t directParent = -1;
+        int32_t carrier = -1;
+        int32_t seatIndex = -1;
+        uint32_t definitionDatum = 0xFFFFFFFFu;
+        ReachVehicleId identity = ReachVehicleId::Unknown;
+        uint32_t seatFlags = 0;
+        uint32_t* seatFlagsPointer = nullptr;
+        float cameraBase[3]{};
+        float handsBase[3]{};
+        float rawCarrierForward[3]{};
     };
 
     struct ReachRenderHelpers
@@ -15775,6 +15857,8 @@ namespace
         float cutsceneTheaterAspect = 0.0f;
         ReachVrRenderAccess* renderAccess = nullptr;
         float gameplayBasePosition[3]{};
+        ReachVehicleFrame vehicle{};
+        bool vehicleViewApplied = false;
         FpExplicitPoseTargets fpTargets{};
         alignas(16) unsigned char headCenter[kReachCompactCameraBytes]{};
         ReachEyeRenderInput eyes[2]{};
@@ -15870,12 +15954,64 @@ namespace
         std::atomic<uint8_t> vehicleInputBindingState{
             static_cast<uint8_t>(
                 ReachVehicleInputBindingState::StockFallback)};
+        ReachPlayerUnitByOutputUserFn vehiclePlayerUnitByOutputUser = nullptr;
+        ReachUnitGetCameraInfoFn unitGetCameraInfo = nullptr;
+        ReachObjectMarkersFn objectMarkers = nullptr;
+        ReachObjectUltimateParentFn objectUltimateParent = nullptr;
+        ReachVehicleTypeFn vehicleType = nullptr;
+        ReachTagGetFn tagGet = nullptr;
+        std::atomic<uint8_t> vehicleCameraBindingState{
+            static_cast<uint8_t>(
+                ReachVehicleCameraBindingState::StockFallback)};
     } g_reachCamera;
     // High 32 bits are the title-module generation; low 32 bits are the
     // ReachVehicleInputState value. One atomic publication prevents the input
     // thread from combining a new generation with an old vehicle result.
     std::atomic<uint64_t> g_reachVehicleInputSnapshot{0};
     std::atomic<uint32_t> g_reachVehicleInputFaults{0};
+    std::atomic<uint64_t> g_reachVehicleTrimSnapshot{0};
+    std::atomic<uint64_t> g_reachVehicleSampleMs{0};
+    std::atomic<uint32_t> g_reachVehicleFpStable{
+        static_cast<uint32_t>(Halo3VehicleState::Unknown)};
+    std::atomic<uint32_t> g_reachVehicleCameraFaults{0};
+    std::atomic<uint32_t> g_reachVehicleIdentityMisses{0};
+    std::atomic<uint32_t> g_reachVehicleMarkerFailures{0};
+    std::atomic<uint32_t> g_reachVehicleBoundsFailures{0};
+    std::atomic<uint32_t> g_reachVehicleBounceFallbacks{0};
+    std::atomic<uint32_t> g_reachVehicleFollowFallbacks{0};
+    std::atomic<uint32_t> g_reachVehicleSeatPatchState{0};
+    std::atomic<uint32_t> g_reachVehicleSeatPatchSerial{0};
+    std::atomic<uint32_t> g_reachVehicleSeatPatchFailures{0};
+    std::atomic<uint32_t> g_reachVehicleSeatRecenters{0};
+    std::atomic<uint32_t> g_reachSeatAuthorsSteering{0};
+    Halo3VehicleDebounce g_reachVehicleFpDebounce;
+    Halo3SeatYaw g_reachSeatYaw;
+    Halo3SeatPositionKey g_reachYawSeat;
+
+    struct ReachHeadReference
+    {
+        uint32_t generation = 0;
+        int32_t unitHandle = -1;
+        int32_t directParent = -1;
+        int32_t seatIndex = -1;
+        ReachVehicleId identity = ReachVehicleId::Unknown;
+        bool interpolateNodes = false;
+        Halo3HeadSettleLatch settle{};
+    };
+    ReachHeadReference g_reachHeadReference;
+
+    struct ReachNativeSeatPatch
+    {
+        uint32_t generation = 0;
+        uint32_t definitionDatum = 0xFFFFFFFFu;
+        int32_t directParent = -1;
+        int32_t seatIndex = -1;
+        uint32_t* flags = nullptr;
+        uint32_t originalFlags = 0;
+        uint32_t writtenFlags = 0;
+        bool active = false;
+    };
+    ReachNativeSeatPatch g_reachNativeSeatPatch;
     // Weather-control telemetry. A report is only usable if it can say whether
     // each control was actually asserted, so these are reported every window
     // rather than only on change.
@@ -17998,17 +18134,34 @@ namespace
             g_headPosRef[2] = hpos[2];
         }
 
-        const float gy = g_gameYawRef + g_yawSign.load() * WrapPi(hy - g_headYawRef);
+        const float trackedYawDelta =
+            g_yawSign.load() * WrapPi(hy - g_headYawRef);
+        const float gy = g_gameYawRef + trackedYawDelta;
         const float gp = Clamp(g_pitchSign.load() * hp + g_pitchTrim.load(),
                                -1.5f, 1.5f);
         const float cgp = cosf(gp), sgp = sinf(gp), cgy = cosf(gy), sgy = sinf(gy);
-        fwd[0] = cgp * cgy; fwd[1] = cgp * sgy; fwd[2] = sgp;
-        if (g_writeUp.load())
+        float hullYaw = 0.0f, hullPitch = 0.0f, followBasis[9];
+        const bool rotationFollows =
+            Halo3ReadRollStableFollow(hullYaw, hullPitch) &&
+            Halo3ComposeRollStableFollowBasis(
+                hullYaw, hullPitch, g_gameYawRef, trackedYawDelta,
+                gp, headRoll, followBasis);
+        if (rotationFollows)
         {
-            const float cr = cosf(headRoll), sr = sinf(headRoll);
-            up[0] = (-sgp * cgy) * cr + sgy * sr;
-            up[1] = (-sgp * sgy) * cr - cgy * sr;
-            up[2] = cgp * cr;
+            memcpy(fwd, followBasis, sizeof(float) * 3);
+            if (g_writeUp.load())
+                memcpy(up, followBasis + 6, sizeof(float) * 3);
+        }
+        else
+        {
+            fwd[0] = cgp * cgy; fwd[1] = cgp * sgy; fwd[2] = sgp;
+            if (g_writeUp.load())
+            {
+                const float cr = cosf(headRoll), sr = sinf(headRoll);
+                up[0] = (-sgp * cgy) * cr + sgy * sr;
+                up[1] = (-sgp * sgy) * cr - cgy * sr;
+                up[2] = cgp * cr;
+            }
         }
         if (g_positional.load())
         {
@@ -18021,9 +18174,29 @@ namespace
             const float fwdComp = dx * hfhx + dz * hfhz;
             const float rightComp = dx * (-hfhz) + dz * hfhx;
             const float s = kReachWorldUnitsPerMeter;
-            float ox = (cgy * fwdComp + sgy * rightComp) * s;
-            float oy = (sgy * fwdComp - cgy * rightComp) * s;
-            float oz = dy * s;
+            float ox = 0.0f, oy = 0.0f, oz = 0.0f;
+            float positionBasis[9]{};
+            const float positionLocal[3] = {fwdComp, -rightComp, dy};
+            float positionWorld[3]{};
+            const bool positionFollows =
+                rotationFollows &&
+                Halo3ComposeRollStableFollowBasis(
+                    hullYaw, hullPitch, g_gameYawRef, trackedYawDelta,
+                    0.0f, 0.0f, positionBasis) &&
+                Halo3TransformBasisVector(
+                    positionBasis, positionLocal, positionWorld);
+            if (positionFollows)
+            {
+                ox = positionWorld[0] * s;
+                oy = positionWorld[1] * s;
+                oz = positionWorld[2] * s;
+            }
+            else
+            {
+                ox = (cgy * fwdComp + sgy * rightComp) * s;
+                oy = (sgy * fwdComp - cgy * rightComp) * s;
+                oz = dy * s;
+            }
             ox = Clamp(ox, -1.5f, 1.5f); oy = Clamp(oy, -1.5f, 1.5f);
             oz = Clamp(oz, -1.5f, 1.5f);
             pos[0] += ox; pos[1] += oy; pos[2] += oz;
@@ -18344,12 +18517,15 @@ namespace
         const unsigned char* stockCompact,
         const ReachSymmetricFovCover& cullCover,
         const ReachVrRenderSnapshot& tracking,
+        const ReachVehicleFrame* vehicle,
         unsigned char* headCenter,
         unsigned char* headDerived,
         float authoredAspect,
-        bool& authoredTheater)
+        bool& authoredTheater,
+        bool& vehicleViewApplied)
     {
         authoredTheater = false;
+        vehicleViewApplied = false;
         // Log-only cinematic-state sample on the engine thread that owns the
         // per-frame camera work. If cutscenes stop this path from running, the
         // worker-side stall report is itself the finding.
@@ -18496,6 +18672,13 @@ namespace
         authoredTheater =
             reachCinematicControl == CinematicControlState::AuthoredLocked &&
             VR_IsCutsceneTheaterActive();
+        if (vehicle && vehicle->active &&
+            reachCinematicControl != CinematicControlState::AuthoredLocked)
+        {
+            memcpy(headCenter + 0x00, vehicle->cameraBase,
+                   sizeof(vehicle->cameraBase));
+            vehicleViewApplied = true;
+        }
         if (!authoredTheater)
         {
             ApplyVrTurn(tracking.pad);
@@ -19344,7 +19527,9 @@ namespace
         g_reachFpPairScope={};
     }
 
-    bool ReachBuildCenterFpRoot(const unsigned char* compact, BoneMatrix& out)
+    bool ReachBuildCenterFpRoot(
+        const unsigned char* compact, const float* positionOverride,
+        BoneMatrix& out)
     {
         if (!compact) return false;
         const float* pos=reinterpret_cast<const float*>(compact+0x00);
@@ -19369,7 +19554,8 @@ namespace
         memcpy(out.rotation,fwd,sizeof(fwd));
         memcpy(out.rotation+3,left,sizeof(left));
         memcpy(out.rotation+6,up,sizeof(up));
-        memcpy(out.translation,pos,sizeof(out.translation));
+        memcpy(out.translation,positionOverride ? positionOverride : pos,
+               sizeof(out.translation));
         return ReachBoneMatrixFinite(out);
     }
 
@@ -19400,8 +19586,12 @@ namespace
         ql=sqrtf(ql);
         if (!isfinite(ql) || ql<1e-5f) return false;
         for (float& component : q) component/=ql;
+        float hullYaw = 0.0f, hullPitch = 0.0f;
+        const bool followValid =
+            Halo3ReadRollStableFollow(hullYaw, hullPitch);
         float basis[9];
-        BuildTrackedGameBasis(q,false,basis);
+        BuildTrackedGameBasisFromFrame(
+            q, false, followValid, hullYaw, hullPitch, basis);
         if (left)
         {
             float mount[9],trimmed[9];
@@ -19419,10 +19609,29 @@ namespace
         const float roomRight=dx*ch+dz*sh;
         const float cg=cosf(g_gameYawRef),sg=sinf(g_gameYawRef);
         const float scale=kReachWorldUnitsPerMeter;
-        const float offset[3]={
-            (cg*roomForward+sg*roomRight)*scale,
-            (sg*roomForward-cg*roomRight)*scale,
-            dy*scale};
+        float offset[3]{};
+        float positionBasis[9]{};
+        const float positionLocal[3] = {roomForward, -roomRight, dy};
+        float positionWorld[3]{};
+        const bool positionFollows =
+            followValid &&
+            Halo3ComposeRollStableFollowBasis(
+                hullYaw, hullPitch, g_gameYawRef,
+                0.0f, 0.0f, 0.0f, positionBasis) &&
+            Halo3TransformBasisVector(
+                positionBasis, positionLocal, positionWorld);
+        if (positionFollows)
+        {
+            offset[0] = positionWorld[0] * scale;
+            offset[1] = positionWorld[1] * scale;
+            offset[2] = positionWorld[2] * scale;
+        }
+        else
+        {
+            offset[0] = (cg*roomForward+sg*roomRight)*scale;
+            offset[1] = (sg*roomForward-cg*roomRight)*scale;
+            offset[2] = dy*scale;
+        }
         const float standoff=(left
             ? Clamp(g_config.left_hand_forward_m,-0.15f,0.30f)
             : Clamp(g_config.gun_forward_m,-0.3f,0.5f))*scale;
@@ -19946,12 +20155,300 @@ namespace
         }
     }
 
+    unsigned char* ReachVehicleObjectData(int32_t handle, uint8_t& kind)
+    {
+        kind = 0;
+        if (handle == -1)
+            return nullptr;
+        const int16_t wantedSalt = static_cast<int16_t>(handle >> 16);
+        if (!wantedSalt)
+            return nullptr;
+        auto** slots = reinterpret_cast<void**>(__readgsqword(0x58));
+        const auto* tlsIndex = reinterpret_cast<const uint32_t*>(
+            g_reachCamera.base + kReachEngineTlsIndexRva);
+        if (!slots || !tlsIndex || *tlsIndex >= 0x200)
+            return nullptr;
+        auto* tls = reinterpret_cast<unsigned char*>(slots[*tlsIndex]);
+        auto* collection = tls
+            ? *reinterpret_cast<unsigned char**>(
+                  tls + kReachTlsObjectCollectionOffset)
+            : nullptr;
+        if (!collection ||
+            !*(collection + kReachDataCollectionInitializedOffset) ||
+            *reinterpret_cast<const uint64_t*>(
+                collection + kReachDataCollectionStrideOffset) !=
+                kReachObjectEntryStride)
+        {
+            return nullptr;
+        }
+        const uint32_t index = static_cast<uint16_t>(handle);
+        const int32_t count = *reinterpret_cast<const int32_t*>(
+            collection + kReachDataCollectionCountOffset);
+        auto* entries = *reinterpret_cast<unsigned char**>(
+            collection + kReachDataCollectionEntriesOffset);
+        if (!entries || count <= 0 || count > 0x10000 ||
+            index >= static_cast<uint32_t>(count))
+        {
+            return nullptr;
+        }
+        auto* entry = entries + static_cast<size_t>(index) *
+            kReachObjectEntryStride;
+        const int16_t liveSalt = *reinterpret_cast<const int16_t*>(
+            entry + kReachObjectEntrySaltOffset);
+        if (!liveSalt || liveSalt != wantedSalt)
+            return nullptr;
+        kind = *(entry + kReachObjectEntryKindOffset);
+        return *reinterpret_cast<unsigned char**>(
+            entry + kReachObjectEntryDataOffset);
+    }
+
+    unsigned char* ReachPackedTagBlockElement(
+        uint32_t packedData, int index, size_t stride)
+    {
+        if (index < 0 || stride == 0 || (stride & 3u) != 0)
+            return nullptr;
+        const uint32_t segment = packedData >> 28;
+        if (segment >= 16 || !g_reachCamera.base)
+            return nullptr;
+        auto* segmentBase = *reinterpret_cast<unsigned char**>(
+            g_reachCamera.base + kReachNodeRecordBlockTableRva +
+            static_cast<size_t>(segment) * sizeof(void*));
+        if (!segmentBase)
+            return nullptr;
+        const uint64_t word = static_cast<uint64_t>(packedData) +
+            static_cast<uint64_t>(index) * (stride / 4u);
+        if (word > 0xFFFFFFFFull)
+            return nullptr;
+        return segmentBase + static_cast<size_t>(word) * 4u;
+    }
+
+    ReachVehicleId ReachResolveVehicleDefinition(
+        const unsigned char* definition, uint32_t definitionDatum)
+    {
+        if (!definition || !g_reachCamera.vehicleType)
+            return ReachVehicleId::Unknown;
+        ReachVehicleFingerprint fingerprint{};
+        memcpy(&fingerprint.radius,
+               definition + kReachVehicleBoundsRadiusOffset,
+               sizeof(fingerprint.radius));
+        memcpy(&fingerprint.offsetX,
+               definition + kReachVehicleBoundsOffsetX,
+               sizeof(fingerprint.offsetX));
+        memcpy(&fingerprint.offsetY,
+               definition + kReachVehicleBoundsOffsetY,
+               sizeof(fingerprint.offsetY));
+        memcpy(&fingerprint.offsetZ,
+               definition + kReachVehicleBoundsOffsetZ,
+               sizeof(fingerprint.offsetZ));
+        const ReachVehicleId identity =
+            ReachResolveVehicleFingerprint(fingerprint);
+        if (identity == ReachVehicleId::Unknown ||
+            g_reachCamera.vehicleType(definitionDatum) !=
+                ReachVehicleExpectedPhysicsType(identity))
+        {
+            return ReachVehicleId::Unknown;
+        }
+        return identity;
+    }
+
+    uint32_t* ReachResolveLiveSeatFlagsPointer(
+        uint32_t generation, int32_t directParent,
+        uint32_t definitionDatum, int32_t seatIndex)
+    {
+        if (!generation || generation != g_reachCamera.generation.load(
+                std::memory_order_acquire) ||
+            directParent == -1 || seatIndex < 0 ||
+            seatIndex >= kReachVehicleSeatLimit || !g_reachCamera.tagGet)
+        {
+            return nullptr;
+        }
+        uint8_t parentKind = 0;
+        unsigned char* parentData =
+            ReachVehicleObjectData(directParent, parentKind);
+        if (!parentData || parentKind != kReachObjectKindVehicle ||
+            *reinterpret_cast<const uint32_t*>(
+                parentData + kReachObjectDefinitionDatumOffset) !=
+                    definitionDatum)
+        {
+            return nullptr;
+        }
+        auto* definition = static_cast<unsigned char*>(
+            g_reachCamera.tagGet(kReachVehicleGroupTag, definitionDatum));
+        if (!definition)
+            return nullptr;
+        const int32_t seatCount = *reinterpret_cast<const int32_t*>(
+            definition + kReachVehicleSeatsBlockOffset);
+        const uint32_t packedSeats = *reinterpret_cast<const uint32_t*>(
+            definition + kReachVehicleSeatsBlockOffset + 4);
+        if (seatCount <= 0 || seatCount > kReachVehicleSeatLimit ||
+            seatIndex >= seatCount)
+        {
+            return nullptr;
+        }
+        unsigned char* seat = ReachPackedTagBlockElement(
+            packedSeats, seatIndex, kReachVehicleSeatStride);
+        return seat ? reinterpret_cast<uint32_t*>(
+                          seat + kReachSeatFlagsOffset)
+                    : nullptr;
+    }
+
+    bool ReachRestoreNativeSeatPatch()
+    {
+        ReachNativeSeatPatch patch = g_reachNativeSeatPatch;
+        g_reachNativeSeatPatch = {};
+        if (!patch.active)
+            return true;
+        bool restored = false;
+        if (patch.flags)
+        {
+            __try
+            {
+                uint32_t* liveFlags = ReachResolveLiveSeatFlagsPointer(
+                    patch.generation, patch.directParent,
+                    patch.definitionDatum, patch.seatIndex);
+                if (liveFlags == patch.flags)
+                {
+                    auto* flags = reinterpret_cast<volatile LONG*>(liveFlags);
+                    const uint32_t current = static_cast<uint32_t>(
+                        InterlockedCompareExchange(flags, 0, 0));
+                    if (current == patch.writtenFlags)
+                    {
+                        const uint32_t prior = static_cast<uint32_t>(
+                            InterlockedCompareExchange(
+                                flags,
+                                static_cast<LONG>(patch.originalFlags),
+                                static_cast<LONG>(patch.writtenFlags)));
+                        restored = prior == patch.writtenFlags;
+                    }
+                    else
+                    {
+                        // A concurrent engine/tag write wins. Never put stale
+                        // bits back over it; this ownership is simply dropped.
+                        restored = current == patch.originalFlags;
+                    }
+                }
+            }
+            __except (EXCEPTION_EXECUTE_HANDLER)
+            {
+                restored = false;
+            }
+        }
+        g_reachVehicleSeatPatchState.store(
+            restored ? 0u : 2u, std::memory_order_relaxed);
+        if (!restored)
+        {
+            g_reachVehicleSeatPatchFailures.fetch_add(
+                1, std::memory_order_relaxed);
+        }
+        g_reachVehicleSeatPatchSerial.fetch_add(
+            1, std::memory_order_release);
+        return restored;
+    }
+
+    bool ReachEnsureNativeFirstPersonSeat(const ReachVehicleFrame& frame)
+    {
+        // Ownership is synchronous and never spans two outer-render calls.
+        // Reconcile any unexpected prior owner before inspecting an early-out
+        // such as a naturally first-person seat or a config change.
+        if (g_reachNativeSeatPatch.active &&
+            !ReachRestoreNativeSeatPatch())
+        {
+            return false;
+        }
+        if (!frame.active || !g_config.vehicle_hide_body ||
+            !frame.seatFlagsPointer)
+        {
+            return false;
+        }
+        const uint32_t generation = g_reachCamera.generation.load(
+            std::memory_order_relaxed);
+        if (!generation || frame.seatIndex < 0 ||
+            frame.seatIndex >= kReachVehicleSeatLimit)
+        {
+            return false;
+        }
+        const uint32_t original = frame.seatFlags;
+        const uint32_t written =
+            original & ~kReachSeatThirdPersonCameraBit;
+        bool installed = false;
+        __try
+        {
+            uint32_t* liveFlags = ReachResolveLiveSeatFlagsPointer(
+                generation, frame.directParent,
+                frame.definitionDatum, frame.seatIndex);
+            if (liveFlags != frame.seatFlagsPointer)
+                __leave;
+            if ((original & kReachSeatThirdPersonCameraBit) == 0)
+            {
+                installed = static_cast<uint32_t>(
+                    InterlockedCompareExchange(
+                        reinterpret_cast<volatile LONG*>(liveFlags),
+                        0, 0)) == original;
+                __leave;
+            }
+            auto* flags = reinterpret_cast<volatile LONG*>(
+                liveFlags);
+            const uint32_t prior = static_cast<uint32_t>(
+                InterlockedCompareExchange(
+                    flags, static_cast<LONG>(written),
+                    static_cast<LONG>(original)));
+            installed = prior == original &&
+                static_cast<uint32_t>(
+                    InterlockedCompareExchange(flags, 0, 0)) == written;
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            installed = false;
+        }
+        if (!installed)
+        {
+            g_reachVehicleSeatPatchState.store(2, std::memory_order_relaxed);
+            g_reachVehicleSeatPatchFailures.fetch_add(
+                1, std::memory_order_relaxed);
+            g_reachVehicleSeatPatchSerial.fetch_add(
+                1, std::memory_order_release);
+            return false;
+        }
+        if ((original & kReachSeatThirdPersonCameraBit) == 0)
+        {
+            if (g_reachVehicleSeatPatchState.exchange(
+                    0, std::memory_order_relaxed) != 0)
+            {
+                g_reachVehicleSeatPatchSerial.fetch_add(
+                    1, std::memory_order_release);
+            }
+            return true;
+        }
+        g_reachNativeSeatPatch.generation = generation;
+        g_reachNativeSeatPatch.definitionDatum = frame.definitionDatum;
+        g_reachNativeSeatPatch.directParent = frame.directParent;
+        g_reachNativeSeatPatch.seatIndex = frame.seatIndex;
+        g_reachNativeSeatPatch.flags = frame.seatFlagsPointer;
+        g_reachNativeSeatPatch.originalFlags = original;
+        g_reachNativeSeatPatch.writtenFlags = written;
+        g_reachNativeSeatPatch.active = true;
+        g_reachVehicleSeatPatchState.store(1, std::memory_order_relaxed);
+        g_reachVehicleSeatPatchSerial.fetch_add(
+            1, std::memory_order_release);
+        return true;
+    }
+
     // Sample only on Reach's proven normal-player outer-render thread, whose
     // engine TLS is valid. The XInput hook reads only the resulting lock-free
     // snapshot and never calls title code from MCC's input thread.
     void ReachSampleVehicleInputState(
         uint32_t windowIndex, uintptr_t returnAddress)
     {
+        // The camera-info sampler below covers every seat, including Reach's
+        // type-6 mounted turrets. When it is installed it is the sole publisher
+        // so this older unit_in_vehicle predicate cannot briefly overwrite a
+        // turret sample with OnFoot between two input polls.
+        if (g_reachCamera.vehicleCameraBindingState.load(
+                std::memory_order_acquire) == static_cast<uint8_t>(
+                    ReachVehicleCameraBindingState::Installed))
+        {
+            return;
+        }
         if (windowIndex != 0 ||
             g_reachCamera.vehicleInputBindingState.load(
                 std::memory_order_acquire) != static_cast<uint8_t>(
@@ -19999,6 +20496,565 @@ namespace
         g_reachVehicleInputSnapshot.store(
             ReachVehicleInputSnapshot(generation, state),
             std::memory_order_release);
+    }
+
+    void ReachUpdateVehicleTransition(
+        Halo3VehicleState state, uint64_t nowMs)
+    {
+        g_reachVehicleSampleMs.store(nowMs, std::memory_order_relaxed);
+        const Halo3VehicleState previousStable =
+            g_reachVehicleFpDebounce.stable;
+        if (!g_reachVehicleFpDebounce.Update(
+                state, kHalo3VehicleDebounceFrames))
+        {
+            return;
+        }
+        g_reachVehicleFpStable.store(
+            static_cast<uint32_t>(g_reachVehicleFpDebounce.stable),
+            std::memory_order_relaxed);
+        if (g_config.vehicle_first_person &&
+            (g_reachVehicleFpDebounce.stable ==
+                 Halo3VehicleState::Vehicle ||
+             previousStable == Halo3VehicleState::Vehicle) &&
+            g_config.vehicle_recenter_on_seat)
+        {
+            g_needPosRecenter.store(true, std::memory_order_release);
+            g_reachVehicleSeatRecenters.fetch_add(
+                1, std::memory_order_relaxed);
+        }
+    }
+
+    bool ReachSampleVehicleCameraFrame(ReachVehicleFrame& frame)
+    {
+        frame = {};
+        if (g_reachCamera.vehicleCameraBindingState.load(
+                std::memory_order_acquire) != static_cast<uint8_t>(
+                    ReachVehicleCameraBindingState::Installed) ||
+            g_reachCamera.teardownRequested.load(std::memory_order_acquire))
+        {
+            return false;
+        }
+        const uint32_t generation = g_reachCamera.generation.load(
+            std::memory_order_acquire);
+        if (!generation || !g_reachCamera.vehiclePlayerUnitByOutputUser ||
+            !g_reachCamera.unitGetCameraInfo ||
+            !g_reachCamera.objectMarkers || !g_reachCamera.tagGet)
+        {
+            return false;
+        }
+
+        const uint64_t nowMs = GetTickCount64();
+        bool unitKnown = false;
+        bool structurallySeated = false;
+        bool complete = false;
+        bool identityMiss = false;
+        bool markerFailure = false;
+        bool boundsFailure = false;
+        bool bounceFallback = false;
+        bool followFallback = false;
+        bool faulted = false;
+        __try
+        {
+            do
+            {
+                const int32_t unit =
+                    g_reachCamera.vehiclePlayerUnitByOutputUser(0);
+                unitKnown = unit != -1;
+                if (!unitKnown)
+                    break;
+                ReachNativeUnitCameraInfo info{};
+                g_reachCamera.unitGetCameraInfo(unit, &info);
+                structurallySeated = info.directParent != -1 &&
+                    info.seatIndex >= 0 &&
+                    info.seatIndex < kReachVehicleSeatLimit &&
+                    info.seatCamera != nullptr;
+                if (!structurallySeated)
+                    break;
+                for (float component : info.worldCameraPoint)
+                {
+                    if (!std::isfinite(component))
+                    {
+                        structurallySeated = false;
+                        break;
+                    }
+                }
+                if (!structurallySeated)
+                    break;
+
+                uint8_t parentKind = 0;
+                unsigned char* parentData = ReachVehicleObjectData(
+                    info.directParent, parentKind);
+                if (!parentData || parentKind != kReachObjectKindVehicle)
+                {
+                    identityMiss = true;
+                    break;
+                }
+                const uint32_t definitionDatum =
+                    *reinterpret_cast<const uint32_t*>(
+                        parentData + kReachObjectDefinitionDatumOffset);
+                auto* definition = static_cast<unsigned char*>(
+                    g_reachCamera.tagGet(
+                        kReachVehicleGroupTag, definitionDatum));
+                if (!definition)
+                {
+                    identityMiss = true;
+                    break;
+                }
+                const ReachVehicleId identity =
+                    ReachResolveVehicleDefinition(
+                        definition, definitionDatum);
+                if (identity == ReachVehicleId::Unknown ||
+                    !ReachVehicleSeatIsPlayer(identity, info.seatIndex))
+                {
+                    identityMiss = true;
+                    break;
+                }
+
+                const int32_t seatCount =
+                    *reinterpret_cast<const int32_t*>(
+                        definition + kReachVehicleSeatsBlockOffset);
+                const uint32_t packedSeats =
+                    *reinterpret_cast<const uint32_t*>(
+                        definition + kReachVehicleSeatsBlockOffset + 4);
+                if (seatCount <= 0 || seatCount > kReachVehicleSeatLimit ||
+                    info.seatIndex >= seatCount)
+                {
+                    identityMiss = true;
+                    break;
+                }
+                unsigned char* seat = ReachPackedTagBlockElement(
+                    packedSeats, info.seatIndex,
+                    kReachVehicleSeatStride);
+                if (!seat ||
+                    seat + kReachSeatCameraOffset != info.seatCamera)
+                {
+                    identityMiss = true;
+                    break;
+                }
+                const uint32_t seatFlags =
+                    *reinterpret_cast<const uint32_t*>(
+                        seat + kReachSeatFlagsOffset);
+                const int32_t cameraMarkerSid =
+                    *reinterpret_cast<const int32_t*>(
+                        seat + kReachSeatCameraMarkerOffset);
+                const int32_t attachmentMarkerSid =
+                    *reinterpret_cast<const int32_t*>(
+                        seat + kReachSeatAttachmentMarkerOffset);
+
+                const bool interpolate = g_config.vehicle_cam_smoothing;
+                Halo3ObjectMarker rootMarker{};
+                if (g_reachCamera.objectMarkers(
+                        info.directParent, 0, &rootMarker,
+                        1, true, interpolate) <= 0 ||
+                    !Halo3MatrixValid(rootMarker.matrix))
+                {
+                    markerFailure = true;
+                    break;
+                }
+                Halo3ObjectMarker anchorMarker{};
+                bool anchorValid = false;
+                if (cameraMarkerSid != 0 && cameraMarkerSid != -1)
+                {
+                    anchorValid = g_reachCamera.objectMarkers(
+                        info.directParent, cameraMarkerSid, &anchorMarker,
+                        1, true, interpolate) > 0 &&
+                        Halo3MatrixValid(anchorMarker.matrix);
+                }
+                if (!anchorValid && attachmentMarkerSid != 0 &&
+                    attachmentMarkerSid != -1)
+                {
+                    anchorValid = g_reachCamera.objectMarkers(
+                        info.directParent, attachmentMarkerSid, &anchorMarker,
+                        1, true, interpolate) > 0 &&
+                        Halo3MatrixValid(anchorMarker.matrix);
+                }
+                if (!anchorValid)
+                {
+                    markerFailure = true;
+                    break;
+                }
+                const int trimSlot = ConfigReachSeatTrimSlot(
+                    static_cast<int>(identity), info.seatIndex);
+                if (trimSlot < 0)
+                {
+                    identityMiss = true;
+                    break;
+                }
+                const float trimForward = ConfigReachSeatCamForward(
+                    g_config, trimSlot) * kReachWorldUnitsPerMeter;
+                const float trimRight = ConfigReachSeatCamRight(
+                    g_config, trimSlot) * kReachWorldUnitsPerMeter;
+                const float trimUp = ConfigReachSeatCamUp(
+                    g_config, trimSlot) * kReachWorldUnitsPerMeter;
+                // Blender and the config use the identity-root frame, not a
+                // possibly tilted camera marker: +X forward, +Y left, +Z up.
+                // Keep the authored anchor's animated position, but transport
+                // trim and head residual through the rendered root basis.
+                Halo3Matrix4x3 seatFrame = rootMarker.matrix;
+                memcpy(seatFrame.position, anchorMarker.matrix.position,
+                       sizeof(seatFrame.position));
+                const float authoredLocal[3] = {
+                    trimForward, -trimRight, trimUp};
+                ReachSeatCameraBasis authoredBasis{};
+                authoredBasis.scale = rootMarker.matrix.scale;
+                memcpy(authoredBasis.forward, rootMarker.matrix.forward,
+                       sizeof(authoredBasis.forward));
+                memcpy(authoredBasis.left, rootMarker.matrix.left,
+                       sizeof(authoredBasis.left));
+                memcpy(authoredBasis.up, rootMarker.matrix.up,
+                       sizeof(authoredBasis.up));
+                float handsBase[3]{};
+                if (!ReachComposeSeatCameraPoint(
+                        anchorMarker.matrix.position, authoredBasis,
+                        trimForward, trimRight, trimUp, handsBase))
+                {
+                    markerFailure = true;
+                    break;
+                }
+                float boundsRadius = 0.0f;
+                float boundsLocal[3]{};
+                memcpy(&boundsRadius,
+                       definition + kReachVehicleBoundsRadiusOffset,
+                       sizeof(boundsRadius));
+                memcpy(boundsLocal,
+                       definition + kReachVehicleBoundsOffsetX,
+                       sizeof(boundsLocal));
+                float boundsWorld[3]{};
+                if (!Halo3MatrixTransformPoint(
+                        rootMarker.matrix, boundsLocal, boundsWorld) ||
+                    !Halo3AnchorWithinBounds(
+                        handsBase, boundsWorld, boundsRadius, 2.0f))
+                {
+                    boundsFailure = true;
+                    break;
+                }
+
+                frame.unitHandle = unit;
+                frame.directParent = info.directParent;
+                frame.carrier = info.directParent;
+                frame.seatIndex = info.seatIndex;
+                frame.definitionDatum = definitionDatum;
+                frame.identity = identity;
+                frame.seatFlags = seatFlags;
+                frame.seatFlagsPointer = reinterpret_cast<uint32_t*>(
+                    seat + kReachSeatFlagsOffset);
+                memcpy(frame.handsBase, handsBase,
+                       sizeof(frame.handsBase));
+                memcpy(frame.cameraBase, handsBase,
+                       sizeof(frame.cameraBase));
+
+                // Reach's native first-person helper resolves marker SID 0xC2
+                // on the occupant. Retain only its movement relative to a
+                // settled seat-local pose, exactly like the accepted H3/ODST
+                // bounce contract; until settled the rigid authored point wins.
+                Halo3ObjectMarker headMarker{};
+                const bool bounceRequested =
+                    fabsf(g_config.vehicle_bounce) > 1e-6f;
+                if (!bounceRequested)
+                    g_reachHeadReference = {};
+                const bool headMarkerValid = !bounceRequested ||
+                    (g_reachCamera.objectMarkers(
+                         unit, static_cast<int32_t>(
+                                   kReachOccupantHeadMarkerStringId),
+                         &headMarker, 1, false, interpolate) > 0 &&
+                     Halo3MatrixValid(headMarker.matrix));
+                if (bounceRequested && headMarkerValid)
+                {
+                    ReachHeadReference& head = g_reachHeadReference;
+                    const bool same = head.generation == generation &&
+                        head.unitHandle == unit &&
+                        head.directParent == info.directParent &&
+                        head.seatIndex == info.seatIndex &&
+                        head.identity == identity &&
+                        head.interpolateNodes == interpolate;
+                    if (!same)
+                    {
+                        head = {};
+                        head.generation = generation;
+                        head.unitHandle = unit;
+                        head.directParent = info.directParent;
+                        head.seatIndex = info.seatIndex;
+                        head.identity = identity;
+                        head.interpolateNodes = interpolate;
+                    }
+                    float currentHeadLocal[3]{};
+                    const bool headLocalValid =
+                        Halo3MatrixInverseTransformPoint(
+                            seatFrame, headMarker.matrix.position,
+                            currentHeadLocal);
+                    if (!headLocalValid)
+                    {
+                        g_reachHeadReference = {};
+                        bounceFallback = true;
+                    }
+                    else if (head.settle.Update(nowMs, currentHeadLocal))
+                    {
+                        float bouncedCamera[3]{};
+                        if (Halo3ComputeHeadParentedPoint(
+                                seatFrame, headMarker.matrix.position,
+                                head.settle.reference, authoredLocal,
+                                g_config.vehicle_bounce,
+                                bouncedCamera) &&
+                            Halo3AnchorWithinBounds(
+                                bouncedCamera, boundsWorld,
+                                boundsRadius, 2.0f))
+                        {
+                            memcpy(frame.cameraBase, bouncedCamera,
+                                   sizeof(frame.cameraBase));
+                        }
+                        else
+                        {
+                            bounceFallback = true;
+                        }
+                    }
+                }
+                else if (bounceRequested)
+                {
+                    g_reachHeadReference = {};
+                    bounceFallback = true;
+                }
+
+                if (ReachVehicleIsWalkUpTurret(identity))
+                {
+                    frame.carrierBasisValid = false;
+                }
+                else if (ReachVehicleIsAttachedWeapon(identity))
+                {
+                    const int32_t carrier =
+                        g_reachCamera.objectUltimateParent
+                        ? g_reachCamera.objectUltimateParent(
+                              info.directParent)
+                        : -1;
+                    Halo3ObjectMarker carrierRoot{};
+                    frame.carrier = carrier;
+                    frame.carrierBasisValid = carrier != -1 &&
+                        g_reachCamera.objectMarkers(
+                            carrier, 0, &carrierRoot,
+                            1, true, interpolate) > 0 &&
+                        Halo3MatrixValid(carrierRoot.matrix);
+                    if (frame.carrierBasisValid)
+                    {
+                        memcpy(frame.rawCarrierForward,
+                               carrierRoot.matrix.forward,
+                               sizeof(frame.rawCarrierForward));
+                    }
+                    else if (g_config.vehicle_view_follow)
+                    {
+                        followFallback = true;
+                    }
+                }
+                else
+                {
+                    frame.carrierBasisValid = true;
+                    memcpy(frame.rawCarrierForward,
+                           rootMarker.matrix.forward,
+                           sizeof(frame.rawCarrierForward));
+                }
+                frame.active = g_config.vehicle_first_person;
+                complete = true;
+            } while (false);
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            faulted = true;
+        }
+
+        const ReachVehicleInputState inputState = !unitKnown
+            ? ReachVehicleInputState::Unknown
+            : (structurallySeated ? ReachVehicleInputState::Vehicle
+                                  : ReachVehicleInputState::OnFoot);
+        g_reachVehicleInputSnapshot.store(
+            ReachVehicleInputSnapshot(generation, inputState),
+            std::memory_order_release);
+        if (faulted)
+        {
+            g_reachVehicleTrimSnapshot.store(0, std::memory_order_release);
+            g_reachVehicleCameraFaults.fetch_add(
+                1, std::memory_order_relaxed);
+            g_reachCamera.vehicleCameraBindingState.store(
+                static_cast<uint8_t>(
+                    ReachVehicleCameraBindingState::StockFallback),
+                std::memory_order_release);
+            g_reachHeadReference = {};
+            g_reachVehicleFpDebounce = {};
+            g_reachVehicleFpStable.store(
+                static_cast<uint32_t>(Halo3VehicleState::Unknown),
+                std::memory_order_relaxed);
+            return false;
+        }
+        if (identityMiss)
+        {
+            g_reachVehicleIdentityMisses.fetch_add(
+                1, std::memory_order_relaxed);
+        }
+        if (markerFailure)
+        {
+            g_reachVehicleMarkerFailures.fetch_add(
+                1, std::memory_order_relaxed);
+        }
+        if (boundsFailure)
+        {
+            g_reachVehicleBoundsFailures.fetch_add(
+                1, std::memory_order_relaxed);
+        }
+        if (bounceFallback)
+        {
+            g_reachVehicleBounceFallbacks.fetch_add(
+                1, std::memory_order_relaxed);
+        }
+        if (followFallback)
+        {
+            g_reachVehicleFollowFallbacks.fetch_add(
+                1, std::memory_order_relaxed);
+        }
+        if (!complete)
+        {
+            g_reachVehicleTrimSnapshot.store(0, std::memory_order_release);
+            g_reachHeadReference = {};
+            ReachUpdateVehicleTransition(
+                unitKnown ? Halo3VehicleState::OnFoot
+                          : Halo3VehicleState::Unknown,
+                nowMs);
+            return false;
+        }
+
+        g_reachVehicleTrimSnapshot.store(
+            frame.active
+                ? ReachVehicleTrimSnapshot(
+                      generation, frame.identity, frame.seatIndex)
+                : 0,
+            std::memory_order_release);
+        ReachUpdateVehicleTransition(Halo3VehicleState::Vehicle, nowMs);
+        return frame.active;
+    }
+
+    bool ReachVehicleFpActive()
+    {
+        if (!g_config.vehicle_first_person ||
+            g_reachCamera.vehicleCameraBindingState.load(
+                std::memory_order_acquire) != static_cast<uint8_t>(
+                    ReachVehicleCameraBindingState::Installed) ||
+            g_reachVehicleFpStable.load(std::memory_order_relaxed) !=
+                static_cast<uint32_t>(Halo3VehicleState::Vehicle))
+        {
+            return false;
+        }
+        const uint32_t generation = g_reachCamera.generation.load(
+            std::memory_order_acquire);
+        const uint64_t sampleMs = g_reachVehicleSampleMs.load(
+            std::memory_order_relaxed);
+        const uint64_t nowMs = GetTickCount64();
+        const uint64_t snapshot = g_reachVehicleTrimSnapshot.load(
+            std::memory_order_acquire);
+        return generation && sampleMs && nowMs >= sampleMs &&
+            nowMs - sampleMs <= 500 &&
+            static_cast<uint32_t>(snapshot >> 32) == generation;
+    }
+
+    bool ReachFollowContextValid(uint32_t& outGeneration)
+    {
+        outGeneration = 0;
+        if (!ReachVehicleFpActive())
+            return false;
+        outGeneration = g_reachCamera.generation.load(
+            std::memory_order_acquire);
+        return outGeneration != 0;
+    }
+
+    bool ReachCurrentSeat(ReachVehicleId& identity, int& seatIndex)
+    {
+        identity = ReachVehicleId::Unknown;
+        seatIndex = -1;
+        if (!ReachVehicleFpActive())
+            return false;
+        const uint32_t generation = g_reachCamera.generation.load(
+            std::memory_order_acquire);
+        const uint64_t snapshot = g_reachVehicleTrimSnapshot.load(
+            std::memory_order_acquire);
+        if (static_cast<uint32_t>(snapshot >> 32) != generation)
+            return false;
+        const int id = static_cast<int>((snapshot >> 8) & 0xFFu);
+        const int seat = static_cast<int>(snapshot & 0xFFu) - 1;
+        if (id <= 0 || id > kReachVehicleIdentityCount || seat < 0 ||
+            seat >= kReachVehicleSeatLimit)
+        {
+            return false;
+        }
+        identity = static_cast<ReachVehicleId>(id);
+        seatIndex = seat;
+        return true;
+    }
+
+    bool ReachSeatAuthorsSteeringNow()
+    {
+        return g_reachSeatAuthorsSteering.load(
+                   std::memory_order_acquire) != 0 &&
+            ReachVehicleFpActive();
+    }
+
+    bool ReachSeatUsesWheel()
+    {
+        if (!ReachSeatAuthorsSteeringNow())
+            return false;
+        ReachVehicleId identity = ReachVehicleId::Unknown;
+        int seatIndex = -1;
+        return ReachCurrentSeat(identity, seatIndex) &&
+            ReachVehicleUsesWheel(identity);
+    }
+
+    void ReachApplySeatYawFollow(const ReachVehicleFrame& frame)
+    {
+        const uint32_t generation = g_reachCamera.generation.load(
+            std::memory_order_relaxed);
+        const bool follows = frame.active && ReachVehicleFpActive() &&
+            frame.carrierBasisValid &&
+            g_config.vehicle_view_follow &&
+            ReachVehicleSeatFollowsHull(
+                frame.identity, frame.seatIndex);
+        if (!follows)
+        {
+            g_reachYawSeat = {};
+            g_reachSeatYaw = {};
+            g_reachSeatAuthorsSteering.store(
+                0, std::memory_order_release);
+            Halo3ClearRollStableFollow();
+            return;
+        }
+        const bool mounted = ReachVehicleIsAttachedWeapon(frame.identity);
+        if (!g_reachYawSeat.Matches(
+                generation, frame.carrier, frame.seatIndex,
+                static_cast<uint32_t>(frame.identity), mounted))
+        {
+            g_reachYawSeat.Set(
+                generation, frame.carrier, frame.seatIndex,
+                static_cast<uint32_t>(frame.identity), mounted);
+            g_reachSeatYaw = {};
+        }
+        const float delta = Halo3SeatYawDelta(
+            g_reachSeatYaw, frame.rawCarrierForward, true);
+        if (delta != 0.0f)
+            g_gameYawRef = WrapPi(g_gameYawRef + delta);
+
+        float hullPitch = 0.0f;
+        if (ReachVehicleSeatFollowsPitch(
+                frame.identity, frame.seatIndex) &&
+            g_reachSeatYaw.armed &&
+            Halo3RollStablePitchFromForward(
+                frame.rawCarrierForward, hullPitch))
+        {
+            Halo3PublishRollStableFollowFor(
+                generation, VehicleFollowOwner::Reach,
+                g_reachSeatYaw.lastYaw, hullPitch);
+        }
+        else
+        {
+            Halo3ClearRollStableFollow();
+        }
+        const bool authors = ReachVehicleSeatAuthorsSteering(
+            frame.identity, frame.seatIndex,
+            g_config.vehicle_view_follow);
+        g_reachSeatAuthorsSteering.store(
+            authors ? 1u : 0u, std::memory_order_release);
     }
 
     uintptr_t ReachMainRenderViewBody(
@@ -20144,6 +21200,18 @@ namespace
                 workspace, playerView, windowIndex);
         }
 
+        // The native seat bit is owned only inside the synchronous stock call
+        // below. A previous owner surviving to a new normal-player frame is an
+        // optional-feature fault; drop it safely and keep the camera core live.
+        ReachRestoreNativeSeatPatch();
+        ReachVehicleFrame vehicleFrame{};
+        const bool vehicleFrameReady =
+            ReachSampleVehicleCameraFrame(vehicleFrame) &&
+            ReachVehicleFpActive();
+        if (!vehicleFrameReady)
+            vehicleFrame = {};
+        ReachApplySeatYawFollow(vehicleFrame);
+
         ReachOwnerScope candidate{};
         candidate.workspace = workspace;
         candidate.playerView = playerView;
@@ -20151,6 +21219,7 @@ namespace
         candidate.preparedSerial = prepared.Serial();
         memcpy(candidate.gameplayBasePosition,primaryCompact+0x00,
                sizeof(candidate.gameplayBasePosition));
+        candidate.vehicle = vehicleFrame;
         const float* authoredProjection = reinterpret_cast<const float*>(
             primaryDerived + kReachDerivedProjectionOffset);
         const float authoredAspect =
@@ -20185,9 +21254,11 @@ namespace
         {
             headCullReady = ReachBuildHeadCullCamera(
                 primaryCompact, cullCover, tracking,
+                vehicleFrameReady ? &candidate.vehicle : nullptr,
                 candidate.headCenter, headDerived,
                 candidate.cutsceneTheaterAspect,
-                candidate.cutsceneTheater);
+                candidate.cutsceneTheater,
+                candidate.vehicleViewApplied);
         }
         __except (EXCEPTION_EXECUTE_HANDLER)
         {
@@ -20204,9 +21275,21 @@ namespace
                 workspace, playerView, windowIndex);
         }
 
+        if (candidate.vehicleViewApplied)
+        {
+            const float* handOrigin = g_config.vehicle_hands_follow_body
+                ? candidate.vehicle.handsBase
+                : candidate.vehicle.cameraBase;
+            memcpy(candidate.gameplayBasePosition, handOrigin,
+                   sizeof(candidate.gameplayBasePosition));
+        }
         candidate.fpTargets={};
         candidate.fpTargets.centerRootValid=ReachBuildCenterFpRoot(
-            candidate.headCenter,candidate.fpTargets.centerRoot);
+            candidate.headCenter,
+            candidate.vehicleViewApplied
+                ? candidate.gameplayBasePosition
+                : nullptr,
+            candidate.fpTargets.centerRoot);
         candidate.fpTargets.rightWristValid=
             ReachBuildPreparedControllerTarget(
                 tracking,false,candidate.gameplayBasePosition,
@@ -20289,6 +21372,8 @@ namespace
             epoch.generation,candidate.preparedSerial,candidate.fpTargets);
 
         uintptr_t result = 0;
+        if (candidate.vehicleViewApplied)
+            ReachEnsureNativeFirstPersonSeat(candidate.vehicle);
         __try
         {
             result = g_reachOrigMainRenderView(
@@ -20296,6 +21381,7 @@ namespace
         }
         __finally
         {
+            ReachRestoreNativeSeatPatch();
             ReachEndFpPairScope();
             // Restore only the proven camera-pair data. The engine owns the
             // camera-stack callback at +0x2A8 and its push/pop lifetime.
@@ -20878,6 +21964,13 @@ namespace
                 ReachVehicleInputBindingState::CleanupRequired),
             std::memory_order_release);
         g_reachVehicleInputSnapshot.store(0, std::memory_order_release);
+        g_reachCamera.vehicleCameraBindingState.store(
+            static_cast<uint8_t>(
+                ReachVehicleCameraBindingState::CleanupRequired),
+            std::memory_order_release);
+        g_reachVehicleTrimSnapshot.store(0, std::memory_order_release);
+        g_reachSeatAuthorsSteering.store(0, std::memory_order_release);
+        Halo3ClearRollStableFollow();
         g_reachCamera.teardownRequested.store(
             true, std::memory_order_release);
         g_reachCamera.armed.store(false, std::memory_order_release);
@@ -20908,6 +22001,21 @@ namespace
         g_baseCamValid.store(false, std::memory_order_release);
         if (!DisableAndRemoveReachHooks())
             return false;
+
+        // The seat bit is owned only inside one synchronous outer-render call
+        // and its __finally restores it. Quiescence therefore must leave no
+        // pointer for this worker thread (which does not own Reach engine TLS)
+        // to chase. Never dereference an unexpected stale tag pointer here.
+        if (g_reachNativeSeatPatch.active)
+        {
+            LOG("Reach first-person vehicles: unexpected seat-bit ownership "
+                "survived callback quiescence; discarded without a worker-"
+                "thread tag write");
+            g_reachNativeSeatPatch = {};
+            g_reachVehicleSeatPatchState.store(2, std::memory_order_relaxed);
+            g_reachVehicleSeatPatchSerial.fetch_add(
+                1, std::memory_order_release);
+        }
 
         // Put the engine's third-person effect branch back before anything
         // else can unload the module. Optional, so a failure is logged rather
@@ -20984,6 +22092,25 @@ namespace
             static_cast<uint8_t>(
                 ReachVehicleInputBindingState::StockFallback),
             std::memory_order_release);
+        g_reachCamera.vehiclePlayerUnitByOutputUser = nullptr;
+        g_reachCamera.unitGetCameraInfo = nullptr;
+        g_reachCamera.objectMarkers = nullptr;
+        g_reachCamera.objectUltimateParent = nullptr;
+        g_reachCamera.vehicleType = nullptr;
+        g_reachCamera.tagGet = nullptr;
+        g_reachCamera.vehicleCameraBindingState.store(
+            static_cast<uint8_t>(
+                ReachVehicleCameraBindingState::StockFallback),
+            std::memory_order_release);
+        g_reachVehicleTrimSnapshot.store(0, std::memory_order_release);
+        g_reachVehicleSampleMs.store(0, std::memory_order_relaxed);
+        g_reachVehicleFpStable.store(
+            static_cast<uint32_t>(Halo3VehicleState::Unknown),
+            std::memory_order_relaxed);
+        g_reachVehicleFpDebounce = {};
+        g_reachHeadReference = {};
+        g_reachSeatYaw = {};
+        g_reachYawSeat = {};
         g_reachCamera.moduleReference = nullptr;
         g_reachCamera.base = 0;
         g_reachCamera.size = 0;
@@ -21148,6 +22275,80 @@ namespace
                    reinterpret_cast<uintptr_t>(playerUnitByOutputUser)) &&
             ReachColdExecutableAddress(
                 reinterpret_cast<uintptr_t>(unitInVehicle));
+    }
+
+    // Optional Reach first-person vehicle transaction. HREK supplies every ABI
+    // and layout; these unique retail entry signatures only locate and verify
+    // the homologs in the already full-image-pinned module. Failure affects no
+    // other Reach camera feature.
+    bool ResolveReachVehicleCameraBinding(
+        uintptr_t base, size_t size,
+        ReachPlayerUnitByOutputUserFn& playerUnitByOutputUser,
+        ReachUnitGetCameraInfoFn& unitGetCameraInfo,
+        ReachObjectMarkersFn& objectMarkers,
+        ReachObjectUltimateParentFn& objectUltimateParent,
+        ReachVehicleTypeFn& vehicleType,
+        ReachTagGetFn& tagGet)
+    {
+        playerUnitByOutputUser = nullptr;
+        unitGetCameraInfo = nullptr;
+        objectMarkers = nullptr;
+        objectUltimateParent = nullptr;
+        vehicleType = nullptr;
+        tagGet = nullptr;
+        static constexpr char kPlayerUnitAob[] =
+            "83 C8 FF 83 F9 03 77 27 8B 15 12 3C BC 00 65 48 8B 04 25 58 00 00 00 41 B8 58 01 00 00 48 63 C9 48 8B 04 D0 4A 8B 04 00 8B 84 88 C8 00 00 00 C3";
+        static constexpr char kCameraInfoAob[] =
+            "48 8B C4 48 89 58 18 55 56 57 41 54 41 55 41 56 41 57 48 8D 68 A1 48 81 EC E0 00 00 00 41 83 CE FF 8B D9 33 FF 0F 29 70 B8 48 89 7A 08";
+        static constexpr char kObjectMarkersAob[] =
+            "48 8B C4 48 89 58 08 48 89 68 10 48 89 70 18 66 44 89 48 20 57 41 54 41 55 41 56 41 57 48 81 EC 80 00 00 00 45 33 D2 8B E9 49 8B F8 44 8B F2 8B D9 41 0F B7 F2";
+        static constexpr char kUltimateParentAob[] =
+            "83 C8 FF 3B C8 74 37 8B 15 ?? ?? ?? ?? 65 48 8B 04 25 58 00 00 00 41 B8 10 00 00 00 48 8B 04 D0 4A 8B 14 00 4C 8B 42 50 0F B7 D1 8B C1 48 8D 0C 52 49 8B 54 C8 10 8B 4A 14 83 F9 FF 75 EA C3";
+        static constexpr char kVehicleTypeAob[] =
+            "48 8B 05 ?? ?? ?? ?? 0F B7 C9 8B 54 C8 04 48 8D 0D ?? ?? ?? ?? 8B C2 48 C1 E8 1C 4C 8D 82 34 01 00 00 48 8B 0C C1 33 C0 45 33 C9 44 8D 50 10 4E 8D 04 81 41 83 38 00 75 11 FF C0 49 FF C1 49 83 C0 0C 49 83 F9 0F 7C EB EB 03 44 8B D0 41 8B C2 C3";
+        static constexpr char kTagGetAob[] =
+            "4C 8B 15 ?? ?? ?? ?? 45 33 DB 4C 0F BF C2 45 8B CB 49 63 82 F8 FF 03 00 4C 3B C0 73 17 48 8B 05 ?? ?? ?? ?? C1 FA 10 4E 8D 04 C0 66 41 3B 50 02 4D 0F 44 C8 4D 85 C9 74 3E 49 0F BF 01 48 03 C0 41 39 8C C2 FC FF 03 00 74 14 41 39 8C C2 00 00 04 00 74 0A 41 39 8C C2 04 00 04 00 75 19 41 8B 49 04 48 8D 15 ?? ?? ?? ?? 8B C1 48 C1 E8 1C 48 8B 04 C2 4C 8D 1C 88 49 8B C3 C3";
+        if (!ReachColdExactSignatureAt(
+                base, size, kReachPlayerUnitByOutputUserRva, kPlayerUnitAob) ||
+            !ReachColdExactSignatureAt(
+                base, size, kReachUnitGetCameraInfoRva, kCameraInfoAob) ||
+            !ReachColdExactSignatureAt(
+                base, size, kReachObjectMarkerResolverRva,
+                kObjectMarkersAob) ||
+            !ReachColdExactSignatureAt(
+                base, size, kReachVehicleTypeAccessorRva, kVehicleTypeAob) ||
+            !ReachColdExactSignatureAt(
+                base, size, kReachTagGetRva, kTagGetAob))
+        {
+            return false;
+        }
+        playerUnitByOutputUser = reinterpret_cast<
+            ReachPlayerUnitByOutputUserFn>(
+                base + kReachPlayerUnitByOutputUserRva);
+        unitGetCameraInfo = reinterpret_cast<ReachUnitGetCameraInfoFn>(
+            base + kReachUnitGetCameraInfoRva);
+        objectMarkers = reinterpret_cast<ReachObjectMarkersFn>(
+            base + kReachObjectMarkerResolverRva);
+        if (ReachColdExactSignatureAt(
+                base, size, kReachObjectUltimateParentRva,
+                kUltimateParentAob))
+        {
+            objectUltimateParent =
+                reinterpret_cast<ReachObjectUltimateParentFn>(
+                    base + kReachObjectUltimateParentRva);
+        }
+        vehicleType = reinterpret_cast<ReachVehicleTypeFn>(
+            base + kReachVehicleTypeAccessorRva);
+        tagGet = reinterpret_cast<ReachTagGetFn>(base + kReachTagGetRva);
+        return ReachColdExecutableAddress(
+                   reinterpret_cast<uintptr_t>(playerUnitByOutputUser)) &&
+            ReachColdExecutableAddress(
+                reinterpret_cast<uintptr_t>(unitGetCameraInfo)) &&
+            ReachColdExecutableAddress(
+                reinterpret_cast<uintptr_t>(objectMarkers)) &&
+            ReachColdExecutableAddress(
+                reinterpret_cast<uintptr_t>(vehicleType)) &&
+            ReachColdExecutableAddress(reinterpret_cast<uintptr_t>(tagGet));
     }
 
     bool ResolveReachLightmapShadowsControl(
@@ -22006,6 +23207,37 @@ namespace
                 "continues");
         }
 
+        ReachPlayerUnitByOutputUserFn reachVehiclePlayerUnit = nullptr;
+        ReachUnitGetCameraInfoFn reachUnitGetCameraInfo = nullptr;
+        ReachObjectMarkersFn reachObjectMarkers = nullptr;
+        ReachObjectUltimateParentFn reachObjectUltimateParent = nullptr;
+        ReachVehicleTypeFn reachVehicleType = nullptr;
+        ReachTagGetFn reachTagGet = nullptr;
+        const bool reachVehicleCameraResolved =
+            ResolveReachVehicleCameraBinding(
+                base, size, reachVehiclePlayerUnit,
+                reachUnitGetCameraInfo, reachObjectMarkers,
+                reachObjectUltimateParent, reachVehicleType,
+                reachTagGet);
+        if (!reachVehicleCameraResolved)
+        {
+            LOG("Reach first-person vehicles: StockFallback; exact native "
+                "camera/marker/tag identity proof failed. Only vehicle camera "
+                "placement stays stock; the Reach stereo core continues");
+        }
+        else if (!reachObjectUltimateParent)
+        {
+            LOG("Reach first-person vehicles: attached-weapon ultimate-parent "
+                "binding unavailable; those cameras remain active but their "
+                "optional carrier view-follow stays stock/world-locked");
+        }
+        else if (!reachObjectUltimateParent)
+        {
+            LOG("Reach first-person vehicles: core Installed; attached-gun "
+                "carrier follow is StockFallback because its optional ultimate-"
+                "parent proof failed");
+        }
+
         uint8_t* reachNativeWeaponIkDisable = nullptr;
         uint8_t reachNativeWeaponIkDisableOriginal = 0;
         if (!ResolveReachNativeWeaponIkControl(
@@ -22486,8 +23718,52 @@ namespace
         if (reachVehicleInputResolved)
         {
             LOG("Reach vehicle input: Installed; native LT/X will be restored "
-                "for every seated vehicle and the on-foot Reach swap remains "
-                "active");
+                "for HREK unit_in_vehicle seats; the richer camera-info sampler "
+                "supersedes it for mounted turret types when available");
+        }
+        g_reachCamera.vehiclePlayerUnitByOutputUser =
+            reachVehicleCameraResolved ? reachVehiclePlayerUnit : nullptr;
+        g_reachCamera.unitGetCameraInfo =
+            reachVehicleCameraResolved ? reachUnitGetCameraInfo : nullptr;
+        g_reachCamera.objectMarkers =
+            reachVehicleCameraResolved ? reachObjectMarkers : nullptr;
+        g_reachCamera.objectUltimateParent = reachVehicleCameraResolved
+            ? reachObjectUltimateParent : nullptr;
+        g_reachCamera.vehicleType =
+            reachVehicleCameraResolved ? reachVehicleType : nullptr;
+        g_reachCamera.tagGet =
+            reachVehicleCameraResolved ? reachTagGet : nullptr;
+        g_reachCamera.vehicleCameraBindingState.store(
+            static_cast<uint8_t>(reachVehicleCameraResolved
+                ? ReachVehicleCameraBindingState::Installed
+                : ReachVehicleCameraBindingState::StockFallback),
+            std::memory_order_release);
+        g_reachVehicleTrimSnapshot.store(0, std::memory_order_release);
+        g_reachVehicleSampleMs.store(0, std::memory_order_relaxed);
+        g_reachVehicleFpStable.store(
+            static_cast<uint32_t>(Halo3VehicleState::Unknown),
+            std::memory_order_relaxed);
+        g_reachVehicleCameraFaults.store(0, std::memory_order_relaxed);
+        g_reachVehicleIdentityMisses.store(0, std::memory_order_relaxed);
+        g_reachVehicleMarkerFailures.store(0, std::memory_order_relaxed);
+        g_reachVehicleBoundsFailures.store(0, std::memory_order_relaxed);
+        g_reachVehicleBounceFallbacks.store(0, std::memory_order_relaxed);
+        g_reachVehicleFollowFallbacks.store(0, std::memory_order_relaxed);
+        g_reachVehicleSeatPatchState.store(0, std::memory_order_relaxed);
+        g_reachVehicleSeatPatchSerial.store(0, std::memory_order_relaxed);
+        g_reachVehicleSeatPatchFailures.store(0, std::memory_order_relaxed);
+        g_reachVehicleSeatRecenters.store(0, std::memory_order_relaxed);
+        g_reachSeatAuthorsSteering.store(0, std::memory_order_relaxed);
+        g_reachVehicleFpDebounce = {};
+        g_reachHeadReference = {};
+        g_reachNativeSeatPatch = {};
+        g_reachSeatYaw = {};
+        g_reachYawSeat = {};
+        if (reachVehicleCameraResolved)
+        {
+            LOG("Reach first-person vehicles: Installed; 20 exact HREK "
+                "identities, 25 player seats, rendered marker placement, "
+                "body hide, bounce, hands, trims and view follow are armed");
         }
         g_reachRainDecoupled.store(0, std::memory_order_relaxed);
         g_reachRainSkipped.store(0, std::memory_order_relaxed);
@@ -22877,10 +24153,131 @@ namespace
     {
         static uint64_t loggedSnapshot = 0;
         static uint32_t loggedFaultGeneration = 0;
+        static uint32_t cameraLogGeneration = 0;
+        static bool loggedCameraFault = false;
+        static bool loggedIdentityMiss = false;
+        static bool loggedMarkerFailure = false;
+        static bool loggedBoundsFailure = false;
+        static bool loggedBounceFallback = false;
+        static bool loggedFollowFallback = false;
+        static bool loggedPatchActivity = false;
+        static bool loggedPatchFailure = false;
+        static uint32_t loggedRecenters = 0;
+        static uint64_t loggedSeat = 0;
         const uint32_t generation = g_reachCamera.generation.load(
             std::memory_order_acquire);
         if (!generation)
             return;
+        if (cameraLogGeneration != generation)
+        {
+            cameraLogGeneration = generation;
+            loggedCameraFault = false;
+            loggedIdentityMiss = false;
+            loggedMarkerFailure = false;
+            loggedBoundsFailure = false;
+            loggedBounceFallback = false;
+            loggedFollowFallback = false;
+            loggedPatchActivity = false;
+            loggedPatchFailure = false;
+            loggedRecenters = 0;
+            loggedSeat = 0;
+        }
+        if (!loggedCameraFault &&
+            g_reachVehicleCameraFaults.load(std::memory_order_relaxed) != 0)
+        {
+            loggedCameraFault = true;
+            LOG("Reach first-person vehicles: engine-thread camera sample "
+                "faulted; only the optional vehicle transaction is now stock, "
+                "the Reach stereo camera core remains armed");
+        }
+        if (!loggedIdentityMiss &&
+            g_reachVehicleIdentityMisses.load(std::memory_order_relaxed) != 0)
+        {
+            loggedIdentityMiss = true;
+            LOG("Reach first-person vehicles: an occupied vehicle/seat did not "
+                "match the exact HREK identity, physics type and player-seat "
+                "census; that seat remains stock");
+        }
+        if (!loggedMarkerFailure &&
+            g_reachVehicleMarkerFailures.load(std::memory_order_relaxed) != 0)
+        {
+            loggedMarkerFailure = true;
+            LOG("Reach first-person vehicles: seat/root marker resolution "
+                "failed; that frame remained stock");
+        }
+        if (!loggedBoundsFailure &&
+            g_reachVehicleBoundsFailures.load(std::memory_order_relaxed) != 0)
+        {
+            loggedBoundsFailure = true;
+            LOG("Reach first-person vehicles: a finite seat/config point fell "
+                "outside the vehicle bounds guard; that frame remained stock");
+        }
+        if (!loggedBounceFallback &&
+            g_reachVehicleBounceFallbacks.load(std::memory_order_relaxed) != 0)
+        {
+            loggedBounceFallback = true;
+            LOG("Reach first-person vehicles: occupant head-marker bounce "
+                "could not be proven; rigid authored seat placement continues");
+        }
+        if (!loggedFollowFallback &&
+            g_reachVehicleFollowFallbacks.load(std::memory_order_relaxed) != 0)
+        {
+            loggedFollowFallback = true;
+            LOG("Reach first-person vehicles: attached-weapon carrier root "
+                "could not be resolved; camera placement continues but view "
+                "follow is stock/world-locked for that seat");
+        }
+        const uint32_t patchSerial = g_reachVehicleSeatPatchSerial.load(
+            std::memory_order_acquire);
+        if (!loggedPatchActivity && patchSerial != 0)
+        {
+            loggedPatchActivity = true;
+            LOG("Reach first-person vehicles: transient native seat-bit "
+                "body-hide transaction observed (serial=%u, current=%s)",
+                patchSerial,
+                g_reachVehicleSeatPatchState.load(
+                    std::memory_order_relaxed) == 2 ? "fallback" : "restored");
+        }
+        if (!loggedPatchFailure &&
+            g_reachVehicleSeatPatchFailures.load(
+                std::memory_order_relaxed) != 0)
+        {
+            loggedPatchFailure = true;
+            LOG("Reach first-person vehicles: native seat-bit body hide could "
+                "not be installed/restored safely; body hide alone fell back "
+                "and the seat camera continues");
+        }
+        const uint32_t recenters = g_reachVehicleSeatRecenters.load(
+            std::memory_order_relaxed);
+        if (recenters != loggedRecenters)
+        {
+            LOG("Reach first-person vehicles: positional reference recentered "
+                "on seat transition (count=%u)", recenters);
+            loggedRecenters = recenters;
+        }
+        const uint64_t seatSnapshot = g_reachVehicleTrimSnapshot.load(
+            std::memory_order_acquire);
+        if (seatSnapshot != loggedSeat &&
+            static_cast<uint32_t>(seatSnapshot >> 32) == generation)
+        {
+            loggedSeat = seatSnapshot;
+            const int identity =
+                static_cast<int>((seatSnapshot >> 8) & 0xFFu);
+            const int seat = static_cast<int>(seatSnapshot & 0xFFu) - 1;
+            const int slot = ReachVehicleTrimSnapshotSlot(
+                seatSnapshot, generation, kReachVehicleSeatSlots);
+            if (identity > 0 && identity <= kReachVehicleTrimCount &&
+                seat >= 0 && slot >= 0)
+            {
+                LOG("Reach first-person vehicles: active %s raw seat %d; "
+                    "marker smoothing=%d trims F/R/U=%.3f/%.3f/%.3f m",
+                    kReachVehicleTrimNames[identity - 1], seat,
+                    static_cast<int>(g_config.vehicle_cam_smoothing),
+                    ConfigReachSeatCamForward(g_config, slot),
+                    ConfigReachSeatCamRight(g_config, slot),
+                    ConfigReachSeatCamUp(g_config, slot));
+            }
+        }
         if (g_reachVehicleInputFaults.load(std::memory_order_relaxed) != 0 &&
             loggedFaultGeneration != generation)
         {
@@ -25608,15 +27005,35 @@ static_assert(static_cast<int>(OdstVehicleId::Scorpion) == 1 &&
               "kOdstVehicleTrimNames must mirror OdstVehicleId order");
 #endif
 
-// O2: the occupied seat in whichever title owns the camera. `outIsOdst`
-// reports which bank the slot indexes, because ODST's table is wider (its
-// Scorpion riders are player seats and it adds the shade). Only one title's
-// vehicle transaction can be armed at a time, so the two can never both
-// answer.
-int Game_VehicleSeatTrimSlotEx(int* outIsOdst)
+static int ReachVehicleTrimSlotNow()
 {
-    if (outIsOdst)
-        *outIsOdst = 0;
+#if HALOMCCVR_EXPERIMENTAL_REACH_RENDER_CANDIDATE
+    if (TitleAdapter_GetActiveTitle() != GameTitle::HaloReach ||
+        !ReachVehicleFpActive())
+    {
+        return -1;
+    }
+    const uint32_t generation =
+        TitleAdapter_GetGeneration(GameTitle::HaloReach);
+    if (!generation || generation != g_reachCamera.generation.load(
+            std::memory_order_acquire))
+    {
+        return -1;
+    }
+    return ReachVehicleTrimSnapshotSlot(
+        g_reachVehicleTrimSnapshot.load(std::memory_order_acquire),
+        generation, kReachVehicleSeatSlots);
+#else
+    return -1;
+#endif
+}
+
+// The occupied seat in whichever title owns the camera. Only one title's
+// vehicle transaction can be armed at a time.
+int Game_VehicleSeatTrimSlotEx(VehicleTrimBank* outBank)
+{
+    if (outBank)
+        *outBank = VehicleTrimBank::Halo3;
     const int haloSlot = Game_Halo3CurrentSeatTrimSlot();
     if (haloSlot >= 0)
         return haloSlot;
@@ -25628,19 +27045,45 @@ int Game_VehicleSeatTrimSlotEx(int* outIsOdst)
         {
             const int slot = ConfigOdstSeatTrimSlot(
                 static_cast<int>(seat.identity), seat.seatIndex, seat.mounted);
-            if (slot >= 0 && outIsOdst)
-                *outIsOdst = 1;
+            if (slot >= 0 && outBank)
+                *outBank = VehicleTrimBank::Odst;
             return slot;
         }
     }
 #endif
+    if (TitleAdapter_GetActiveTitle() == GameTitle::HaloReach)
+    {
+        const int slot = ReachVehicleTrimSlotNow();
+        if (slot >= 0 && outBank)
+            *outBank = VehicleTrimBank::Reach;
+        return slot;
+    }
     return -1;
 }
 
-const char* Game_VehicleSeatTrimName(int slot, int isOdst)
+const char* Game_VehicleSeatTrimName(int slot, VehicleTrimBank bank)
 {
-    if (!isOdst)
+    if (bank == VehicleTrimBank::Halo3)
         return Game_Halo3SeatTrimName(slot);
+    if (bank == VehicleTrimBank::Reach)
+    {
+        static char text[64];
+        if (slot < 0 || slot >= kReachVehicleTrimSlots)
+            return "this seat";
+        const int v = slot / kReachVehicleSeatSlots;
+        const int s = slot % kReachVehicleSeatSlots;
+        static const char* const kNiceVehicle[kReachVehicleTrimCount] = {
+            "Banshee", "Space Banshee", "Ghost", "Revenant", "Wraith",
+            "Wraith gunner", "Mongoose", "Warthog", "Warthog chaingun",
+            "Warthog gauss", "Warthog rockets", "Falcon", "Sabre",
+            "Scorpion", "Forklift", "Cart", "Shade plasma", "Shade flak",
+            "Plasma turret", "Machine gun"};
+        _snprintf_s(text, sizeof(text), _TRUNCATE, "Reach %s seat %d",
+                    kNiceVehicle[v], s);
+        return text;
+    }
+    if (bank != VehicleTrimBank::Odst)
+        return "this seat";
 #if HALOMCCVR_EXPERIMENTAL_ODST_BRINGUP
     static char text[56];
     if (slot < 0 || slot >= kOdstVehicleTrimSlots)
@@ -25784,6 +27227,9 @@ bool Game_ComputeAimStick(float& outRx, float& outRy)
 #if HALOMCCVR_EXPERIMENTAL_ODST_BRINGUP
             || OdstVehicleFpActive()
 #endif
+#if HALOMCCVR_EXPERIMENTAL_REACH_RENDER_CANDIDATE
+            || ReachVehicleFpActive()
+#endif
             ;
         // ~7 degrees is far beyond the loop's ordinary lag, and a shrinking
         // error means it is still converging, so neither counts as clamped.
@@ -25878,6 +27324,8 @@ void Game_MapMoveStick(float& mx, float& my)
         // camera facing instead of g_aimFwd. Self-neutralizing: once a real Reach
         // body-heading integration lands and the stock heading tracks gaze, the
         // delta goes to zero and this becomes a no-op.
+        if (ReachVehicleFpActive())
+            return;
         if (!g_enabled.load() || !g_vrAim.load() ||
             !g_reachMoveHeadingValid.load(std::memory_order_acquire))
             return;
@@ -25971,12 +27419,25 @@ bool Game_ReachPlayerIsInVehicle()
     if (TitleAdapter_GetActiveTitle() != GameTitle::HaloReach ||
         !g_reachCamera.installed.load(std::memory_order_acquire) ||
         g_reachCamera.teardownRequested.load(std::memory_order_acquire) ||
-        g_reachCamera.vehicleInputBindingState.load(
-            std::memory_order_acquire) != static_cast<uint8_t>(
-                ReachVehicleInputBindingState::Installed))
+        (g_reachCamera.vehicleInputBindingState.load(
+             std::memory_order_acquire) != static_cast<uint8_t>(
+                 ReachVehicleInputBindingState::Installed) &&
+         g_reachCamera.vehicleCameraBindingState.load(
+             std::memory_order_acquire) != static_cast<uint8_t>(
+                 ReachVehicleCameraBindingState::Installed)))
         return false;
     const uint32_t generation = TitleAdapter_GetGeneration(
         GameTitle::HaloReach);
+    if (g_reachCamera.vehicleCameraBindingState.load(
+            std::memory_order_acquire) == static_cast<uint8_t>(
+                ReachVehicleCameraBindingState::Installed))
+    {
+        const uint64_t sampleMs = g_reachVehicleSampleMs.load(
+            std::memory_order_relaxed);
+        const uint64_t nowMs = GetTickCount64();
+        if (!sampleMs || nowMs < sampleMs || nowMs - sampleMs > 500)
+            return false;
+    }
     return ReachVehicleInputSnapshotIsVehicle(
         g_reachVehicleInputSnapshot.load(std::memory_order_acquire),
         generation);
