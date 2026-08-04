@@ -16150,6 +16150,30 @@ namespace
     };
     ReachHeadReference g_reachHeadReference;
 
+    // The seat is parented to the CAR (R-V13). Reach's authored camera and
+    // attachment markers ride the vehicle/occupant animation graphs - the sit
+    // markers sway with the driving animations - so anchoring the eye to the
+    // live marker dragged the view around the cabin while driving. Halo 3's
+    // accepted design removed exactly this class of motion (C21: rigid seat
+    // anchor, not animated markers). The marker's offset inside the rendered
+    // vehicle-root frame is latched once per seat occupation; the camera then
+    // rides the rigid root body, so hull physics reaches the head and
+    // animation does not. Occupant motion re-enters only through the scaled
+    // vehicle_bounce residual, exactly as in Halo 3.
+    struct ReachSeatAnchorLatch
+    {
+        uint32_t generation = 0;
+        int32_t unitHandle = -1;
+        int32_t directParent = -1;
+        int32_t seatIndex = -1;
+        ReachVehicleId identity = ReachVehicleId::Unknown;
+        bool interpolateNodes = false;
+        bool valid = false;
+        float anchorLocal[3]{};
+    };
+    ReachSeatAnchorLatch g_reachSeatAnchorLatch;
+    std::atomic<uint32_t> g_reachVehicleAnchorFallbacks{0};
+
     struct ReachNativeSeatPatch
     {
         uint32_t generation = 0;
@@ -20730,6 +20754,7 @@ namespace
         bool boundsFailure = false;
         bool bounceFallback = false;
         bool followFallback = false;
+        bool anchorFallback = false;
         bool faulted = false;
         __try
         {
@@ -20884,10 +20909,53 @@ namespace
                     g_config, trimSlot) * kReachWorldUnitsPerMeter;
                 // Blender and the config use the identity-root frame, not a
                 // possibly tilted camera marker: +X forward, +Y left, +Z up.
-                // Keep the authored anchor's animated position, but transport
-                // trim and head residual through the rendered root basis.
+                // The seat is parented to the CAR: the anchor marker's offset
+                // in the rendered root frame is latched once per occupation
+                // and the camera rides the rigid root body from then on.
+                // Following the live marker instead let the vehicle/occupant
+                // animation graphs (which sway the sit markers while driving)
+                // drag the view around the cabin - the motion Halo 3's
+                // accepted C21 removed by anchoring to the rigid seat.
+                ReachSeatAnchorLatch& anchorLatch = g_reachSeatAnchorLatch;
+                const bool anchorLatchMatches = anchorLatch.valid &&
+                    anchorLatch.generation == generation &&
+                    anchorLatch.unitHandle == unit &&
+                    anchorLatch.directParent == info.directParent &&
+                    anchorLatch.seatIndex == info.seatIndex &&
+                    anchorLatch.identity == identity &&
+                    anchorLatch.interpolateNodes == interpolate;
+                if (!anchorLatchMatches)
+                {
+                    anchorLatch = {};
+                    if (Halo3MatrixInverseTransformPoint(
+                            rootMarker.matrix, anchorMarker.matrix.position,
+                            anchorLatch.anchorLocal))
+                    {
+                        anchorLatch.generation = generation;
+                        anchorLatch.unitHandle = unit;
+                        anchorLatch.directParent = info.directParent;
+                        anchorLatch.seatIndex = info.seatIndex;
+                        anchorLatch.identity = identity;
+                        anchorLatch.interpolateNodes = interpolate;
+                        anchorLatch.valid = true;
+                    }
+                }
+                float anchorWorld[3]{};
+                const bool anchorRigid = anchorLatch.valid &&
+                    Halo3MatrixTransformPoint(
+                        rootMarker.matrix, anchorLatch.anchorLocal,
+                        anchorWorld);
+                if (!anchorRigid)
+                {
+                    // Rigid parenting could not be proven this frame; the
+                    // animated marker point is strictly better than losing
+                    // the camera, and the worker names the fallback once.
+                    memcpy(anchorWorld, anchorMarker.matrix.position,
+                           sizeof(anchorWorld));
+                    anchorFallback = true;
+                }
                 Halo3Matrix4x3 seatFrame = rootMarker.matrix;
-                memcpy(seatFrame.position, anchorMarker.matrix.position,
+                memcpy(seatFrame.position, anchorWorld,
                        sizeof(seatFrame.position));
                 const float authoredLocal[3] = {
                     trimForward, -trimRight, trimUp};
@@ -20901,7 +20969,7 @@ namespace
                        sizeof(authoredBasis.up));
                 float handsBase[3]{};
                 if (!ReachComposeSeatCameraPoint(
-                        anchorMarker.matrix.position, authoredBasis,
+                        anchorWorld, authoredBasis,
                         trimForward, trimRight, trimUp, handsBase))
                 {
                     markerFailure = true;
@@ -21103,6 +21171,7 @@ namespace
                     ReachVehicleCameraBindingState::StockFallback),
                 std::memory_order_release);
             g_reachHeadReference = {};
+            g_reachSeatAnchorLatch = {};
             g_reachVehicleFpDebounce = {};
             g_reachVehicleFpStable.store(
                 static_cast<uint32_t>(Halo3VehicleState::Unknown),
@@ -21132,6 +21201,11 @@ namespace
         if (followFallback)
         {
             g_reachVehicleFollowFallbacks.fetch_add(
+                1, std::memory_order_relaxed);
+        }
+        if (anchorFallback)
+        {
+            g_reachVehicleAnchorFallbacks.fetch_add(
                 1, std::memory_order_relaxed);
         }
         if (!complete)
@@ -24068,6 +24142,8 @@ namespace
         g_reachSeatAuthorsSteering.store(0, std::memory_order_relaxed);
         g_reachVehicleFpDebounce = {};
         g_reachHeadReference = {};
+        g_reachSeatAnchorLatch = {};
+        g_reachVehicleAnchorFallbacks.store(0, std::memory_order_relaxed);
         g_reachNativeSeatPatch = {};
         g_reachSeatYaw = {};
         g_reachYawSeat = {};
@@ -24540,6 +24616,7 @@ namespace
         static bool loggedPatchFailure = false;
         static bool loggedShotMove = false;
         static bool loggedShotSkip = false;
+        static bool loggedAnchorFallback = false;
         static uint32_t loggedRecenters = 0;
         static uint64_t loggedSeat = 0;
         const uint32_t generation = g_reachCamera.generation.load(
@@ -24561,6 +24638,7 @@ namespace
             loggedSeat = 0;
             loggedShotMove = false;
             loggedShotSkip = false;
+            loggedAnchorFallback = false;
             for (auto& missSlot : g_reachVehicleCensusMisses)
                 missSlot.state.store(0, std::memory_order_release);
         }
@@ -24643,6 +24721,14 @@ namespace
             loggedBounceFallback = true;
             LOG("Reach first-person vehicles: occupant head-marker bounce "
                 "could not be proven; rigid authored seat placement continues");
+        }
+        if (!loggedAnchorFallback &&
+            g_reachVehicleAnchorFallbacks.load(std::memory_order_relaxed) != 0)
+        {
+            loggedAnchorFallback = true;
+            LOG("Reach first-person vehicles: rigid seat parenting could not "
+                "be proven for at least one frame; the animated marker anchor "
+                "was used for those frames");
         }
         if (!loggedFollowFallback &&
             g_reachVehicleFollowFallbacks.load(std::memory_order_relaxed) != 0)

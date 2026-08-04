@@ -689,6 +689,42 @@ right; ODST's own O6 equivalent is itself still headset-unverified. The
 design and keep stock behavior; whether any player-usable Reach weapon
 authors them was not censused.
 
+## R-V13 - 2026-08-04: the seat is parented to the car
+
+User headset report against fd32fa3 (Steam, 08:58 session): "sliding around
+when driving forward in every vehicle", with the explicit directive to build
+it like Halo 3. The session log is clean - no bounds, marker, bounce or
+recenter faults - so the sliding is not a failure path; it is the placement
+design itself.
+
+**Mechanism.** R-V4 step 7 deliberately kept "the anchor marker's animated
+position". Reach's seat camera/attachment markers ride the vehicle and
+occupant animation graphs - the sit markers sway with the driving
+animations - so the eye anchored to the live marker is dragged around the
+cabin exactly while driving, invisible when parked. The Blender authoring
+placed every camera against the marker's REST seed, so runtime placement did
+not even match the authored intent under animation. Halo 3's accepted design
+does not do this: its camera hangs off the rigid seat node, and its C21
+result explicitly moved OFF animated markers ("arms ride the seat, not the
+occupant's head"). This supersedes R-V4 step 7.
+
+**Change.** The anchor marker's offset inside the rendered vehicle-root
+frame is latched once per seat occupation (keyed on generation, unit, parent,
+raw seat, identity and node-bank selection); every subsequent frame composes
+the seat point from the rigid root matrix and that latched local offset, plus
+the authored trims in the root basis as before. Hull physics reaches the head
+completely; marker/occupant animation does not. Occupant motion re-enters
+only through the scaled vehicle_bounce residual, measured against the rigid
+seat frame - exactly the Halo 3 contract. If the latch or its transform
+cannot be proven finite in a frame, that frame falls back to the animated
+marker point (strictly better than losing the camera), a counter advances,
+and the worker logs the fallback once per generation.
+
+Headset-unverified: whether rigid parenting removes the reported sliding is
+exactly what the next session decides. If sliding survives THIS change, the
+next suspect in the evidence chain is the pre-render sampling phase of the
+outer hook, not the marker animation.
+
 ## R-V9 - acceptance still required
 
 Nothing in this document changes the accepted pointer. Packaging, successful
