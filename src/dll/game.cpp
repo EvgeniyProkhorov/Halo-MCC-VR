@@ -5605,12 +5605,46 @@ namespace
         static_cast<uint8_t>(OdstVehicleBindingState::NotInstalled)};
     std::atomic<uint64_t> g_odstVehicleProbeMs{0};
     std::atomic<uint32_t> g_odstVehicleProbeFaults{0};
-    // ODST's own render_exposure_lock byte. Engaged only while a first-person
-    // seat owns the view, so ordinary play keeps its adaptation.
+    // ODST's own render_exposure_lock byte, in both of the copies the engine
+    // keeps: the EDITABLE block it rebuilds from every frame, and the INTERNAL
+    // block the eye-adaptation integrator actually reads. Engaged only while a
+    // first-person seat owns the view, so ordinary play keeps its adaptation.
     uint8_t* g_odstExposureLock = nullptr;
-    uint8_t* g_odstVisionAdapt = nullptr;
+    uint8_t* g_odstExposureEditableLock = nullptr;
     std::atomic<uint32_t> g_odstExposureLockState{0};
     std::atomic<uint32_t> g_odstExposureEngages{0};
+    // Reads back the byte the ENGINE holds a frame after we engage, so the log
+    // reports whether the hold actually took rather than only that we wrote it.
+    // That distinction is exactly what let an inert lock ship.
+    std::atomic<uint32_t> g_odstExposureVerifyPending{0};
+    std::atomic<uint32_t> g_odstExposureVerified{0};
+
+    // The personal-weapon shot line. The engine's weapon-barrel code calls the
+    // occupant's camera-position evaluator into its OWN stack buffer and then
+    // projects the muzzle onto that ray, so a seated occupant's shot line is
+    // exactly (camera position, aiming vector). In a first-person seat we
+    // render the eye at the authored seat anchor plus the user's trims, which
+    // is NOT that point, so the sight line and the shot line are parallel --
+    // and two parallel lines meet at no distance at all. Re-aiming can only
+    // make them cross at one chosen range; moving the shot origin onto the
+    // rendered eye makes them the same line everywhere.
+    //
+    // This is deliberately scoped to that ONE call site. The same evaluator
+    // also places the engine's first-person camera (we clear the seat's
+    // third-person bit, which is precisely what routes the engine through it),
+    // so overriding it wholesale would feed our own output back in as the next
+    // frame's camera origin and would also move the hands, the cutscene camera
+    // and the chase camera. Gating on the return address keeps all of that
+    // stock and moves only the bullet.
+    using OdstUnitCameraPositionFn =
+        void(__fastcall*)(int32_t, float*, uint8_t);
+    OdstUnitCameraPositionFn g_origOdstUnitCameraPosition = nullptr;
+    void* g_odstUnitCameraPositionTarget = nullptr;
+    uintptr_t g_odstFiringOriginReturn = 0;
+    std::atomic<int32_t> g_odstSeatedPlayerUnit{-1};
+    std::atomic<uint32_t> g_odstCinematicLocked{0};
+    std::atomic<uint32_t> g_odstFiringOriginMoves{0};
+    std::atomic<uint32_t> g_odstFiringOriginSkips{0};
 #endif
 
     struct Halo3ObserverCapture
@@ -9528,33 +9562,61 @@ namespace
     // rather than anything we remembered.
     void OdstApplyExposureLock(bool engage)
     {
-        if (!g_odstExposureLock && !g_odstVisionAdapt)
+        if (!g_odstExposureLock && !g_odstExposureEditableLock)
             return;
+        uint8_t observed = 0xFFu;
         __try
         {
-            // Both are engine developer switches with known stock constants:
-            // the exposure lock is 0 stock and 1 held; the vision-mode
-            // adaptation is 1 stock and 0 held.
+            // Stock is 0 and held is 1 in BOTH copies. Write the internal one
+            // first: it is the copy the engine rewrites every frame, so if the
+            // editable write faults we are left latched on the self-healing
+            // copy rather than the permanent one.
+            const uint8_t want = engage ? 1u : 0u;
             if (g_odstExposureLock)
             {
-                const uint8_t want = engage ? 1u : 0u;
-                if (*g_odstExposureLock != want)
+                observed = *g_odstExposureLock;
+                if (observed != want)
                     *g_odstExposureLock = want;
             }
-            if (g_odstVisionAdapt)
+            // The editable block is the SOURCE main_render rebuilds the
+            // internal block from, and nothing in the module ever writes it
+            // but us. That makes this write stick -- which is the whole point,
+            // and also why every teardown path must release it.
+            if (g_odstExposureEditableLock &&
+                *g_odstExposureEditableLock != want)
             {
-                const uint8_t want = engage ? 0u : 1u;
-                if (*g_odstVisionAdapt != want)
-                    *g_odstVisionAdapt = want;
+                *g_odstExposureEditableLock = want;
             }
         }
         __except (EXCEPTION_EXECUTE_HANDLER)
         {
             g_odstExposureLock = nullptr;
-            g_odstVisionAdapt = nullptr;
+            g_odstExposureEditableLock = nullptr;
             LOG("ODST vehicle exposure: FAULTED writing an adaptation switch; "
                 "exposure control abandoned, everything else unaffected");
             return;
+        }
+        // One frame after engaging, `observed` is what the engine carried into
+        // this frame. If the hold is real it reads 1; if something still
+        // rebuilds it from stock it reads 0 and we say so once, loudly.
+        if (engage && g_odstExposureVerifyPending.load(std::memory_order_relaxed)
+            && observed != 0xFFu)
+        {
+            g_odstExposureVerifyPending.store(0, std::memory_order_relaxed);
+            g_odstExposureVerified.store(observed == 1u ? 1u : 2u,
+                                         std::memory_order_relaxed);
+            if (observed != 1u)
+            {
+                LOG("ODST vehicle exposure: the hold is NOT taking -- the "
+                    "engine's own copy read %u a frame after we engaged, so "
+                    "something still rebuilds it; auto-exposure is effectively "
+                    "still the engine's", (unsigned)observed);
+            }
+            else
+            {
+                LOG("ODST vehicle exposure: hold verified against the engine's "
+                    "own copy (reads 1 a frame after engaging)");
+            }
         }
         const uint32_t state = engage ? 1u : 0u;
         if (g_odstExposureLockState.exchange(state, std::memory_order_relaxed)
@@ -9567,13 +9629,95 @@ namespace
                 ? g_odstExposureEngages.fetch_add(
                       1, std::memory_order_relaxed) + 1
                 : g_odstExposureEngages.load(std::memory_order_relaxed);
-            LOG("ODST vehicle exposure: adaptation %s (engage #%u; exposure "
-                "lock %s, vision-mode adaptation %s)",
+            if (engage)
+            {
+                g_odstExposureVerifyPending.store(1, std::memory_order_relaxed);
+                g_odstExposureVerified.store(0, std::memory_order_relaxed);
+            }
+            LOG("ODST vehicle exposure: adaptation %s (engage #%u; internal "
+                "copy %s, editable copy %s)",
                 engage ? "HELD steady for the seat view"
                        : "returned to the engine's own control",
                 engages, g_odstExposureLock ? "on" : "unavailable",
-                g_odstVisionAdapt ? "on" : "unavailable");
+                g_odstExposureEditableLock ? "on" : "unavailable");
         }
+    }
+
+    // Teardown release. This is a prerequisite, not tidiness: nothing in the
+    // module ever writes the editable copy but us, and halo3odst.dll stays
+    // resident after a title exit, so an engage left latched would freeze
+    // auto-exposure for the menus, on-foot play and the next level. Release
+    // first, then drop the pointers, so we can never write through an address
+    // whose module has gone.
+    void ReleaseOdstExposureLock()
+    {
+        if (g_odstExposureLock || g_odstExposureEditableLock)
+            OdstApplyExposureLock(false);
+        g_odstExposureLock = nullptr;
+        g_odstExposureEditableLock = nullptr;
+        g_odstExposureLockState.store(0, std::memory_order_relaxed);
+        g_odstExposureVerifyPending.store(0, std::memory_order_relaxed);
+        g_odstExposureVerified.store(0, std::memory_order_relaxed);
+    }
+
+    // The shot-origin hook must come out with the module. Its detour reads
+    // only our own atomics, but the trampoline points into halo3odst.dll and
+    // that module is released on teardown.
+    void ReleaseOdstFiringOriginHook()
+    {
+        g_odstFiringOriginReturn = 0;
+        g_odstSeatedPlayerUnit.store(-1, std::memory_order_relaxed);
+        if (!g_odstUnitCameraPositionTarget)
+            return;
+        MH_DisableHook(g_odstUnitCameraPositionTarget);
+        MH_RemoveHook(g_odstUnitCameraPositionTarget);
+        g_odstUnitCameraPositionTarget = nullptr;
+        g_origOdstUnitCameraPosition = nullptr;
+    }
+
+    // Runs on the engine's own weapon path. Everything here is a relaxed load
+    // of our own state plus three float stores: no locks, no allocation, no
+    // logging, no engine reads beyond the point the original just wrote.
+    __declspec(noinline) void __fastcall OdstUnitCameraPositionHook(
+        int32_t unitIndex, float* out, uint8_t flags)
+    {
+        // Capture before the call: this is the site that decides whether we
+        // are on the firing path or on one of the 35 other consumers.
+        const uintptr_t caller =
+            reinterpret_cast<uintptr_t>(_ReturnAddress());
+        // Always let the engine produce its own answer first. Several paths
+        // through this function return without writing, and callers pass
+        // uninitialised stack, so we must never substitute a value for a
+        // result the engine declined to give.
+        g_origOdstUnitCameraPosition(unitIndex, out, flags);
+        if (!out)
+            return;
+        const uintptr_t firingReturn = g_odstFiringOriginReturn;
+        if (!firingReturn || caller != firingReturn)
+            return;                       // not the shot line; leave it alone
+        if (g_odstCinematicLocked.load(std::memory_order_relaxed))
+            return;                       // authored camera owns the view
+        const int32_t seated =
+            g_odstSeatedPlayerUnit.load(std::memory_order_relaxed);
+        // The engine keys units by the low 16 bits of the handle.
+        if (seated == -1 || ((seated ^ unitIndex) & 0xFFFF) != 0)
+            return;                       // somebody else's weapon
+        if (!OdstSeatFiresPersonalWeapon())
+            return;                       // driver/mounted gun fires from a barrel
+        if (!g_camValid.load(std::memory_order_acquire))
+            return;
+        const float eyeX = g_camX.load(std::memory_order_relaxed);
+        const float eyeY = g_camY.load(std::memory_order_relaxed);
+        const float eyeZ = g_camZ.load(std::memory_order_relaxed);
+        if (!isfinite(eyeX) || !isfinite(eyeY) || !isfinite(eyeZ))
+        {
+            g_odstFiringOriginSkips.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
+        out[0] = eyeX;
+        out[1] = eyeY;
+        out[2] = eyeZ;
+        g_odstFiringOriginMoves.fetch_add(1, std::memory_order_relaxed);
     }
 
     // O3: the follow gate for the shared reader. ODST answers only when its
@@ -10158,6 +10302,10 @@ namespace
             ReadOdstCinematicControl(cinematicScene, cinematicShot);
         const bool cinematic = cinematicControl ==
             CinematicControlState::AuthoredLocked;
+        // The firing hook runs on the engine's weapon path and must not read
+        // cinematic TLS from that thread; publish it from here instead.
+        g_odstCinematicLocked.store(cinematic ? 1u : 0u,
+                                    std::memory_order_relaxed);
         const uint32_t cinematicGeneration =
             g_odstRuntimeGeneration.load(std::memory_order_relaxed);
         if (cinematicGeneration)
@@ -10578,6 +10726,9 @@ namespace
             entriesOk = entries != nullptr;
 
             unit = g_odstPlayerUnitGetter(0);
+            // The firing hook compares this against the unit the engine hands
+            // it, so somebody else's weapon can never take our seat's origin.
+            g_odstSeatedPlayerUnit.store(unit, std::memory_order_relaxed);
             if (unit != -1 && entries)
             {
                 unsigned char* data = *reinterpret_cast<unsigned char**>(
@@ -12243,16 +12394,39 @@ namespace
     // instead: lock byte = matchRva + 7 + disp32 at match+3.
     const char* kOdstExposureLockSig =
         "40 38 2D ?? ?? ?? ?? 0F 57 C9 0F 28 C4 F3 0F 5C C6 F3 0F 5A C8";
-    // ODST's vision-mode (VISR) automatic overbrightness adaptation is a
-    // SECOND, independent brightness control that the exposure lock never
-    // touched: it measures the same scene luminance and writes its own ratio.
-    // Zeroing this byte makes the test at +0x1F165D skip the whole ratio
-    // computation and its store at +0x1F172B, so the vision-mode brightness
-    // holds its authored value instead of chasing a dark dashboard. Costs
-    // nothing when VISR is down, which the engine already skips earlier.
-    // Storage = hit + 7 + disp32 at hit+2 (expected +0x8E6CA4).
-    const char* kOdstVisionAdaptSig =
-        "80 3D ?? ?? ?? ?? 00 48 8D 0C 80 0F 10 5C 8D 04 44 8B 5C 8D 14 8B 0D";
+    // The byte kOdstExposureLockSig finds is the engine's INTERNAL copy of the
+    // post-process settings block, and the engine rebuilds that copy from a
+    // second, editable block once per rendered frame. `accept_edited_settings`
+    // is inlined into main_render as this 0x38-byte global-to-global copy, and
+    // it runs AFTER the camera-copy pass where we write and BEFORE the only
+    // instruction that reads the lock. So writing the internal copy alone is
+    // erased every frame before anyone looks at it -- measured: the byte held
+    // exactly as designed for nine seat entries and the exposure still moved.
+    // Matching the copy itself yields BOTH blocks, so we can write the source
+    // the engine propagates from as well as the destination it lands in.
+    //   editableBase = hit + 7  + disp32 at hit+3   (expected +0x2D7E210)
+    //   internalBase = hit + 14 + disp32 at hit+10  (expected +0x8F0D40)
+    //   *Lock        = *Base + 0x30 (m_auto_exposure_lock)
+    // The internal lock this yields must equal the address the independent
+    // kOdstExposureLockSig decode produces; two signatures agreeing on one
+    // field is what replaces a hardcoded address here.
+    const char* kOdstPostprocessAcceptSig =
+        "0F 10 05 ?? ?? ?? ?? 0F 11 05 ?? ?? ?? ?? 0F 10 0D ?? ?? ?? ?? "
+        "0F 11 0D ?? ?? ?? ?? 0F 10 05 ?? ?? ?? ?? 0F 11 05 ?? ?? ?? ?? "
+        "F2 0F 10 0D ?? ?? ?? ?? F2 0F 11 0D ?? ?? ?? ??";
+
+    // The occupant camera-position evaluator (`unit_get_camera_position`) and
+    // the weapon-barrel firing-data function that calls it. Both patterns also
+    // match exactly once in halo3.dll, so they are only meaningful because the
+    // camera core already pinned this module -- the scan MUST stay scoped to
+    // the ODST base/size. A process-wide scan would land on Halo 3's own
+    // headset-accepted first-person vehicle camera.
+    const char* kOdstUnitCameraPositionSig =
+        "48 8B C4 48 89 58 08 48 89 70 10 48 89 78 18 55 41 54 41 55 41 56 "
+        "41 57 48 8D 68 A1 48 81 EC C0 00 00 00 44 8B 0D";
+    const char* kOdstWeaponBarrelFiringSig =
+        "48 8B C4 48 89 58 08 48 89 70 10 48 89 78 18 55 41 56 41 57 48 8D "
+        "68 C1 48 81 EC C0 00 00 00 44 8B 15";
 
     const char* kOdstMarkersInternalSig =
         "48 8B C4 48 89 58 08 48 89 68 10 48 89 70 18 "
@@ -14038,32 +14212,167 @@ namespace
                 exposureHit ? 1 : 0, exposureUnique ? 1 : 0);
         }
 
-        // The vision-mode overbrightness adaptation is a second, independent
-        // brightness control; losing it costs only that path.
-        g_odstVisionAdapt = nullptr;
-        const uintptr_t visionHit =
-            sig::Find(base, size, kOdstVisionAdaptSig);
-        const bool visionUnique = visionHit && !sig::Find(
-            visionHit + 1, base + size - visionHit - 1, kOdstVisionAdaptSig);
-        if (visionUnique)
+        // The editable copy is what makes the lock stick. The engine rebuilds
+        // the internal copy from it once per rendered frame, between our write
+        // and the integrator's only read, so the internal write alone is
+        // erased before it is ever consulted. Accept this only if the copy's
+        // own decode of the internal block lands on the exact address the
+        // independent adaptation-test signature above produced.
+        g_odstExposureEditableLock = nullptr;
+        const uintptr_t acceptHit =
+            sig::Find(base, size, kOdstPostprocessAcceptSig);
+        const bool acceptUnique = acceptHit && !sig::Find(
+            acceptHit + 1, base + size - acceptHit - 1,
+            kOdstPostprocessAcceptSig);
+        if (acceptUnique && g_odstExposureLock)
         {
-            const uintptr_t visionAddress = visionHit + 7 +
-                *reinterpret_cast<const int32_t*>(visionHit + 2);
-            if (visionAddress >= base && visionAddress + 1 <= base + size)
+            const uintptr_t editableBase = acceptHit + 7 +
+                *reinterpret_cast<const int32_t*>(acceptHit + 3);
+            const uintptr_t internalBase = acceptHit + 14 +
+                *reinterpret_cast<const int32_t*>(acceptHit + 10);
+            const uintptr_t editableLock = acceptHit + 50 +
+                *reinterpret_cast<const int32_t*>(acceptHit + 46);
+            const uintptr_t internalLock = acceptHit + 58 +
+                *reinterpret_cast<const int32_t*>(acceptHit + 54);
+            const bool inModule =
+                editableBase >= base && editableLock + 1 <= base + size &&
+                internalBase >= base && internalLock + 1 <= base + size;
+            // m_auto_exposure_lock is the last field of the 0x38-byte block.
+            const bool shaped =
+                editableLock == editableBase + 0x30 &&
+                internalLock == internalBase + 0x30;
+            // The cross-check that replaces a hardcoded address: two unrelated
+            // signatures must name the same byte.
+            const bool agrees = internalLock ==
+                reinterpret_cast<uintptr_t>(g_odstExposureLock);
+            if (inModule && shaped && agrees)
             {
-                g_odstVisionAdapt = reinterpret_cast<uint8_t*>(visionAddress);
-                LOG("ODST vehicle exposure: vision-mode overbrightness "
-                    "adaptation resolved at +0x%llX (from its test at +0x%llX)",
-                    (unsigned long long)(visionAddress - base),
-                    (unsigned long long)(visionHit - base));
+                g_odstExposureEditableLock =
+                    reinterpret_cast<uint8_t*>(editableLock);
+                LOG("ODST vehicle exposure: settings-block copy at +0x%llX "
+                    "resolves editable=+0x%llX internal=+0x%llX; the internal "
+                    "address agrees with the adaptation test, so the seat hold "
+                    "writes the copy the engine propagates from",
+                    (unsigned long long)(acceptHit - base),
+                    (unsigned long long)(editableLock - base),
+                    (unsigned long long)(internalLock - base));
+            }
+            else
+            {
+                LOG("ODST vehicle exposure: settings-block copy failed its "
+                    "cross-check (inModule=%d shaped=%d agrees=%d; "
+                    "editable=+0x%llX internal=+0x%llX vs test +0x%llX); the "
+                    "seat hold is left OFF rather than writing a byte we "
+                    "cannot vouch for",
+                    inModule ? 1 : 0, shaped ? 1 : 0, agrees ? 1 : 0,
+                    (unsigned long long)(editableLock - base),
+                    (unsigned long long)(internalLock - base),
+                    (unsigned long long)(
+                        reinterpret_cast<uintptr_t>(g_odstExposureLock) - base));
+                // Without the editable copy the internal write is provably
+                // inert, so claiming a steady exposure would be a silent
+                // degrade. Refuse the whole feature instead.
+                g_odstExposureLock = nullptr;
             }
         }
-        if (!g_odstVisionAdapt)
+        else if (!g_odstExposureEditableLock)
         {
-            LOG("ODST vehicle exposure: vision-mode adaptation signature "
-                "missing/ambiguous (found=%d unique=%d); VISR brightness keeps "
-                "its own adaptation, exposure lock unaffected",
-                visionHit ? 1 : 0, visionUnique ? 1 : 0);
+            LOG("ODST vehicle exposure: settings-block copy signature "
+                "missing/ambiguous (found=%d unique=%d lock=%d); the seat hold "
+                "is left OFF because writing only the internal copy is erased "
+                "every frame before the engine reads it",
+                acceptHit ? 1 : 0, acceptUnique ? 1 : 0,
+                g_odstExposureLock ? 1 : 0);
+            g_odstExposureLock = nullptr;
+        }
+
+        // The shot line. Resolve the camera-position evaluator and the weapon
+        // barrel function that calls it, then find the ONE call inside that
+        // barrel function which targets the evaluator. Its return address is
+        // what tells the hook it is on the firing path rather than on one of
+        // the other consumers -- including the engine's own first-person
+        // camera placement, which must keep the stock value.
+        if (g_origOdstUnitCameraPosition)
+        {
+            MH_DisableHook(g_odstUnitCameraPositionTarget);
+            MH_RemoveHook(g_odstUnitCameraPositionTarget);
+            g_origOdstUnitCameraPosition = nullptr;
+            g_odstUnitCameraPositionTarget = nullptr;
+        }
+        g_odstFiringOriginReturn = 0;
+        const uintptr_t camPosHit =
+            sig::Find(base, size, kOdstUnitCameraPositionSig);
+        const bool camPosUnique = camPosHit && !sig::Find(
+            camPosHit + 1, base + size - camPosHit - 1,
+            kOdstUnitCameraPositionSig);
+        const uintptr_t barrelHit =
+            sig::Find(base, size, kOdstWeaponBarrelFiringSig);
+        const bool barrelUnique = barrelHit && !sig::Find(
+            barrelHit + 1, base + size - barrelHit - 1,
+            kOdstWeaponBarrelFiringSig);
+        uintptr_t firingCallSite = 0;
+        uint32_t firingCallCount = 0;
+        if (camPosUnique && barrelUnique)
+        {
+            // Bounded walk of the barrel function's body looking for
+            // `E8 rel32` whose target is the evaluator. Requiring exactly one
+            // is what makes the return address unambiguous.
+            const uintptr_t scanEnd =
+                (barrelHit + 0x400 < base + size) ? barrelHit + 0x400
+                                                  : base + size - 5;
+            for (uintptr_t p = barrelHit; p < scanEnd; ++p)
+            {
+                if (*reinterpret_cast<const uint8_t*>(p) != 0xE8)
+                    continue;
+                const int32_t rel =
+                    *reinterpret_cast<const int32_t*>(p + 1);
+                if (p + 5 + rel == camPosHit)
+                {
+                    firingCallSite = p;
+                    ++firingCallCount;
+                }
+            }
+        }
+        if (firingCallCount == 1)
+        {
+            g_odstUnitCameraPositionTarget =
+                reinterpret_cast<void*>(camPosHit);
+            const MH_STATUS created = MH_CreateHook(
+                g_odstUnitCameraPositionTarget,
+                reinterpret_cast<void*>(&OdstUnitCameraPositionHook),
+                reinterpret_cast<void**>(&g_origOdstUnitCameraPosition));
+            const bool enabled = created == MH_OK &&
+                MH_EnableHook(g_odstUnitCameraPositionTarget) == MH_OK;
+            if (enabled)
+            {
+                g_odstFiringOriginReturn = firingCallSite + 5;
+                LOG("ODST seat aim: shot origin follows the rendered eye "
+                    "(evaluator +0x%llX, barrel +0x%llX, firing call +0x%llX); "
+                    "only that one call site moves, so the engine camera, the "
+                    "hands and cutscenes keep the stock position",
+                    (unsigned long long)(camPosHit - base),
+                    (unsigned long long)(barrelHit - base),
+                    (unsigned long long)(firingCallSite - base));
+            }
+            else
+            {
+                MH_RemoveHook(g_odstUnitCameraPositionTarget);
+                g_origOdstUnitCameraPosition = nullptr;
+                g_odstUnitCameraPositionTarget = nullptr;
+                LOG("ODST seat aim: FAILED to install the shot-origin hook "
+                    "(create=%d); seated shots keep firing from the engine's "
+                    "own eye point and will not follow the crosshair exactly",
+                    (int)created);
+            }
+        }
+        else
+        {
+            LOG("ODST seat aim: shot-origin signatures missing/ambiguous "
+                "(evaluator found=%d unique=%d, barrel found=%d unique=%d, "
+                "firing calls=%u); seated shots keep firing from the engine's "
+                "own eye point and will not follow the crosshair exactly",
+                camPosHit ? 1 : 0, camPosUnique ? 1 : 0,
+                barrelHit ? 1 : 0, barrelUnique ? 1 : 0, firingCallCount);
         }
 
         // The render-node pair is a second, independent transaction: both
@@ -14903,6 +15212,8 @@ namespace
             return false;
         }
         RestoreOdstMotionBlurVars();
+        ReleaseOdstExposureLock();
+        ReleaseOdstFiringOriginHook();
         g_odstCamera.installed.store(false, std::memory_order_release);
         ReleaseOdstModuleReferenceAndClearPointers();
         g_odstCamera.teardownRequested.store(false, std::memory_order_release);
@@ -15175,6 +15486,8 @@ namespace
             return false;
         }
         RestoreOdstMotionBlurVars();
+        ReleaseOdstExposureLock();
+        ReleaseOdstFiringOriginHook();
 
         const auto reason = static_cast<OdstFallbackReason>(
             g_odstCamera.fallbackReason.load(std::memory_order_acquire));
@@ -25433,63 +25746,14 @@ bool Game_ComputeAimStick(float& outRx, float& outRy)
         desiredPitch = asinf(Clamp(followedAim[2], -1.0f, 1.0f));
     }
 
-    // The engine still fires from ITS OWN eye point. For a first-person seat
-    // that is the occupant's `head` marker: unit_get_camera_position
-    // (halo3odst.dll+0x399DC4) resolves the seat's camera marker, then -- when
-    // bit 4 "third person camera" is clear, which is exactly the bit we clear
-    // to hide the body -- overwrites it with marker `head` on the UNIT.
-    //
-    // The seat work moved the point we RENDER from to the authored seat anchor.
-    // The loop above aims from the rendered eye THROUGH the reticle, so the aim
-    // direction and the sight direction are identical; the shot therefore
-    // leaves the engine's eye PARALLEL to the sight line, displaced by
-    // (rendered eye - engine eye). Parallel lines never converge, so that is a
-    // constant miss in metres at EVERY range -- no crosshair distance can tune
-    // it out. The warthog passenger ships trims of +0.55 m up and -0.10 m
-    // lateral, which is a ~0.56 m low-and-right miss; the driver ships 0.00 on
-    // both, which is why only the passenger shows it.
-    //
-    // Both points are already published every camera frame, so re-origin the
-    // desired ray on the engine's. Self-neutralising: when the two coincide --
-    // on foot, or in a seat with no trim -- the correction is exactly zero.
-    // Deliberately narrow: ODST, and only a seat whose own tag says the
-    // occupant fires a PERSONAL weapon (the "allows weapons" flag - the
-    // warthog passenger's 0x1070 has it, the driver's 0x40014 does not).
-    // A driver's or mounted gunner's shots leave a vehicle barrel, not the
-    // occupant's eye, so re-aiming them would be wrong; and Halo 3's
-    // first-person vehicles are the accepted baseline, which this must not
-    // disturb. Halo 3 can be brought in later on its own evidence.
-    bool aimSeated = false;
-#if HALOMCCVR_EXPERIMENTAL_ODST_BRINGUP
-    aimSeated = OdstSeatFiresPersonalWeapon();
-#endif
-    if (aimSeated && tl > 1e-3f &&
-        g_camValid.load(std::memory_order_acquire) &&
-        g_baseCamValid.load(std::memory_order_acquire))
-    {
-        const float offsetX = g_camX.load() - g_baseCamX.load();
-        const float offsetY = g_camY.load() - g_baseCamY.load();
-        const float offsetZ = g_camZ.load() - g_baseCamZ.load();
-        // The reticle floats `tl` metres from the rendered eye along the
-        // desired direction; put that same point in world units and aim at it
-        // from where the engine actually shoots.
-        const float range = tl * g_worldScale.load(std::memory_order_relaxed);
-        const float cosDesiredPitch = cosf(desiredPitch);
-        const float toReticleX =
-            cosDesiredPitch * cosf(desiredYaw) * range + offsetX;
-        const float toReticleY =
-            cosDesiredPitch * sinf(desiredYaw) * range + offsetY;
-        const float toReticleZ = sinf(desiredPitch) * range + offsetZ;
-        const float reticleLength = sqrtf(toReticleX * toReticleX +
-                                          toReticleY * toReticleY +
-                                          toReticleZ * toReticleZ);
-        if (std::isfinite(reticleLength) && reticleLength > 1e-3f)
-        {
-            desiredYaw = atan2f(toReticleY, toReticleX);
-            desiredPitch = asinf(
-                Clamp(toReticleZ / reticleLength, -1.0f, 1.0f));
-        }
-    }
+    // The engine's own eye point no longer needs correcting here. A seated
+    // occupant's shot line is (unit_get_camera_position, aiming vector), and
+    // the shot-origin hook substitutes our rendered eye for that first term on
+    // the firing call site alone -- so the shot line and the sight line are
+    // now the SAME line, at every distance. The re-origin that used to live
+    // here bent the aim so the two merely CROSSED at crosshair_distance_m,
+    // which left ~5 degrees of miss at 5 m; keeping it would now double-correct
+    // an error that no longer exists.
 
     const float ax = g_aimFwdX.load(), ay = g_aimFwdY.load(), az = g_aimFwdZ.load();
     const float aimYaw = atan2f(ay, ax);
