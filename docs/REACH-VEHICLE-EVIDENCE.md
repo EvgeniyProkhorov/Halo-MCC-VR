@@ -43,9 +43,9 @@ the same result from its own native constructs:
 | Normal headset look and physical lean | The seat point replaces only the gameplay camera origin; the existing Reach head-look and stereo-eye transaction remains authoritative. Authored/cinematic camera ownership still wins. |
 | Camera rides the rendered vehicle instead of swimming against it | The stock marker resolver supplies either rendered/interpolated or raw node matrices. vehicle_cam_smoothing selects that native A/B. |
 | Vehicle bounce without making the authored seat point drift | Occupant head motion is measured relative to a settled seat-local head pose. vehicle_bounce scales only that residual. |
-| Own body hidden in first person | During the one synchronous stock outer-render call, the occupied seat's native third-person-camera bit 4 is cleared and restored in a finally path. No map file is changed. |
+| Own body hidden in first person | A pointer-free one-frame-interval lease clears the occupied seat's native third-person-camera bit 4 from the final stock outer-render call until the next proven outer boundary, so Reach's between-frame perspective consumers see the same first-person seat state. No map file is changed. |
 | Arms and gun ride the seat rather than the player's face | vehicle_hands_follow_body selects the rigid authored seat base for the Reach first-person model/controller roots. The view may still receive the configured head-bounce residual. |
-| Per-seat live placement | The existing F1 forward, height, and left/right controls bind to a Reach-only 20-by-16 bank keyed by the exact current identity and raw seat index. |
+| Per-seat live placement | The existing F1 forward, height, and left/right controls bind to a Reach-only 34-by-16 bank keyed by the exact current identity and raw seat index. |
 | Optional vehicle-frame view | vehicle_view_follow follows yaw and roll-stable pitch for ground vehicles, yaw only for aircraft, and no carrier frame for walk-up turrets. Attached guns follow their ultimate carrier. |
 | Entry/exit comfort | The shared debounced vehicle transition requests the existing position-only recenter on settled entry and exit when vehicle_recenter_on_seat is enabled. |
 | Native vehicle controls and honest aim | Supported Reach seats publish the same vehicle state used by the shared controller-layout, steering, VR-turn ownership, movement, and clamped-reticle paths. Look-steered drivers use native turn input or the virtual wheel according to the same policy as Halo 3/ODST. |
@@ -55,12 +55,13 @@ Halo 3's vehicle definition layout, seat stride, string IDs, marker resolver,
 or object collection layout, and no such value is copied.
 
 One limitation was deliberate at first writing: the initial candidate did
-**not** claim a Reach passenger shot-origin transaction. The bit-4 change
-exists only while the stock outer render call is executing, is not left
-installed for simulation or firing code, and moves no projectile or effect
-origin. **Superseded 2026-08-04 by R-V12**, which establishes the Reach
-firing-origin transaction from Reach-native HREK evidence rather than by
-copying ODST's (itself headset-unverified) O6 work.
+**not** claim a Reach passenger shot-origin transaction, and its bit-4 write
+existed only inside one stock outer-render call. The shot-origin limitation was
+superseded 2026-08-04 by R-V12, which establishes that transaction from
+Reach-native HREK evidence rather than by copying ODST's O6 work. The transient
+perspective lifetime was separately disproven by headset and is superseded by
+R-V20's pointer-free one-frame-interval lease. R-V20 does not replace or widen
+R-V12's projectile/effect-origin ownership.
 
 ## R-V1 - official HREK discovery
 
@@ -388,34 +389,24 @@ this exact grammar. The parser and save path round-trip the Reach prefix before
 the generic Halo 3 prefix, preventing a Reach line from being consumed by the
 wrong bank.
 
-## R-V6 - transient native first-person-seat scope
+## R-V6 - historical transient first-person-seat scope (superseded)
 
-vehicle_hide_body uses the title's own third-person-camera selector, but the
-write has deliberately narrow ownership:
+The original vehicle_hide_body transaction cleared the HREK-named
+third-person-camera bit 4 immediately before one synchronous
+main_render_view call and restored it in that call's finally path. It
+re-resolved the live object, definition, packed seat and flags pointer for each
+write, used complete-word compare/exchange, yielded to concurrent changes, and
+never let a body-hide fault disarm Reach stereo.
 
-- It is attempted only for a complete, supported, generation-current Reach
-  vehicle frame while vehicle_first_person and vehicle_hide_body are enabled.
-- The live object, definition datum, tag, seat count, raw seat, and flags
-  pointer are re-resolved immediately before the write.
-- InterlockedCompareExchange clears only flags bit 4 and succeeds only if the
-  complete original flags word still matches the sampled value.
-- If bit 4 was already clear, no write is owned.
-- The patch begins immediately before the synchronous stock
-  main_render_view call and is restored in that call's finally path. It never
-  spans two outer-render calls.
-- Restore re-resolves the same live seat and restores the original complete
-  flags word only if the current word still equals the value this feature
-  wrote. A concurrent engine or tag change wins; stale bits are never written
-  over it.
-- A surviving unexpected owner is reconciled at the next normal-player frame.
-  Failure is recorded as a body-hide feature fault, not as a reason to disarm
-  Reach stereo.
-- No on-disk tag or map file is patched, and Easy Anti-Cheat is not involved.
-
-This scope is strong enough to let the native first-person render path observe
-the occupied seat during that render. It is intentionally **not** evidence that
-Reach will hide every part of the body correctly, build the desired weapon
-models, or move firing origins. Those results require the headset.
+That pointer lifetime was safe, but the player-visible lifetime was wrong.
+The rejected 2f03c82 run and the accepted-partial 619644c run both observed
+the transaction executing and restoring without a logged fault while the
+player model remained visible. Reach's native perspective/control consumers
+run between outer-render calls, so a write restored before that interval could
+not reproduce Halo 3's first-person-seat behavior. R-V20 supersedes only this
+lifetime. Its key, state, teardown, and no-pointer-across-frame rules replace
+the bullets that used to define R-V6; the HREK bit identity and complete-word
+CAS evidence remain valid.
 
 ## R-V7 - failure isolation
 
@@ -900,7 +891,7 @@ observed at retail carries the same latent risk; a tolerant radius compare
 would immunize all of them and is deliberately NOT done here, because a
 bit-exact table is what makes the match provable.
 
-## R-V18 - 2026-08-05: actual unit aim under both view-follow modes
+## R-V18 - 2026-08-05: actual unit aim under both view-follow modes (historical candidate)
 
 The rejected 2f03c82 candidate changed Reach seat bit 4 only around one
 main_render_view call. It restored the bit in the call's __finally, so Reach's
@@ -932,15 +923,17 @@ unit+0x21C z. This is the actual unit aiming vector recorded already in R-V12.
 Reach previously fed the shared VR controller loop the compact render-camera
 forward instead. In a seated chase-camera engine those are not the same state.
 
-R-V18 makes one player-visible change: a structurally proven Reach seat feeds
+R-V18 made one player-visible change: a structurally proven Reach seat feeds
 the VR controller loop the same actual unit aim state Reach uses for firing.
-The Workshop-style persistent seat lifetime is deliberately not stacked into
-this candidate.
+The persistent seat lifetime was deliberately not stacked into that candidate;
+the following list records its tested historical scope, not the current R-V20
+body-hide implementation.
 
-1. The existing bit-4 body-hide write remains scoped to one synchronous render
-   call and restores in its __finally. No loaded tag pointer survives the frame.
-   The installed Workshop maps prove a persistent native-camera lead, but it
-   has a separate lifetime/fallback risk and requires its own later candidate.
+1. In R-V18, the then-existing bit-4 body-hide write remained scoped to one
+   synchronous render call and restored in its finally path. No loaded tag
+   pointer survived the frame. The installed Workshop maps proved a persistent
+   native-camera lead, but that separate lifetime/fallback risk was deferred to
+   the later R-V20 candidate.
 2. Every seated frame reads that same local unit's +0x214 vector through the
    proven object collection, with an isolated SEH boundary, finite and broad
    length guard, then normalizes it. Failure falls back to the compact camera
@@ -956,11 +949,12 @@ this candidate.
 4. The R-V16 raw-hull/deadband/gain servo remains dormant. R-V17's exact retail
    Warthog and Mongoose aliases remain active.
 
-Why the persistent lead is withheld: the loaded seat record is
-definition-shared, and a cached tag pointer can become stale across a map-cache
-reload without the Reach module generation changing. A safe lifetime design
-must prove engine-thread restoration on every exit/fallback path and must never
-chase that pointer from the teardown worker. Unit aim needs none of that state.
+The reason it was withheld remains the controlling safety constraint: the
+loaded seat record is definition-shared, and a cached tag pointer can become
+stale across a map-cache reload without the Reach module generation changing.
+R-V20 is the later candidate that satisfies that constraint with a value-only
+key/lease, ephemeral re-resolution on Reach's proven engine thread, and
+hook/module retention instead of a teardown-worker write.
 
 ## R-V19 - 2026-08-05: render-matched View Follow
 
@@ -1008,9 +1002,302 @@ each rendered frame consumes its own phase-matched carrier basis throughout
 the required 72-144 Hz headset range.
 
 Proper body hiding remains a separate candidate. The R-V18 log proves the
-current transient bit-4 transaction executes and restores cleanly, while the
+then-current transient bit-4 transaction executed and restored cleanly, while the
 headset still sees the model. That is direct evidence that a one-render-call
-write cannot reproduce Halo 3's seat-lifetime first-person state.
+write cannot reproduce Halo 3's seat-lifetime first-person state. R-V20 below
+is that separate candidate; this paragraph remains the headset evidence that
+motivated it, not a description of the current implementation.
+
+## 2026-08-05: exact retail authored-camera identity aliases (post R-V19 evidence)
+
+The R-V18 headset run is also the decisive authored-camera failure capture.
+Its source commit, DLL, edition, runtime, headset and refresh rate are pinned in
+R-V19. The preserved log is
+out/test-runs/619644c-reach-vehicles-steam-quest3-partial-accepted-20260805-071537/halo3xr.log
+(SHA-256 BF8E2AD9EC4005FDC7A4E2E6066EFFEF7E98A75D21B22C7CA0B6B1A005934118)
+and its exact config is the halomccvr.cfg beside it (SHA-256
+6A4D053A3317092A6EEFF3112A9A96C95F2093B62B0D40AEF672CC7A38D37323).
+
+The save path was not the defect. That config contains the intended Blender
+values for the reported seats: Scorpion seat0 is 0.00 forward / 2.69 up / 0.00
+right, Shade Plasma is 0.00 / 2.41 / 0.00, Shade Flak is 0.11 / 2.27 / 0.00,
+and Plasma Turret is 0.00 / 0.24 / 0.00. The log instead reports each as an
+unmatched identity. An unmatched identity has no Reach trim slot, so F1 names
+the universal trim and the camera consumes vehicle_cam_forward_m/up/right_m
+instead of the saved reach_<identity>_seat0 row. This exactly explains both
+"did not save my camera position" reports without changing the config format.
+
+The fixed eight-slot unmatched diagnostic captured exactly eight distinct
+retail identities in that run:
+
+| log line | identity | official HREK tuple / type | observed retail tuple / type | bounded disposition |
+|---:|---|---|---|---|
+| 439 | Shade Flak | 3F73045B/3DD8D24F/BC93505D/3F1EA4E9 / 16 | 3F73045A/3DD8D24E/BC93505D/3F1EA4E9 / 6 | exact tuple alias plus verified type-6 allowance |
+| 578 | Shade Plasma | 3F7A9153/3E1B9697/BC935063/3F1EF5FC / 16 | 3F7A9153/3E1B9697/BC935062/3F1EF5FC / 6 | exact tuple alias plus verified type-6 allowance |
+| 864 | Scorpion Anti Infantry | 3ED28405/3DB8AD5D/B8A6B78A/3D8A1BD8 / 16 | same tuple / 6 | verified type-6 allowance only |
+| 1800 | Scorpion | 400D30E2/3D70D852/3D28430C/3EBBF788 / 0 | 400D30E2/3D70D852/3D28430B/3EBBF788 / 0 | exact tuple alias |
+| 2714 | Machinegun | 3EE99B18/3D9811F2/B9914460/3E8589DB / 16 | 3EE99B18/3D9811F2/B991445F/3E8589DB / 6 | exact tuple alias plus verified type-6 allowance |
+| 2841 | Plasma Turret | 3F000000/00000000/00000000/3DCCCCCD / 16 | same tuple / 6 | verified type-6 allowance only |
+| 3102 | Sabre | 40A69CFE/BF19A963/BB2A0199/3F8AF1EF / 13 | 40A69CFE/BF19A963/BB2A0198/3F8AF1EF / 13 | exact tuple alias |
+| 3604 | Cart | 3F786DCF/3C8C975D/BC8111A2/3EE5C245 / 1 | 3F786DCE/3C8C975D/BC8111A1/3EE5C245 / 1 | exact tuple alias |
+
+This remains HREK-first evidence. The official accessor pinned in R-V1 walks
+the fifteen type-* blocks from the vehicle definition's 0x134 member, returns
+the first non-empty block index, and returns sentinel 16 when none is authored.
+The official source tags for Shade Plasma, Shade Flak, Machinegun, Plasma
+Turret and Scorpion Anti Infantry contain none of those blocks. Official
+type-turret is index 6. Retail is used only to verify the homologous compiled
+representation: the pinned native accessor returned 6 for exactly those five
+identities in the log.
+
+A read-only scan of the stock Steam forge_halo.map corroborates the tuple side
+(332,328,960 bytes, SHA-256
+12270DDAD452BCE9AFAEF6000D5A18F2BA7C363FFBE7FCB59375619DBEEBFCF4).
+The six retail alias tuples occur in the cache while their HREK variants do
+not: Shade Flak 3/0 occurrences, Shade Plasma 2/0, Scorpion 2/0, Machinegun
+2/0, Sabre 2/0 and Cart 2/0. Plasma Turret's exact tuple occurs nine times and
+Scorpion Anti Infantry's exact tuple twice. No cache field-layout theory is
+derived from that scan; the native accessor is the retail type proof.
+
+The implementation is deliberately narrow:
+
+1. Six explicit complete retail tuples join R-V17's Warthog and Mongoose rows,
+   making the fingerprint table identities + 8. There is no ULP tolerance or
+   partial-word match.
+2. ReachVehiclePhysicsTypeMatches consumes the identity, complete fingerprint
+   and observed type as one pair-bound proof. Shade Plasma, Shade Flak and
+   Machinegun accept canonical tuple + type 16 or exact retail alias + type 6;
+   both cross-products are rejected. Plasma Turret and Scorpion Anti Infantry
+   have one bit-identical tuple and accept its two evidenced types, 16 and 6.
+   Other HREK type-16 tags, wrong types on ordinary vehicles, mismatched tuples
+   and unknown identities still fail closed.
+3. The sole finite-point bounds rejection in the run immediately follows the
+   unmatched Sabre at line 3103. Resolving Sabre selects its authored +42.43 m
+   forward / -8.18 m up trim, which the existing trim-expanded guard already
+   admits. The bounds guard is not widened.
+4. No identity, seat index, existing numeric config key, seed point or authored
+   value changes.
+
+The Blender artifact itself is
+out/reach-vehicle-camera-kit/reach_vehicle_camera_points.json (43,235 bytes,
+SHA-256 3CBA4AF66A83B04138F816F965EBB1F1056088A3B38E0E371CDD04C61D9AF574).
+It records camera_count 25 and all_cameras_marked_placed true. Those 25
+runtime_config_trims_metres rows now also ship as the explicit
+kConfigReachShippedSeatTrims built-in table, at the config file's two-decimal
+persistence precision. Config::Config stamps all three intentional axes,
+including zero, into Reach's independent bank. Existing config rows still win
+when parsed; a missing or title-local Store config now receives the same
+user-authored lineup without depending on the Steam config. These placements
+are the user's Blender work, not HREK-derived eye points, and remain
+headset-unverified. Later live-F1 drift in the 619644c config is not silently
+substituted for the export.
+
+That built-in changes the meaning of an absent numeric row: absence now selects
+the shipped Blender placement, so deleting the row cannot persist F1's
+"Back to the universal trim" action. Reach therefore has one explicit
+seat-level tombstone:
+vehicle_cam_use_universal_reach_<vehicle>_<seat> = 1. ConfigSave emits that
+single line and no numeric rows for the seat. ConfigLoad clears all three axes
+and selects the universal triplet; any valid numeric row for the same seat
+wins independently of file ordering. On the first later F1 slider move, the
+menu copies all three currently displayed universal axes into a new seat
+override before changing the moved axis. The untouched two axes therefore do
+not snap back to the baked Blender placement. Halo 3 and ODST serialization is
+unchanged.
+
+Headset acceptance still requires entering Scorpion, Shade Plasma, Shade Flak
+and Plasma Turret and confirming that F1 names the correct Reach seat and that
+the exported placement appears. Sabre should also be entered to prove the
+existing bounds guard admits its large authored delta. This evidence and a
+passing build do not advance CURRENT-STATE.
+
+## R-V20 - 2026-08-05: pointer-free one-frame-interval first-person seat
+
+The Halo 3 behavior being matched is C20: while first-person vehicles and body
+hiding are enabled, the occupied seat reports native first person continuously
+enough for the title's perspective/control consumers to hide the local body;
+the original complete seat flags return on exit, fallback, config change, or
+teardown. View Follow is an independent camera-orientation option and cannot
+select this lifetime.
+
+The accepted-partial 619644c headset result is the runtime reason for this
+candidate. Its log proves R-V18's transient bit-4 transaction installed and
+restored without fault, yet the user still saw the player model. Official HREK
+already proves that Reach's unit camera-position, desired-angle, aiming-origin,
+firing-adjustment, and projectile paths read the live seat record and test the
+third-person-camera bit outside one render call. The deliberately inactive
+Workshop item 3775043720 corroborates the content-side result by persistently
+clearing that same HREK-named bit in rebuilt maps. It supplies no executable
+binding or controller logic and is neither activated nor redistributed.
+
+R-V20 changes only body-hide lifetime:
+
+1. The lease payload contains values only: Reach module generation, full salted
+   local-unit handle, full salted direct-parent handle, definition datum, raw
+   seat index, original complete flags word, written complete flags word, and
+   explicit state. No seat, tag, definition, flags, object, or camera pointer
+   survives an outer-render call.
+2. Immediately after nested-call handling at every outermost proven
+   normal-player/window-0 callback, before vehicle/input sampling and before
+   every later early return, the engine thread re-resolves the previous exact
+   unit, parent, definition, packed seat, and ephemeral flags address. If the
+   word is the exact written value, one complete-word compare/exchange restores
+   the original. If it is already original, ownership ends without a write.
+3. The camera samples and builds after that reconciliation. Only after the last
+   possible early return, immediately before the stock main_render_view call,
+   the same engine thread re-resolves the complete current key and atomically
+   clears only bit 4. A normal return deliberately leaves that word clear
+   through the following one-frame interval, so between-frame native consumers
+   see first-person state. The next proven callback restores it before doing
+   new work.
+4. An abnormal original/rollback path is different: the outer detour's finally
+   restores the just-installed lease while Reach engine TLS is still valid.
+   Nested or non-player calls are never granted cleanup authority, so they
+   cannot restore a parent transaction accidentally.
+5. Failed re-resolution retains the value-only lease as RestorePending and
+   installs no replacement. Later proven engine-thread callbacks retry it.
+   The worker never writes a tag word. If no callback arrives during teardown,
+   cleanup retains the outer hook and exact title-module reference rather than
+   risking a stale write or silently forgetting ownership.
+6. A current word that is neither the exact written value nor the exact
+   original belongs to an engine/tag writer. That writer wins: the key becomes
+   External, is never overwritten or retried, and body hiding alone falls back.
+   A naturally clear bit with no owned write is likewise External/native and is
+   never restored. A different full key may start a later lease.
+7. Installing and CleanupLocked are opposing claims on the same lease-state
+   atomic; the independent CleanupRequired/teardown flags are not the race
+   arbiter. The worker may compare/exchange only Empty or External into
+   CleanupLocked before disabling any hook. If a callback wins
+   Empty/External-to-Installing first, the worker observes Installing (or its
+   later Active/RestorePending state), retains the outer hook/module, and waits
+   for engine-thread restoration. If the worker wins, CleanupLocked blocks
+   every callback install even when that callback observed stale lifecycle
+   flags. The lock survives a partial hook-disable/removal failure so the worker
+   can retry; only successful hook removal plus callback quiescence clears the
+   payload and returns the state to Empty. Body-hide failure never disarms the
+   Reach camera core, unit-aim feedback, steering, or View Follow.
+
+No map or tag file is patched on disk, Easy Anti-Cheat is not touched, and no
+Workshop content is a runtime dependency. The pure tests pin full-key equality,
+invalid-key rejection, teardown-retention states, exact-key External blocking,
+same-atomic cleanup-lock admission/blocking, and the three restore word
+dispositions. This candidate is still
+headset-unverified. One deliberate hard fail-safe remains explicit: restore
+requires the old full-salt unit and parent objects to remain live. Death,
+vehicle destruction, or a map-cache transition can therefore leave
+RestorePending indefinitely; the worker retains the hook/module and never
+guesses that the old loaded word disappeared. Only the user's test can prove
+the longer native perspective lifetime hides the Reach player model and that
+ordinary exit, config disable, and title teardown restore promptly; the
+destruction/transition cases must also confirm the loud pending behavior rather
+than a stale write or silent ownership discard.
+
+## 2026-08-05: exact-pair truthful seated-aim reticle (post R-V20 evidence)
+
+The normal candidate policy is one behavioral change per headset candidate.
+For this installation the user explicitly rejected further partial builds and
+required the next artifact to contain the five outstanding vehicle fixes
+together. This is therefore one cumulative acceptance candidate: View Follow
+OFF preservation, render-matched View Follow ON, Blender camera
+defaults/retail aliases, the interval body-hide lease, and weapon/reticle
+truth. Each feature still retains its independent fail-open boundary, and no
+individual result is accepted until this exact cumulative DLL passes headset
+testing.
+
+The Halo 3 behavior being matched is player-visible: after entering any
+first-person vehicle seat, the floating sight immediately shows the direction
+the engine has actually reached, with View Follow OFF or ON. View Follow is a
+secondary carrier transform; it cannot select a different weapon truth. A
+bounded seat must not leave the controller sight promising an angle the native
+weapon has not reached.
+
+The official HREK control flow narrows what can be claimed. The pinned
+projectile transaction begins at 0xDE4290. Its caller at 0xDE4BD3-0xDE4BDC
+derives the unit-adjust fires-from-camera argument from unit-definition flags
+bit 3; the official unit_flags enum names that bit exactly. The unit-adjust
+body at 0xD67EE0 receives that flag as argument 7, unit-aim selection as
+argument 8, and collision handling as argument 9. It selects the explicit
+camera/evaluator path at 0xD67F2A-0xD67F93, reads the unit aiming vector from
+unit+0x214 at 0xD67FAB and 0xD67FB8, and projects the origin onto the
+camera/+0x214 ray at 0xD67FDB-0xD6804C only when fires-from-camera is true.
+The direct evaluator call at 0xDE52DD happens later for the collision-camera
+operation; detouring it for every vehicle barrel would change clipping state,
+not prove a barrel origin.
+
+That corrects the compressed R-V12 description without invalidating its
+existing bounded hook. The HREK unit_get_camera_position evaluator at
+0xD76E60 resolves the live 0x12C seat and authored camera marker, tests seat
+bit 4 at 0xD77057-0xD7705F, and can select the occupant/head marker when that
+bit is clear. The desired-angle consumer at 0x1E7934 calls the same evaluator
+and subtracts its result from the target. These are native first-person camera
+consumers. They do not prove that every mounted vehicle weapon fires from that
+eye.
+
+An official HREK tag export census covered 28 representative supported Reach
+vehicle weapons across Warthog, Scorpion, Shade, Wraith, Ghost, Revenant,
+Falcon, Banshee, Sabre, plasma/machine-gun turret, MAC and Corvette families.
+The official barrel flags name bit 2 projectiles-use-weapon-origin and bit 15
+projectile-fires-in-marker-direction. None of the 28 authored bit 15. Most
+mounted barrels explicitly authored bit 2; Gauss, mounted machine-gun and some
+other rows did not. Thus unit+0x214 is the supported categories' truthful
+forward direction, while the origin remains title- and barrel-specific.
+ReachWeaponAnchor is only the rendered personal first-person gun/muzzle effect
+and supplies no vehicle barrel handle. No retail binding is invented from that
+unrelated object, and the rejected historical marker-origin lineage in
+REACH-EVIDENCE-MANIFEST.json remains rejected.
+
+The implementation is therefore direction-truthful and origin-conservative:
+
+1. The earlier generation-plus-time aim publication remains R-V18's independent
+   input/steering feedback and does not drive this sight. After both Reach eyes
+   have rendered and copied successfully, the stereo transaction publishes a
+   separate seqlock record carrying the title generation, exact prepared-frame
+   serial, source, full-salt unit/parent/definition/seat key and camera-local
+   direction. Every completed pair publishes, including an on-foot or fallback
+   source that revokes native sight ownership for that serial. A later failed
+   retry cannot overwrite an earlier completed pair; a later completed retry
+   replaces it. The compositor accepts only exact generation + exact serial +
+   SeatedUnitAim + valid full key and vector.
+2. The final validated compact camera already contains yaw references, title
+   signs, pitch trim and clamp, head roll, View Follow OFF/ON, and headset
+   smoothing. The reticle publisher expresses unit+0x214 in that final basis:
+   local x is dot with forward-cross-up (right), local y is dot with up, and
+   local z is negative dot with forward. This avoids reconstructing or
+   inverting any of those states. Pure tests cover all three axis signs, a
+   rolled basis round trip, normalization, invalid/non-orthogonal bases, exact
+   serial/source/key admission, and completed-versus-failed retry semantics.
+3. The Reach-only compositor builds one sign-correct normalized stereo-center
+   quaternion and midpoint from the exact two projection views being submitted.
+   It rotates the completed pair's camera-local aim by that quaternion and uses
+   the same midpoint as the quad origin. This makes the overlay match the
+   raster/submission relationship even when the rendered head pose is smoothed
+   and the runtime reports canted eye orientations. Failure falls through to
+   the existing controller/clamped sight; it never rejects Reach stereo.
+4. Allows-weapons personal firing now requires two independent coherent
+   seqlocks: the current full-salt occupation (including the authored
+   allows-weapons bit) and the completed pair's rendered world-space eye.
+   Both must match generation and the complete unit/parent/definition/seat key,
+   remain within the rate-independent 100 ms freshness bound, and match the
+   engine's firing unit. The entire hook, including its original title call, is
+   covered by the Reach active-callback counter; teardown disables it, proves
+   detour/trampoline quiescence, and retains pointers on removal failure.
+   Drivers, mounted gunners, attached turrets and walk-up turrets retain their
+   native barrel origin; the sight reports their true angle, but close-range
+   eye-to-barrel parallax remains stock and is not misrepresented as solved.
+5. No vehicle-barrel origin, evaluator-call census, steering policy, seat
+   limits, camera trim, authored tag, or Workshop content changes in this
+   transaction. The new runtime branch is gated to Halo Reach. Halo 3 and ODST
+   continue through the existing controller ray and shared clamped fallback
+   byte-for-behavior.
+
+All math is per sample/per predicted frame and contains no refresh-rate
+constant, so the design is invariant across the required 72-144 Hz headset
+range. Headset acceptance must exercise a personal-weapon passenger, a
+Warthog/Scorpion mounted gun, and a walk-up or attached Covenant turret with
+View Follow OFF and ON, including near and far targets. It must record edition,
+runtime, headset and refresh rate and confirm both that the sight moves
+immediately onto the native weapon direction and that close barrel parallax
+has not been falsely removed. This section does not advance CURRENT-STATE.
 
 ## R-V9 - acceptance still required
 

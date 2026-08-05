@@ -15689,7 +15689,6 @@ namespace
         uint32_t definitionDatum = 0xFFFFFFFFu;
         ReachVehicleId identity = ReachVehicleId::Unknown;
         uint32_t seatFlags = 0;
-        uint32_t* seatFlagsPointer = nullptr;
         float cameraBase[3]{};
         float handsBase[3]{};
         float rawCarrierForward[3]{};
@@ -16006,6 +16005,64 @@ namespace
     std::atomic<uint32_t> g_reachUnitAimSamples{0};
     std::atomic<uint32_t> g_reachUnitAimFallbacks{0};
     std::atomic<uint32_t> g_reachAimFeedbackReadFallbacks{0};
+    std::atomic<uint32_t> g_reachReticleAimFallbacks{0};
+
+    // The compositor may consume only aim from the exact stereo pair it is
+    // about to submit. This separate publication is written after both Reach
+    // eyes render and copy successfully; the older world-space publication
+    // above remains the independent input/steering feedback path.
+    struct ReachCompletedReticleAimPublication
+    {
+        std::atomic<uint32_t> sequence{0};
+        std::atomic<uint32_t> generation{0};
+        std::atomic<uint64_t> preparedSerial{0};
+        std::atomic<uint8_t> source{
+            static_cast<uint8_t>(ReachAimFeedbackSource::OnFootCompact)};
+        std::atomic<int32_t> unitHandle{-1};
+        std::atomic<int32_t> directParent{-1};
+        std::atomic<uint32_t> definitionDatum{0xFFFFFFFFu};
+        std::atomic<int32_t> seatIndex{-1};
+        std::atomic<uint8_t> identity{
+            static_cast<uint8_t>(ReachVehicleId::Unknown)};
+        std::atomic<float> x{0.0f};
+        std::atomic<float> y{0.0f};
+        std::atomic<float> z{-1.0f};
+    };
+    ReachCompletedReticleAimPublication g_reachCompletedReticleAim;
+
+    // Personal-weapon firing runs outside the render callback. Two coherent
+    // records keep its origin fail-open: the current full-salt occupation and
+    // the rendered center eye from a completed stereo pair. The firing hook
+    // substitutes only when both fresh records carry the exact same key.
+    struct ReachShotOccupationPublication
+    {
+        std::atomic<uint32_t> sequence{0};
+        std::atomic<uint32_t> generation{0};
+        std::atomic<uint64_t> sampleMs{0};
+        std::atomic<uint8_t> active{0};
+        std::atomic<uint8_t> allowsWeapons{0};
+        std::atomic<int32_t> unitHandle{-1};
+        std::atomic<int32_t> directParent{-1};
+        std::atomic<uint32_t> definitionDatum{0xFFFFFFFFu};
+        std::atomic<int32_t> seatIndex{-1};
+    };
+    ReachShotOccupationPublication g_reachShotOccupation;
+
+    struct ReachCompletedEyePublication
+    {
+        std::atomic<uint32_t> sequence{0};
+        std::atomic<uint32_t> generation{0};
+        std::atomic<uint64_t> preparedSerial{0};
+        std::atomic<uint64_t> sampleMs{0};
+        std::atomic<int32_t> unitHandle{-1};
+        std::atomic<int32_t> directParent{-1};
+        std::atomic<uint32_t> definitionDatum{0xFFFFFFFFu};
+        std::atomic<int32_t> seatIndex{-1};
+        std::atomic<float> x{0.0f};
+        std::atomic<float> y{0.0f};
+        std::atomic<float> z{0.0f};
+    };
+    ReachCompletedEyePublication g_reachCompletedEye;
 
     void ReachClearAimFeedback()
     {
@@ -16019,6 +16076,76 @@ namespace
         published.x.store(1.0f, std::memory_order_relaxed);
         published.y.store(0.0f, std::memory_order_relaxed);
         published.z.store(0.0f, std::memory_order_relaxed);
+        published.sequence.fetch_add(1, std::memory_order_release);
+    }
+
+    void ReachClearCompletedFrameFeedback()
+    {
+        {
+            auto& published = g_reachCompletedReticleAim;
+            published.sequence.fetch_add(1, std::memory_order_acq_rel);
+            published.generation.store(0, std::memory_order_relaxed);
+            published.preparedSerial.store(0, std::memory_order_relaxed);
+            published.source.store(
+                static_cast<uint8_t>(ReachAimFeedbackSource::OnFootCompact),
+                std::memory_order_relaxed);
+            published.unitHandle.store(-1, std::memory_order_relaxed);
+            published.directParent.store(-1, std::memory_order_relaxed);
+            published.definitionDatum.store(
+                0xFFFFFFFFu, std::memory_order_relaxed);
+            published.seatIndex.store(-1, std::memory_order_relaxed);
+            published.identity.store(
+                static_cast<uint8_t>(ReachVehicleId::Unknown),
+                std::memory_order_relaxed);
+            published.x.store(0.0f, std::memory_order_relaxed);
+            published.y.store(0.0f, std::memory_order_relaxed);
+            published.z.store(-1.0f, std::memory_order_relaxed);
+            published.sequence.fetch_add(1, std::memory_order_release);
+        }
+        {
+            auto& published = g_reachCompletedEye;
+            published.sequence.fetch_add(1, std::memory_order_acq_rel);
+            published.generation.store(0, std::memory_order_relaxed);
+            published.preparedSerial.store(0, std::memory_order_relaxed);
+            published.sampleMs.store(0, std::memory_order_relaxed);
+            published.unitHandle.store(-1, std::memory_order_relaxed);
+            published.directParent.store(-1, std::memory_order_relaxed);
+            published.definitionDatum.store(
+                0xFFFFFFFFu, std::memory_order_relaxed);
+            published.seatIndex.store(-1, std::memory_order_relaxed);
+            published.x.store(0.0f, std::memory_order_relaxed);
+            published.y.store(0.0f, std::memory_order_relaxed);
+            published.z.store(0.0f, std::memory_order_relaxed);
+            published.sequence.fetch_add(1, std::memory_order_release);
+        }
+    }
+
+    void ReachPublishShotOccupation(
+        uint32_t generation, const ReachVehicleFrame* frame)
+    {
+        const bool active = generation && frame && frame->active;
+        auto& published = g_reachShotOccupation;
+        published.sequence.fetch_add(1, std::memory_order_acq_rel);
+        published.generation.store(
+            active ? generation : 0, std::memory_order_relaxed);
+        published.sampleMs.store(
+            active ? GetTickCount64() : 0, std::memory_order_relaxed);
+        published.active.store(active ? 1u : 0u, std::memory_order_relaxed);
+        published.allowsWeapons.store(
+            active &&
+                (frame->seatFlags & kReachSeatAllowsWeaponsBit) != 0
+                ? 1u
+                : 0u,
+            std::memory_order_relaxed);
+        published.unitHandle.store(
+            active ? frame->unitHandle : -1, std::memory_order_relaxed);
+        published.directParent.store(
+            active ? frame->directParent : -1, std::memory_order_relaxed);
+        published.definitionDatum.store(
+            active ? frame->definitionDatum : 0xFFFFFFFFu,
+            std::memory_order_relaxed);
+        published.seatIndex.store(
+            active ? frame->seatIndex : -1, std::memory_order_relaxed);
         published.sequence.fetch_add(1, std::memory_order_release);
     }
 
@@ -16083,6 +16210,52 @@ namespace
             }
             memcpy(out, sample, sizeof(sample));
             return true;
+        }
+        return false;
+    }
+
+    bool ReachReadCompletedReticleAim(
+        uint64_t expectedPreparedSerial, float outCameraLocal[3])
+    {
+        if (!expectedPreparedSerial || !outCameraLocal)
+            return false;
+        const uint32_t currentGeneration =
+            g_reachCamera.generation.load(std::memory_order_acquire);
+        auto& published = g_reachCompletedReticleAim;
+        for (int attempt = 0; attempt < 2; ++attempt)
+        {
+            const uint32_t before =
+                published.sequence.load(std::memory_order_acquire);
+            if (!before || (before & 1u))
+                continue;
+            ReachReticleAimSample sample{};
+            sample.generation =
+                published.generation.load(std::memory_order_relaxed);
+            sample.preparedSerial =
+                published.preparedSerial.load(std::memory_order_relaxed);
+            sample.source = static_cast<ReachAimFeedbackSource>(
+                published.source.load(std::memory_order_relaxed));
+            sample.occupation = {
+                sample.generation,
+                published.unitHandle.load(std::memory_order_relaxed),
+                published.directParent.load(std::memory_order_relaxed),
+                published.definitionDatum.load(std::memory_order_relaxed),
+                published.seatIndex.load(std::memory_order_relaxed)};
+            sample.cameraLocalDirection[0] =
+                published.x.load(std::memory_order_relaxed);
+            sample.cameraLocalDirection[1] =
+                published.y.load(std::memory_order_relaxed);
+            sample.cameraLocalDirection[2] =
+                published.z.load(std::memory_order_relaxed);
+            if (published.sequence.load(std::memory_order_acquire) != before)
+                continue;
+            if (!ReachReticleAimSampleAdmitted(
+                    sample, currentGeneration, expectedPreparedSerial))
+            {
+                return false;
+            }
+            return ReachNormalizeUnitAimingVector(
+                sample.cameraLocalDirection, outCameraLocal);
         }
         return false;
     }
@@ -16153,87 +16326,190 @@ namespace
     using ReachUnitCameraPositionFn = uint64_t(__fastcall*)(int32_t, float*);
     ReachUnitCameraPositionFn g_origReachUnitCameraPosition = nullptr;
     void* g_reachUnitCameraPositionTarget = nullptr;
-    uintptr_t g_reachFiringOriginReturnA = 0; // inside the unit-adjust body
-    uintptr_t g_reachFiringOriginReturnB = 0; // projectile-transaction call
+    // Atomics let teardown revoke the optional substitution before disabling
+    // its hook without racing a firing thread already inside the detour.
+    std::atomic<uintptr_t> g_reachFiringOriginReturnA{0};
+    std::atomic<uintptr_t> g_reachFiringOriginReturnB{0};
     std::atomic<uint32_t> g_reachCinematicLocked{0};
-    // [unit handle:32][bit1 seat-allows-weapons][bit0 frame active]. One
-    // atomic so the firing thread can never pair a stale unit with a fresh
-    // flag.
-    std::atomic<uint64_t> g_reachSeatedShotState{0};
     std::atomic<uint32_t> g_reachFiringOriginMoves{0};
     std::atomic<uint32_t> g_reachFiringOriginSkips{0};
-    // The rendered center-eye position in Reach world units, published by the
-    // Reach camera transaction after head look each frame. Reach does not
-    // feed the shared g_camX globals, so it publishes its own.
-    std::atomic<uint64_t> g_reachEyeSampleMs{0};
-    std::atomic<float> g_reachEyeX{0.0f};
-    std::atomic<float> g_reachEyeY{0.0f};
-    std::atomic<float> g_reachEyeZ{0.0f};
 
-    // Runs on the engine's own weapon path. Relaxed loads of our state plus
-    // three float stores: no locks, no allocation, no logging. The original
-    // always runs first and its register result is preserved.
+    struct ReachShotOccupationSnapshot
+    {
+        uint32_t sequence = 0;
+        uint32_t generation = 0;
+        uint64_t sampleMs = 0;
+        bool active = false;
+        bool allowsWeapons = false;
+        ReachSeatLeaseKey key{};
+    };
+
+    struct ReachCompletedEyeSnapshot
+    {
+        uint32_t generation = 0;
+        uint64_t preparedSerial = 0;
+        uint64_t sampleMs = 0;
+        ReachSeatLeaseKey key{};
+        float eye[3]{};
+    };
+
+    bool ReachReadShotOccupation(ReachShotOccupationSnapshot& out)
+    {
+        auto& published = g_reachShotOccupation;
+        for (int attempt = 0; attempt < 2; ++attempt)
+        {
+            const uint32_t before =
+                published.sequence.load(std::memory_order_acquire);
+            if (!before || (before & 1u))
+                continue;
+            ReachShotOccupationSnapshot sample{};
+            sample.sequence = before;
+            sample.generation =
+                published.generation.load(std::memory_order_relaxed);
+            sample.sampleMs =
+                published.sampleMs.load(std::memory_order_relaxed);
+            sample.active =
+                published.active.load(std::memory_order_relaxed) != 0;
+            sample.allowsWeapons =
+                published.allowsWeapons.load(std::memory_order_relaxed) != 0;
+            sample.key = {
+                sample.generation,
+                published.unitHandle.load(std::memory_order_relaxed),
+                published.directParent.load(std::memory_order_relaxed),
+                published.definitionDatum.load(std::memory_order_relaxed),
+                published.seatIndex.load(std::memory_order_relaxed)};
+            if (published.sequence.load(std::memory_order_acquire) != before)
+                continue;
+            out = sample;
+            return true;
+        }
+        return false;
+    }
+
+    bool ReachReadCompletedEye(ReachCompletedEyeSnapshot& out)
+    {
+        auto& published = g_reachCompletedEye;
+        for (int attempt = 0; attempt < 2; ++attempt)
+        {
+            const uint32_t before =
+                published.sequence.load(std::memory_order_acquire);
+            if (!before || (before & 1u))
+                continue;
+            ReachCompletedEyeSnapshot sample{};
+            sample.generation =
+                published.generation.load(std::memory_order_relaxed);
+            sample.preparedSerial =
+                published.preparedSerial.load(std::memory_order_relaxed);
+            sample.sampleMs =
+                published.sampleMs.load(std::memory_order_relaxed);
+            sample.key = {
+                sample.generation,
+                published.unitHandle.load(std::memory_order_relaxed),
+                published.directParent.load(std::memory_order_relaxed),
+                published.definitionDatum.load(std::memory_order_relaxed),
+                published.seatIndex.load(std::memory_order_relaxed)};
+            sample.eye[0] = published.x.load(std::memory_order_relaxed);
+            sample.eye[1] = published.y.load(std::memory_order_relaxed);
+            sample.eye[2] = published.z.load(std::memory_order_relaxed);
+            if (published.sequence.load(std::memory_order_acquire) != before)
+                continue;
+            out = sample;
+            return true;
+        }
+        return false;
+    }
+
+    // Runs on the engine's own weapon path. Seqlock reads plus three float
+    // stores: no locks, allocation or logging. The original always runs first
+    // and its register result is preserved. The full-key/current-generation
+    // match prevents a prior seat or partial render from donating its eye.
+    uint64_t ReachUnitCameraPositionBody(
+        int32_t unitIndex, float* out, uintptr_t caller)
+    {
+        ReachUnitCameraPositionFn original = g_origReachUnitCameraPosition;
+        const uint64_t stockResult =
+            original ? original(unitIndex, out) : 0;
+        if (!out)
+            return stockResult;
+        const uintptr_t returnA = g_reachFiringOriginReturnA.load(
+            std::memory_order_relaxed);
+        const uintptr_t returnB = g_reachFiringOriginReturnB.load(
+            std::memory_order_relaxed);
+        if (caller != returnA && caller != returnB)
+            return stockResult;           // not the shot line; leave it alone
+        if (g_reachCinematicLocked.load(std::memory_order_relaxed))
+            return stockResult;           // authored camera owns the view
+
+        ReachShotOccupationSnapshot occupation{};
+        ReachCompletedEyeSnapshot renderedEye{};
+        const uint64_t nowMs = GetTickCount64();
+        const uint32_t generation =
+            g_reachCamera.generation.load(std::memory_order_acquire);
+        const bool coherent =
+            ReachReadShotOccupation(occupation) &&
+            ReachReadCompletedEye(renderedEye) &&
+            g_reachShotOccupation.sequence.load(
+                std::memory_order_acquire) == occupation.sequence;
+        ReachShotOriginSample sample{};
+        sample.currentGeneration = generation;
+        sample.nowMs = nowMs;
+        sample.occupationSampleMs = occupation.sampleMs;
+        sample.renderedEyeSampleMs = renderedEye.sampleMs;
+        sample.renderedEyePreparedSerial = renderedEye.preparedSerial;
+        sample.active = occupation.active;
+        sample.allowsWeapons = occupation.allowsWeapons;
+        sample.firingUnitIndex = unitIndex;
+        sample.occupation = occupation.key;
+        sample.renderedEye = renderedEye.key;
+        memcpy(
+            sample.renderedEyePosition, renderedEye.eye,
+            sizeof(sample.renderedEyePosition));
+        // The evaluator receives a full unit datum. Its firing argument is
+        // compared by object index, while both publications still carry and
+        // compare the complete salted unit, parent, definition and seat key.
+        if (!coherent || !ReachShotOriginSampleAdmitted(sample))
+        {
+            g_reachFiringOriginSkips.fetch_add(1, std::memory_order_relaxed);
+            return stockResult;
+        }
+        out[0] = renderedEye.eye[0];
+        out[1] = renderedEye.eye[1];
+        out[2] = renderedEye.eye[2];
+        g_reachFiringOriginMoves.fetch_add(1, std::memory_order_relaxed);
+        return stockResult;
+    }
+
+    // The counter spans the complete original call as well as our feature
+    // body. Worker-side frozen RIP scanning closes only the tiny relay/prologue
+    // window before this increment; no trampoline or title-module pointer is
+    // cleared until this scope has left.
     __declspec(noinline) uint64_t __fastcall ReachUnitCameraPositionHook(
         int32_t unitIndex, float* out)
     {
         const uintptr_t caller =
             reinterpret_cast<uintptr_t>(_ReturnAddress());
-        const uint64_t stockResult =
-            g_origReachUnitCameraPosition(unitIndex, out);
-        if (!out)
-            return stockResult;
-        const uintptr_t returnA = g_reachFiringOriginReturnA;
-        const uintptr_t returnB = g_reachFiringOriginReturnB;
-        if (caller != returnA && caller != returnB)
-            return stockResult;           // not the shot line; leave it alone
-        if (g_reachCinematicLocked.load(std::memory_order_relaxed))
-            return stockResult;           // authored camera owns the view
-        const uint64_t seatState =
-            g_reachSeatedShotState.load(std::memory_order_relaxed);
-        if ((seatState & 3u) != 3u)
-            return stockResult;   // no active seat frame or a barrel weapon
-        const int32_t seated =
-            static_cast<int32_t>(static_cast<uint32_t>(seatState >> 32));
-        // The engine keys units by the low 16 bits of the handle.
-        if (((seated ^ unitIndex) & 0xFFFF) != 0)
-            return stockResult;           // somebody else's weapon
-        const uint64_t sampleMs =
-            g_reachEyeSampleMs.load(std::memory_order_acquire);
-        const uint64_t nowMs = GetTickCount64();
-        if (!sampleMs || nowMs < sampleMs || nowMs - sampleMs > 500)
+        uint64_t result = 0;
+        g_reachCamera.activeCallbacks.fetch_add(
+            1, std::memory_order_acq_rel);
+        __try
         {
-            g_reachFiringOriginSkips.fetch_add(1, std::memory_order_relaxed);
-            return stockResult;
+            result = ReachUnitCameraPositionBody(unitIndex, out, caller);
         }
-        const float eyeX = g_reachEyeX.load(std::memory_order_relaxed);
-        const float eyeY = g_reachEyeY.load(std::memory_order_relaxed);
-        const float eyeZ = g_reachEyeZ.load(std::memory_order_relaxed);
-        if (!isfinite(eyeX) || !isfinite(eyeY) || !isfinite(eyeZ))
+        __finally
         {
-            g_reachFiringOriginSkips.fetch_add(1, std::memory_order_relaxed);
-            return stockResult;
+            g_reachCamera.activeCallbacks.fetch_sub(
+                1, std::memory_order_acq_rel);
         }
-        out[0] = eyeX;
-        out[1] = eyeY;
-        out[2] = eyeZ;
-        g_reachFiringOriginMoves.fetch_add(1, std::memory_order_relaxed);
-        return stockResult;
+        return result;
     }
 
-    // The shot-origin hook must come out with the module: the detour reads
-    // only our own atomics, but the trampoline points into haloreach.dll.
-    void ReleaseReachFiringOriginHook()
+    // Feature-local revocation is immediate and lock-free. The hook itself is
+    // disabled, quiesced, and removed with every other Reach detour below: its
+    // trampoline points into haloreach.dll and must never outlive the module.
+    void RevokeReachFiringOriginFeature()
     {
-        g_reachFiringOriginReturnA = 0;
-        g_reachFiringOriginReturnB = 0;
-        g_reachSeatedShotState.store(0, std::memory_order_relaxed);
-        g_reachEyeSampleMs.store(0, std::memory_order_relaxed);
-        if (!g_reachUnitCameraPositionTarget)
-            return;
-        MH_DisableHook(g_reachUnitCameraPositionTarget);
-        MH_RemoveHook(g_reachUnitCameraPositionTarget);
-        g_reachUnitCameraPositionTarget = nullptr;
-        g_origReachUnitCameraPosition = nullptr;
+        g_reachFiringOriginReturnA.store(0, std::memory_order_release);
+        g_reachFiringOriginReturnB.store(0, std::memory_order_release);
     }
 
     Halo3VehicleDebounce g_reachVehicleFpDebounce;
@@ -16276,18 +16552,9 @@ namespace
     ReachSeatAnchorLatch g_reachSeatAnchorLatch;
     std::atomic<uint32_t> g_reachVehicleAnchorFallbacks{0};
 
-    struct ReachNativeSeatPatch
-    {
-        uint32_t generation = 0;
-        uint32_t definitionDatum = 0xFFFFFFFFu;
-        int32_t directParent = -1;
-        int32_t seatIndex = -1;
-        uint32_t* flags = nullptr;
-        uint32_t originalFlags = 0;
-        uint32_t writtenFlags = 0;
-        bool active = false;
-    };
-    ReachNativeSeatPatch g_reachNativeSeatPatch;
+    // Engine-thread-owned payload. Publication/teardown coordination lives in
+    // g_reachVehicleSeatPatchState; no foreign pointer crosses a frame.
+    ReachSeatLeasePayload g_reachNativeSeatLease;
     // Weather-control telemetry. A report is only usable if it can say whether
     // each control was actually asserted, so these are reported every window
     // rather than only on change.
@@ -18981,21 +19248,6 @@ namespace
             ApplyVrTurn(tracking.pad);
             if (!ReachApplyHeadLook(headCenter, tracking))
                 return false;
-            // The tracked center-eye position in Reach world units: the
-            // sight-line origin the firing hook substitutes. Published only
-            // on gameplay frames, so a stale seat can never fire from a
-            // theatre pose.
-            const float* trackedEye =
-                reinterpret_cast<const float*>(headCenter);
-            if (isfinite(trackedEye[0]) && isfinite(trackedEye[1]) &&
-                isfinite(trackedEye[2]))
-            {
-                g_reachEyeX.store(trackedEye[0], std::memory_order_relaxed);
-                g_reachEyeY.store(trackedEye[1], std::memory_order_relaxed);
-                g_reachEyeZ.store(trackedEye[2], std::memory_order_relaxed);
-                g_reachEyeSampleMs.store(
-                    GetTickCount64(), std::memory_order_release);
-            }
         }
         if (!authoredTheater)
             *reinterpret_cast<float*>(headCenter + 0x28) = cullCover.verticalFov;
@@ -19235,6 +19487,116 @@ namespace
         if (!logged.exchange(true))
             LOG("Reach crosshair: native CHUD crosshair alpha cleared through "
                 "the title's own crosshair alpha/fade fields (kill_reticle=1)");
+    }
+
+    void ReachPublishCompletedFrameFeedback(
+        uint32_t generation, uint64_t preparedSerial,
+        const ReachOwnerScope& owner)
+    {
+        ReachReticleAimSample reticle{};
+        reticle.generation = generation;
+        reticle.preparedSerial = preparedSerial;
+        const bool seated = generation && preparedSerial &&
+            owner.vehicleViewApplied && owner.vehicle.active;
+        if (seated)
+        {
+            reticle.occupation = {
+                generation,
+                owner.vehicle.unitHandle,
+                owner.vehicle.directParent,
+                owner.vehicle.definitionDatum,
+                owner.vehicle.seatIndex};
+            reticle.source = owner.vehicle.unitAimValid
+                ? ReachAimFeedbackSource::SeatedUnitAim
+                : ReachAimFeedbackSource::SeatedCompactFallback;
+            const float* cameraForward =
+                reinterpret_cast<const float*>(owner.headCenter + 0x0C);
+            const float* cameraUp =
+                reinterpret_cast<const float*>(owner.headCenter + 0x18);
+            if (reticle.source != ReachAimFeedbackSource::SeatedUnitAim ||
+                !ReachWorldAimToCameraLocal(
+                    owner.vehicle.unitAimForward, cameraForward, cameraUp,
+                    reticle.cameraLocalDirection))
+            {
+                reticle.source =
+                    ReachAimFeedbackSource::SeatedCompactFallback;
+                reticle.cameraLocalDirection[0] = 0.0f;
+                reticle.cameraLocalDirection[1] = 0.0f;
+                reticle.cameraLocalDirection[2] = -1.0f;
+            }
+        }
+
+        {
+            auto& published = g_reachCompletedReticleAim;
+            published.sequence.fetch_add(1, std::memory_order_acq_rel);
+            published.generation.store(
+                reticle.generation, std::memory_order_relaxed);
+            published.preparedSerial.store(
+                reticle.preparedSerial, std::memory_order_relaxed);
+            published.source.store(
+                static_cast<uint8_t>(reticle.source),
+                std::memory_order_relaxed);
+            published.unitHandle.store(
+                reticle.occupation.unitHandle, std::memory_order_relaxed);
+            published.directParent.store(
+                reticle.occupation.directParent, std::memory_order_relaxed);
+            published.definitionDatum.store(
+                reticle.occupation.definitionDatum,
+                std::memory_order_relaxed);
+            published.seatIndex.store(
+                reticle.occupation.seatIndex, std::memory_order_relaxed);
+            published.identity.store(
+                seated
+                    ? static_cast<uint8_t>(owner.vehicle.identity)
+                    : static_cast<uint8_t>(ReachVehicleId::Unknown),
+                std::memory_order_relaxed);
+            published.x.store(
+                reticle.cameraLocalDirection[0],
+                std::memory_order_relaxed);
+            published.y.store(
+                reticle.cameraLocalDirection[1],
+                std::memory_order_relaxed);
+            published.z.store(
+                reticle.cameraLocalDirection[2],
+                std::memory_order_relaxed);
+            published.sequence.fetch_add(1, std::memory_order_release);
+        }
+
+        const float* eye =
+            reinterpret_cast<const float*>(owner.headCenter + 0x00);
+        const bool eyeValid = seated &&
+            ReachSeatLeaseKeyValid(reticle.occupation) &&
+            std::isfinite(eye[0]) && std::isfinite(eye[1]) &&
+            std::isfinite(eye[2]);
+        const uint64_t sampleMs = eyeValid ? GetTickCount64() : 0;
+        {
+            auto& published = g_reachCompletedEye;
+            published.sequence.fetch_add(1, std::memory_order_acq_rel);
+            published.generation.store(
+                eyeValid ? generation : 0, std::memory_order_relaxed);
+            published.preparedSerial.store(
+                eyeValid ? preparedSerial : 0, std::memory_order_relaxed);
+            published.sampleMs.store(sampleMs, std::memory_order_relaxed);
+            published.unitHandle.store(
+                eyeValid ? reticle.occupation.unitHandle : -1,
+                std::memory_order_relaxed);
+            published.directParent.store(
+                eyeValid ? reticle.occupation.directParent : -1,
+                std::memory_order_relaxed);
+            published.definitionDatum.store(
+                eyeValid ? reticle.occupation.definitionDatum : 0xFFFFFFFFu,
+                std::memory_order_relaxed);
+            published.seatIndex.store(
+                eyeValid ? reticle.occupation.seatIndex : -1,
+                std::memory_order_relaxed);
+            published.x.store(
+                eyeValid ? eye[0] : 0.0f, std::memory_order_relaxed);
+            published.y.store(
+                eyeValid ? eye[1] : 0.0f, std::memory_order_relaxed);
+            published.z.store(
+                eyeValid ? eye[2] : 0.0f, std::memory_order_relaxed);
+            published.sequence.fetch_add(1, std::memory_order_release);
+        }
     }
 
     bool ReachStereoTransaction(uintptr_t playerView, ReachVrRenderAccess& access)
@@ -19491,9 +19853,14 @@ namespace
                 (committedOuterCameraEyes & 0x3u) == 0x3u;
             if (completed)
             {
+                const uint32_t completedGeneration =
+                    g_reachCamera.generation.load(std::memory_order_relaxed);
                 PublishReachOuterCameraCommitPair(
-                    g_reachCamera.generation.load(std::memory_order_relaxed),
+                    completedGeneration,
                     access.preparedSerial, committedOuterCameraEyes);
+                ReachPublishCompletedFrameFeedback(
+                    completedGeneration, access.preparedSerial,
+                    g_reachOwnerScope);
             }
         }
         __finally
@@ -20592,36 +20959,130 @@ namespace
         const ReachVehicleId identity =
             ReachResolveVehicleFingerprint(fingerprint);
         if (identity == ReachVehicleId::Unknown ||
-            observedType != ReachVehicleExpectedPhysicsType(identity))
+            !ReachVehiclePhysicsTypeMatches(
+                identity, fingerprint, observedType))
         {
             return ReachVehicleId::Unknown;
         }
         return identity;
     }
 
-    uint32_t* ReachResolveLiveSeatFlagsPointer(
-        uint32_t generation, int32_t directParent,
-        uint32_t definitionDatum, int32_t seatIndex)
+    ReachSeatLeaseState ReachNativeSeatLeaseState()
     {
-        if (!generation || generation != g_reachCamera.generation.load(
+        return static_cast<ReachSeatLeaseState>(
+            g_reachVehicleSeatPatchState.load(std::memory_order_acquire));
+    }
+
+    const char* ReachNativeSeatLeaseStateName(ReachSeatLeaseState state)
+    {
+        switch (state)
+        {
+        case ReachSeatLeaseState::Empty: return "empty";
+        case ReachSeatLeaseState::Active: return "active";
+        case ReachSeatLeaseState::RestorePending: return "restore-pending";
+        case ReachSeatLeaseState::External: return "external/native";
+        case ReachSeatLeaseState::Installing: return "installing";
+        case ReachSeatLeaseState::CleanupLocked: return "cleanup-locked";
+        default: return "invalid";
+        }
+    }
+
+    bool ReachAcquireNativeSeatLeaseCleanupLock(
+        ReachSeatLeaseState& observed)
+    {
+        observed = ReachNativeSeatLeaseState();
+        for (;;)
+        {
+            if (ReachSeatLeaseCleanupLocked(observed))
+                return true;
+            if (!ReachSeatLeaseCanAcquireCleanupLock(observed))
+                return false;
+            uint32_t expected = static_cast<uint32_t>(observed);
+            if (g_reachVehicleSeatPatchState.compare_exchange_strong(
+                    expected,
+                    static_cast<uint32_t>(
+                        ReachSeatLeaseState::CleanupLocked),
+                    std::memory_order_acq_rel, std::memory_order_acquire))
+            {
+                observed = ReachSeatLeaseState::CleanupLocked;
+                g_reachVehicleSeatPatchSerial.fetch_add(
+                    1, std::memory_order_release);
+                return true;
+            }
+            observed = static_cast<ReachSeatLeaseState>(expected);
+        }
+    }
+
+    void ReachPublishNativeSeatLeaseState(
+        ReachSeatLeaseState state, bool failure)
+    {
+        const uint32_t next = static_cast<uint32_t>(state);
+        const uint32_t previous = g_reachVehicleSeatPatchState.exchange(
+            next, std::memory_order_acq_rel);
+        if (failure)
+        {
+            g_reachVehicleSeatPatchFailures.fetch_add(
+                1, std::memory_order_relaxed);
+        }
+        if (previous != next || failure)
+        {
+            g_reachVehicleSeatPatchSerial.fetch_add(
+                1, std::memory_order_release);
+        }
+    }
+
+    uint32_t* ReachResolveLiveSeatFlagsPointer(
+        const ReachSeatLeaseKey& key, bool requireOccupiedSeat)
+    {
+        if (!ReachSeatLeaseKeyValid(key) ||
+            key.generation != g_reachCamera.generation.load(
                 std::memory_order_acquire) ||
-            directParent == -1 || seatIndex < 0 ||
-            seatIndex >= kReachVehicleSeatLimit || !g_reachCamera.tagGet)
+            !g_reachCamera.tagGet)
         {
             return nullptr;
         }
+
+        // Both object handles retain their salts. The occupant may have exited
+        // or changed seats before restoration, so the old unit must still be a
+        // live exact object but need not still point at the old seat.
+        uint8_t unitKind = 0;
+        if (!ReachVehicleObjectData(key.unitHandle, unitKind) ||
+            unitKind == kReachObjectKindVehicle)
+        {
+            return nullptr;
+        }
+
+        ReachNativeUnitCameraInfo info{};
+        if (requireOccupiedSeat)
+        {
+            if (!g_reachCamera.vehiclePlayerUnitByOutputUser ||
+                !g_reachCamera.unitGetCameraInfo ||
+                g_reachCamera.vehiclePlayerUnitByOutputUser(0) !=
+                    key.unitHandle)
+            {
+                return nullptr;
+            }
+            g_reachCamera.unitGetCameraInfo(key.unitHandle, &info);
+            if (info.directParent != key.directParent ||
+                info.seatIndex != key.seatIndex || !info.seatCamera)
+            {
+                return nullptr;
+            }
+        }
+
         uint8_t parentKind = 0;
         unsigned char* parentData =
-            ReachVehicleObjectData(directParent, parentKind);
+            ReachVehicleObjectData(key.directParent, parentKind);
         if (!parentData || parentKind != kReachObjectKindVehicle ||
             *reinterpret_cast<const uint32_t*>(
                 parentData + kReachObjectDefinitionDatumOffset) !=
-                    definitionDatum)
+                    key.definitionDatum)
         {
             return nullptr;
         }
         auto* definition = static_cast<unsigned char*>(
-            g_reachCamera.tagGet(kReachVehicleGroupTag, definitionDatum));
+            g_reachCamera.tagGet(
+                kReachVehicleGroupTag, key.definitionDatum));
         if (!definition)
             return nullptr;
         const int32_t seatCount = *reinterpret_cast<const int32_t*>(
@@ -20629,156 +21090,220 @@ namespace
         const uint32_t packedSeats = *reinterpret_cast<const uint32_t*>(
             definition + kReachVehicleSeatsBlockOffset + 4);
         if (seatCount <= 0 || seatCount > kReachVehicleSeatLimit ||
-            seatIndex >= seatCount)
+            key.seatIndex >= seatCount)
         {
             return nullptr;
         }
         unsigned char* seat = ReachPackedTagBlockElement(
-            packedSeats, seatIndex, kReachVehicleSeatStride);
-        return seat ? reinterpret_cast<uint32_t*>(
-                          seat + kReachSeatFlagsOffset)
-                    : nullptr;
+            packedSeats, key.seatIndex, kReachVehicleSeatStride);
+        if (!seat || (requireOccupiedSeat &&
+                      seat + kReachSeatCameraOffset != info.seatCamera))
+            return nullptr;
+        return reinterpret_cast<uint32_t*>(
+            seat + kReachSeatFlagsOffset);
     }
 
-    bool ReachRestoreNativeSeatPatch()
+    bool ReachRestoreNativeSeatLease()
     {
-        ReachNativeSeatPatch patch = g_reachNativeSeatPatch;
-        g_reachNativeSeatPatch = {};
-        if (!patch.active)
-            return true;
+        const ReachSeatLeaseState state = ReachNativeSeatLeaseState();
+        if (!ReachSeatLeaseOwnsMutation(state))
+            return state != ReachSeatLeaseState::Installing;
+
+        const ReachSeatLeasePayload lease = g_reachNativeSeatLease;
         bool restored = false;
-        if (patch.flags)
-        {
-            __try
-            {
-                uint32_t* liveFlags = ReachResolveLiveSeatFlagsPointer(
-                    patch.generation, patch.directParent,
-                    patch.definitionDatum, patch.seatIndex);
-                if (liveFlags == patch.flags)
-                {
-                    auto* flags = reinterpret_cast<volatile LONG*>(liveFlags);
-                    const uint32_t current = static_cast<uint32_t>(
-                        InterlockedCompareExchange(flags, 0, 0));
-                    if (current == patch.writtenFlags)
-                    {
-                        const uint32_t prior = static_cast<uint32_t>(
-                            InterlockedCompareExchange(
-                                flags,
-                                static_cast<LONG>(patch.originalFlags),
-                                static_cast<LONG>(patch.writtenFlags)));
-                        restored = prior == patch.writtenFlags;
-                    }
-                    else
-                    {
-                        // A concurrent engine/tag write wins. Never put stale
-                        // bits back over it; this ownership is simply dropped.
-                        restored = current == patch.originalFlags;
-                    }
-                }
-            }
-            __except (EXCEPTION_EXECUTE_HANDLER)
-            {
-                restored = false;
-            }
-        }
-        g_reachVehicleSeatPatchState.store(
-            restored ? 0u : 2u, std::memory_order_relaxed);
-        if (!restored)
-        {
-            g_reachVehicleSeatPatchFailures.fetch_add(
-                1, std::memory_order_relaxed);
-        }
-        g_reachVehicleSeatPatchSerial.fetch_add(
-            1, std::memory_order_release);
-        return restored;
-    }
-
-    bool ReachEnsureNativeFirstPersonSeat(const ReachVehicleFrame& frame)
-    {
-        // Ownership is synchronous and never spans two outer-render calls.
-        // Reconcile any unexpected prior owner before inspecting an early-out
-        // such as a naturally first-person seat or a config change.
-        if (g_reachNativeSeatPatch.active &&
-            !ReachRestoreNativeSeatPatch())
-        {
-            return false;
-        }
-        if (!frame.active || !g_config.vehicle_hide_body ||
-            !frame.seatFlagsPointer)
-        {
-            return false;
-        }
-        const uint32_t generation = g_reachCamera.generation.load(
-            std::memory_order_relaxed);
-        if (!generation || frame.seatIndex < 0 ||
-            frame.seatIndex >= kReachVehicleSeatLimit)
-        {
-            return false;
-        }
-        const uint32_t original = frame.seatFlags;
-        const uint32_t written =
-            original & ~kReachSeatThirdPersonCameraBit;
-        bool installed = false;
+        bool external = false;
         __try
         {
-            uint32_t* liveFlags = ReachResolveLiveSeatFlagsPointer(
-                generation, frame.directParent,
-                frame.definitionDatum, frame.seatIndex);
-            if (liveFlags != frame.seatFlagsPointer)
+            uint32_t* liveFlags =
+                ReachResolveLiveSeatFlagsPointer(lease.key, false);
+            if (!liveFlags)
                 __leave;
-            if ((original & kReachSeatThirdPersonCameraBit) == 0)
+            auto* flags = reinterpret_cast<volatile LONG*>(liveFlags);
+            const uint32_t current = static_cast<uint32_t>(
+                InterlockedCompareExchange(flags, 0, 0));
+            const ReachSeatLeaseRestoreDisposition disposition =
+                ReachClassifySeatLeaseRestore(
+                    current, lease.originalFlags, lease.writtenFlags);
+            if (disposition ==
+                ReachSeatLeaseRestoreDisposition::AlreadyOriginal)
             {
-                installed = static_cast<uint32_t>(
-                    InterlockedCompareExchange(
-                        reinterpret_cast<volatile LONG*>(liveFlags),
-                        0, 0)) == original;
+                restored = true;
                 __leave;
             }
-            auto* flags = reinterpret_cast<volatile LONG*>(
-                liveFlags);
+            if (disposition ==
+                ReachSeatLeaseRestoreDisposition::ExternalWrite)
+            {
+                external = true;
+                __leave;
+            }
+            const uint32_t prior = static_cast<uint32_t>(
+                InterlockedCompareExchange(
+                    flags, static_cast<LONG>(lease.originalFlags),
+                    static_cast<LONG>(lease.writtenFlags)));
+            const ReachSeatLeaseRestoreDisposition afterCas =
+                ReachClassifySeatLeaseRestore(
+                    prior, lease.originalFlags, lease.writtenFlags);
+            restored =
+                afterCas ==
+                    ReachSeatLeaseRestoreDisposition::RestoreOriginal ||
+                afterCas ==
+                    ReachSeatLeaseRestoreDisposition::AlreadyOriginal;
+            external = !restored;
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            restored = false;
+            external = false;
+        }
+
+        if (restored)
+        {
+            g_reachNativeSeatLease = {};
+            ReachPublishNativeSeatLeaseState(
+                ReachSeatLeaseState::Empty, false);
+            return true;
+        }
+        if (external)
+        {
+            // The word is neither the exact value we wrote nor its exact
+            // original. The engine/tag writer wins permanently for this key.
+            ReachPublishNativeSeatLeaseState(
+                ReachSeatLeaseState::External, true);
+            return false;
+        }
+        ReachPublishNativeSeatLeaseState(
+            ReachSeatLeaseState::RestorePending,
+            state != ReachSeatLeaseState::RestorePending);
+        return false;
+    }
+
+    // Returns true only when this call owns an actual bit-4 mutation. A seat
+    // that is naturally first person is recorded as External/native and is
+    // deliberately never restored or rewritten.
+    bool ReachEnsureNativeFirstPersonSeat(const ReachVehicleFrame& frame)
+    {
+        if (!frame.active || !g_config.vehicle_hide_body ||
+            g_reachCamera.teardownRequested.load(std::memory_order_acquire) ||
+            g_reachCamera.vehicleCameraBindingState.load(
+                std::memory_order_acquire) != static_cast<uint8_t>(
+                    ReachVehicleCameraBindingState::Installed))
+        {
+            return false;
+        }
+        const ReachSeatLeaseKey key{
+            g_reachCamera.generation.load(std::memory_order_acquire),
+            frame.unitHandle, frame.directParent, frame.definitionDatum,
+            frame.seatIndex};
+        if (!ReachSeatLeaseKeyValid(key))
+            return false;
+
+        const ReachSeatLeaseState state = ReachNativeSeatLeaseState();
+        if (ReachSeatLeaseBlocksKey(
+                state, g_reachNativeSeatLease.key, key))
+        {
+            return false;
+        }
+        uint32_t expected = static_cast<uint32_t>(state);
+        if (!g_reachVehicleSeatPatchState.compare_exchange_strong(
+                expected,
+                static_cast<uint32_t>(ReachSeatLeaseState::Installing),
+                std::memory_order_acq_rel, std::memory_order_acquire))
+        {
+            return false;
+        }
+
+        // Installing already won the conclusive same-atomic race against
+        // CleanupLocked. The independent lifecycle flags are advisory here:
+        // this recheck avoids an unnecessary write when their cleanup request
+        // is visible, but teardown safety never depends on observing them.
+        if (g_reachCamera.teardownRequested.load(std::memory_order_acquire) ||
+            g_reachCamera.vehicleCameraBindingState.load(
+                std::memory_order_acquire) != static_cast<uint8_t>(
+                    ReachVehicleCameraBindingState::Installed))
+        {
+            g_reachNativeSeatLease = {};
+            ReachPublishNativeSeatLeaseState(
+                ReachSeatLeaseState::Empty, false);
+            return false;
+        }
+
+        bool installed = false;
+        bool natural = false;
+        bool external = false;
+        bool faulted = false;
+        bool writeMayHaveOccurred = false;
+        __try
+        {
+            uint32_t* liveFlags =
+                ReachResolveLiveSeatFlagsPointer(key, true);
+            if (!liveFlags)
+            {
+                faulted = true;
+                __leave;
+            }
+            auto* flags = reinterpret_cast<volatile LONG*>(liveFlags);
+            const uint32_t original = static_cast<uint32_t>(
+                InterlockedCompareExchange(flags, 0, 0));
+            const uint32_t written =
+                original & ~kReachSeatThirdPersonCameraBit;
+            g_reachNativeSeatLease = {key, original, written};
+            if (original == written)
+            {
+                natural = true;
+                __leave;
+            }
+            if (g_reachCamera.teardownRequested.load(
+                    std::memory_order_acquire))
+            {
+                __leave;
+            }
+            writeMayHaveOccurred = true;
             const uint32_t prior = static_cast<uint32_t>(
                 InterlockedCompareExchange(
                     flags, static_cast<LONG>(written),
                     static_cast<LONG>(original)));
-            installed = prior == original &&
-                static_cast<uint32_t>(
-                    InterlockedCompareExchange(flags, 0, 0)) == written;
+            writeMayHaveOccurred = false;
+            if (prior != original)
+            {
+                external = true;
+                __leave;
+            }
+            installed = true;
         }
         __except (EXCEPTION_EXECUTE_HANDLER)
         {
-            installed = false;
+            faulted = true;
         }
-        if (!installed)
+
+        if (writeMayHaveOccurred)
         {
-            g_reachVehicleSeatPatchState.store(2, std::memory_order_relaxed);
-            g_reachVehicleSeatPatchFailures.fetch_add(
-                1, std::memory_order_relaxed);
-            g_reachVehicleSeatPatchSerial.fetch_add(
-                1, std::memory_order_release);
-            return false;
+            // An SEH fault left the CAS outcome unknowable. Retain the exact
+            // key/words as owned and make the engine-thread restore path prove
+            // the outcome; never discard a possibly live mutation.
+            installed = true;
         }
-        if ((original & kReachSeatThirdPersonCameraBit) == 0)
+        if (installed)
         {
-            if (g_reachVehicleSeatPatchState.exchange(
-                    0, std::memory_order_relaxed) != 0)
+            ReachPublishNativeSeatLeaseState(
+                ReachSeatLeaseState::Active, faulted);
+            if (g_reachCamera.teardownRequested.load(
+                    std::memory_order_acquire))
             {
-                g_reachVehicleSeatPatchSerial.fetch_add(
-                    1, std::memory_order_release);
+                ReachRestoreNativeSeatLease();
+                return false;
             }
             return true;
         }
-        g_reachNativeSeatPatch.generation = generation;
-        g_reachNativeSeatPatch.definitionDatum = frame.definitionDatum;
-        g_reachNativeSeatPatch.directParent = frame.directParent;
-        g_reachNativeSeatPatch.seatIndex = frame.seatIndex;
-        g_reachNativeSeatPatch.flags = frame.seatFlagsPointer;
-        g_reachNativeSeatPatch.originalFlags = original;
-        g_reachNativeSeatPatch.writtenFlags = written;
-        g_reachNativeSeatPatch.active = true;
-        g_reachVehicleSeatPatchState.store(1, std::memory_order_relaxed);
-        g_reachVehicleSeatPatchSerial.fetch_add(
-            1, std::memory_order_release);
-        return true;
+        if (natural || external)
+        {
+            ReachPublishNativeSeatLeaseState(
+                ReachSeatLeaseState::External, external);
+            return false;
+        }
+        g_reachNativeSeatLease = {};
+        ReachPublishNativeSeatLeaseState(
+            ReachSeatLeaseState::Empty, faulted);
+        return false;
     }
 
     // Sample only on Reach's proven normal-player outer-render thread, whose
@@ -21162,8 +21687,6 @@ namespace
                 frame.definitionDatum = definitionDatum;
                 frame.identity = identity;
                 frame.seatFlags = seatFlags;
-                frame.seatFlagsPointer = reinterpret_cast<uint32_t*>(
-                    seat + kReachSeatFlagsOffset);
                 frame.unitAimValid = unitAimValid;
                 if (unitAimValid)
                 {
@@ -21348,7 +21871,7 @@ namespace
         if (faulted)
         {
             g_reachVehicleTrimSnapshot.store(0, std::memory_order_release);
-            g_reachSeatedShotState.store(0, std::memory_order_relaxed);
+            ReachPublishShotOccupation(generation, nullptr);
             g_reachVehicleCameraFaults.fetch_add(
                 1, std::memory_order_relaxed);
             g_reachCamera.vehicleCameraBindingState.store(
@@ -21396,7 +21919,7 @@ namespace
         if (!complete)
         {
             g_reachVehicleTrimSnapshot.store(0, std::memory_order_release);
-            g_reachSeatedShotState.store(0, std::memory_order_relaxed);
+            ReachPublishShotOccupation(generation, nullptr);
             g_reachHeadReference = {};
             ReachUpdateVehicleTransition(
                 unitKnown ? Halo3VehicleState::OnFoot
@@ -21411,17 +21934,11 @@ namespace
                       generation, frame.identity, frame.seatIndex)
                 : 0,
             std::memory_order_release);
-        // The firing hook compares this against the unit the engine hands it,
-        // so somebody else's weapon can never take our seat's origin, and only
-        // an authored allows-weapons seat qualifies at all.
-        g_reachSeatedShotState.store(
-            frame.active
-                ? ((static_cast<uint64_t>(
-                        static_cast<uint32_t>(frame.unitHandle)) << 32) |
-                   ((frame.seatFlags & kReachSeatAllowsWeaponsBit) ? 2u : 0u) |
-                   1u)
-                : 0,
-            std::memory_order_release);
+        // Publish the full-salt occupation as one seqlock record. The firing
+        // thread must match it against the independently completed rendered-eye
+        // record before substituting a personal-weapon origin.
+        ReachPublishShotOccupation(
+            generation, frame.active ? &frame : nullptr);
         ReachUpdateVehicleTransition(Halo3VehicleState::Vehicle, nowMs);
         return frame.active;
     }
@@ -21725,8 +22242,9 @@ namespace
 
     uintptr_t ReachMainRenderViewBody(
         uintptr_t workspace, uintptr_t playerView, uint32_t windowIndex,
-        uintptr_t returnAddress)
+        uintptr_t returnAddress, bool& seatLeaseCleanupPermitted)
     {
+        seatLeaseCleanupPermitted = false;
         const ReachOwnerScope previous = g_reachOwnerScope;
         if (g_reachNestedOuterSuppressed)
             return g_reachOrigMainRenderView(
@@ -21788,20 +22306,30 @@ namespace
             return nestedResult;
         }
 
-        ReachSampleVehicleInputState(windowIndex, returnAddress);
-
         const ReachModuleEpoch epoch{
             g_reachCamera.base, g_reachCamera.generation};
+        const bool normalPlayerWindow0 = windowIndex == 0 &&
+            ClassifyReachOuterRenderCaller(
+                epoch.moduleBase, kReachRetailImageSize, returnAddress) ==
+                ReachOuterRenderCaller::NormalPlayer;
+        if (normalPlayerWindow0)
+        {
+            // Re-resolve and reconcile the preceding one-frame interval before
+            // sampling, arming checks, or any other early return. This is the
+            // only ordinary restoration thread; a failed lookup stays pending.
+            seatLeaseCleanupPermitted = true;
+            ReachRestoreNativeSeatLease();
+        }
+
+        ReachSampleVehicleInputState(windowIndex, returnAddress);
+
         uintptr_t expectedWorkspace = 0;
         uintptr_t expectedPlayerView = 0;
         const ReachPreflightToken preflight =
             ReachRenderCandidate_GetPreflight(epoch);
         const ReachPreparedFrameToken prepared = VR_ReachPreparedFrame(epoch);
         if (!g_reachCamera.armed.load(std::memory_order_acquire) ||
-            windowIndex != 0 || !g_reachHelpers.Ready() ||
-            ClassifyReachOuterRenderCaller(
-                epoch.moduleBase, kReachRetailImageSize, returnAddress) !=
-                ReachOuterRenderCaller::NormalPlayer ||
+            !normalPlayerWindow0 || !g_reachHelpers.Ready() ||
             !ReachAddressFromRva(
                 epoch.moduleBase, kReachRetailImageSize,
                 kReachDefaultWorkspaceRva, expectedWorkspace) ||
@@ -21866,10 +22394,6 @@ namespace
                 workspace, playerView, windowIndex);
         }
 
-        // The native seat bit is owned only inside the synchronous stock call
-        // below. A previous owner surviving to a new normal-player frame is an
-        // optional-feature fault; drop it safely and keep the camera core live.
-        ReachRestoreNativeSeatPatch();
         ReachVehicleFrame vehicleFrame{};
         const bool vehicleFrameReady =
             ReachSampleVehicleCameraFrame(vehicleFrame) &&
@@ -22047,7 +22571,6 @@ namespace
         }
         __finally
         {
-            ReachRestoreNativeSeatPatch();
             ReachEndFpPairScope();
             // Restore only the proven camera-pair data. The engine owns the
             // camera-stack callback at +0x2A8 and its push/pop lifetime.
@@ -22073,15 +22596,21 @@ namespace
         const uintptr_t returnAddress =
             reinterpret_cast<uintptr_t>(_ReturnAddress());
         uintptr_t result = 0;
+        bool bodyCompleted = false;
+        bool seatLeaseCleanupPermitted = false;
         g_reachCamera.activeCallbacks.fetch_add(
             1, std::memory_order_acq_rel);
         __try
         {
             result = ReachMainRenderViewBody(
-                workspace, playerView, windowIndex, returnAddress);
+                workspace, playerView, windowIndex, returnAddress,
+                seatLeaseCleanupPermitted);
+            bodyCompleted = true;
         }
         __finally
         {
+            if (!bodyCompleted && seatLeaseCleanupPermitted)
+                ReachRestoreNativeSeatLease();
             g_reachCamera.activeCallbacks.fetch_sub(
                 1, std::memory_order_acq_rel);
         }
@@ -22273,7 +22802,7 @@ namespace
     bool ScanForReachDetourIngress(bool& busy)
     {
         static bool rangesResolved = false;
-        static ReachDetourCodeRange ranges[10]{};
+        static ReachDetourCodeRange ranges[11]{};
         if (!rangesResolved)
         {
             const void* functions[] = {
@@ -22287,6 +22816,7 @@ namespace
                 reinterpret_cast<const void*>(&ReachObserverCameraDetour),
                 reinterpret_cast<const void*>(&ReachEffectLocationDetour),
                 reinterpret_cast<const void*>(&ReachRainRenderDetour),
+                reinterpret_cast<const void*>(&ReachUnitCameraPositionHook),
             };
             static_assert(_countof(functions) == _countof(ranges));
             bool resolved = true;
@@ -22310,6 +22840,7 @@ namespace
             g_reachCamera.observerCameraTarget,
             g_reachCamera.effectLocationTarget,
             g_reachCamera.rainRenderTarget,
+            g_reachUnitCameraPositionTarget,
         };
         void* const trampolines[] = {
             reinterpret_cast<void*>(g_reachOrigMainRenderView),
@@ -22322,6 +22853,7 @@ namespace
             reinterpret_cast<void*>(g_reachOrigObserverCamera),
             reinterpret_cast<void*>(g_reachOrigEffectLocation),
             reinterpret_cast<void*>(g_reachOrigRainRender),
+            reinterpret_cast<void*>(g_origReachUnitCameraPosition),
         };
         static_assert(_countof(targets) == _countof(ranges));
         static_assert(_countof(trampolines) == _countof(ranges));
@@ -22414,12 +22946,13 @@ namespace
 
     bool DisableAndRemoveReachHooks()
     {
-        // The optional shot-origin detour reads only our own atomics, so it
-        // is released first and on its own: its trampoline points into the
-        // module being torn down.
-        ReleaseReachFiringOriginHook();
+        // Make the optional shot-origin detour a stock pass-through before any
+        // disable attempt. It remains in the shared verified lifecycle because
+        // both its trampoline and its original callee point into the title DLL.
+        RevokeReachFiringOriginFeature();
         bool disabledAll = true;
         void* const targets[] = {
+            g_reachUnitCameraPositionTarget,
             g_reachCamera.rainRenderTarget,
             g_reachCamera.effectLocationTarget,
             g_reachCamera.observerCameraTarget,
@@ -22447,6 +22980,21 @@ namespace
             return false;
 
         bool removedAll = true;
+        if (g_reachUnitCameraPositionTarget)
+        {
+            const MH_STATUS status =
+                MH_RemoveHook(g_reachUnitCameraPositionTarget);
+            if (status == MH_OK || status == MH_ERROR_NOT_CREATED)
+            {
+                g_reachUnitCameraPositionTarget = nullptr;
+                g_origReachUnitCameraPosition = nullptr;
+            }
+            else
+            {
+                removedAll = false;
+                LOG("Reach seat aim cleanup: firing-origin hook remove failed");
+            }
+        }
         if (g_reachCamera.rainRenderTarget)
         {
             const MH_STATUS status =
@@ -22670,24 +23218,42 @@ namespace
         g_aimSeen.store(false, std::memory_order_release);
         g_camValid.store(false, std::memory_order_release);
         g_baseCamValid.store(false, std::memory_order_release);
+
+        // The worker has no Reach engine TLS and must never chase tag storage.
+        // Active/Pending is restored only by the next proven normal-player
+        // outer callback. Installing and CleanupLocked arbitrate on the same
+        // atomic against a callback already admitted before this cleanup
+        // request. With no later callback we deliberately retain the hook and
+        // exact module reference.
+        ReachSeatLeaseState seatLeaseState = ReachSeatLeaseState::Empty;
+        if (!ReachAcquireNativeSeatLeaseCleanupLock(seatLeaseState))
+        {
+            static uint32_t loggedLeaseWaitGeneration = 0;
+            const uint32_t leaseGeneration =
+                g_reachCamera.generation.load(std::memory_order_acquire);
+            if (loggedLeaseWaitGeneration != leaseGeneration)
+            {
+                loggedLeaseWaitGeneration = leaseGeneration;
+                LOG("Reach first-person vehicles cleanup: body-hide lease "
+                    "state %s requires engine-thread restoration; retaining "
+                    "the outer hook and title module",
+                    ReachNativeSeatLeaseStateName(seatLeaseState));
+            }
+            return false;
+        }
         if (!DisableAndRemoveReachHooks())
             return false;
 
-        // The seat bit is owned only inside one synchronous outer-render call
-        // and its __finally restores it. Quiescence therefore must leave no
-        // pointer for this worker thread (which does not own Reach engine TLS)
-        // to chase. Never dereference an unexpected stale tag pointer here.
-        if (g_reachNativeSeatPatch.active)
-        {
-            LOG("Reach first-person vehicles: unexpected seat-bit ownership "
-                "survived callback quiescence; discarded without a worker-"
-                "thread tag write");
-            g_reachNativeSeatPatch = {};
-            g_reachVehicleSeatPatchState.store(2, std::memory_order_relaxed);
-            g_reachVehicleSeatPatchSerial.fetch_add(
-                1, std::memory_order_release);
-        }
+        // CleanupLocked won the same atomic race against every callback's
+        // Installing claim. Only successful hook removal and quiescence make
+        // it safe to forget the pointer-free bookkeeping and release the lock.
+        g_reachNativeSeatLease = {};
+        g_reachVehicleSeatPatchState.store(
+            static_cast<uint32_t>(ReachSeatLeaseState::Empty),
+            std::memory_order_release);
         ReachClearAimFeedback();
+        ReachClearCompletedFrameFeedback();
+        ReachPublishShotOccupation(0, nullptr);
 
         // Put the engine's third-person effect branch back before anything
         // else can unload the module. Optional, so a failure is logged rather
@@ -24481,22 +25047,27 @@ namespace
         g_reachVehicleBoundsFailures.store(0, std::memory_order_relaxed);
         g_reachVehicleBounceFallbacks.store(0, std::memory_order_relaxed);
         g_reachVehicleFollowFallbacks.store(0, std::memory_order_relaxed);
-        g_reachVehicleSeatPatchState.store(0, std::memory_order_relaxed);
+        g_reachVehicleSeatPatchState.store(
+            static_cast<uint32_t>(ReachSeatLeaseState::Empty),
+            std::memory_order_relaxed);
         g_reachVehicleSeatPatchSerial.store(0, std::memory_order_relaxed);
         g_reachVehicleSeatPatchFailures.store(0, std::memory_order_relaxed);
         g_reachVehicleSeatRecenters.store(0, std::memory_order_relaxed);
         g_reachSeatAuthorsSteering.store(0, std::memory_order_relaxed);
         ReachClearAimFeedback();
+        ReachClearCompletedFrameFeedback();
+        ReachPublishShotOccupation(0, nullptr);
         g_reachUnitAimSamples.store(0, std::memory_order_relaxed);
         g_reachUnitAimFallbacks.store(0, std::memory_order_relaxed);
         g_reachAimFeedbackReadFallbacks.store(
             0, std::memory_order_relaxed);
+        g_reachReticleAimFallbacks.store(0, std::memory_order_relaxed);
         ReachClearHullHeading();
         g_reachVehicleFpDebounce = {};
         g_reachHeadReference = {};
         g_reachSeatAnchorLatch = {};
         g_reachVehicleAnchorFallbacks.store(0, std::memory_order_relaxed);
-        g_reachNativeSeatPatch = {};
+        g_reachNativeSeatLease = {};
         g_reachSeatYaw = {};
         g_reachYawSeat = {};
         if (reachVehicleCameraResolved)
@@ -24505,8 +25076,9 @@ namespace
                 "proven seat gets the camera (%d exact HREK identities carry "
                 "per-seat trims and policy, unmatched vehicles ride the "
                 "universal trims); native unit-aim feedback is armed for view "
-                "follow OFF and ON, with rendered marker placement, transient "
-                "body hide, bounce and hands",
+                "follow OFF and ON, with rendered marker placement, a "
+                "pointer-free one-frame-interval body-hide lease, bounce and "
+                "hands",
                 kReachVehicleIdentityCount);
         }
 
@@ -24515,7 +25087,7 @@ namespace
         // hook it is on the firing path rather than one of the evaluator's 32
         // other consumers — including the engine's own camera placement,
         // which must keep the stock value.
-        ReleaseReachFiringOriginHook();
+        RevokeReachFiringOriginFeature();
         g_reachFiringOriginMoves.store(0, std::memory_order_relaxed);
         g_reachFiringOriginSkips.store(0, std::memory_order_relaxed);
         {
@@ -24539,8 +25111,10 @@ namespace
                     MH_EnableHook(g_reachUnitCameraPositionTarget) == MH_OK;
                 if (enabled)
                 {
-                    g_reachFiringOriginReturnA = firingReturnA;
-                    g_reachFiringOriginReturnB = firingReturnB;
+                    g_reachFiringOriginReturnA.store(
+                        firingReturnA, std::memory_order_release);
+                    g_reachFiringOriginReturnB.store(
+                        firingReturnB, std::memory_order_release);
                     LOG("Reach seat aim: shot origin follows the rendered eye "
                         "(evaluator +0x%llX, firing returns +0x%llX/+0x%llX); "
                         "only an allows-weapons seat's own personal fire "
@@ -24552,14 +25126,31 @@ namespace
                 }
                 else
                 {
-                    MH_RemoveHook(g_reachUnitCameraPositionTarget);
-                    g_reachUnitCameraPositionTarget = nullptr;
-                    g_origReachUnitCameraPosition = nullptr;
+                    bool retained = created == MH_OK;
+                    if (retained)
+                    {
+                        const MH_STATUS disabled = MH_DisableHook(
+                            g_reachUnitCameraPositionTarget);
+                        if (ReachDisableStatusIsSafe(disabled))
+                        {
+                            const MH_STATUS removed = MH_RemoveHook(
+                                g_reachUnitCameraPositionTarget);
+                            retained = removed != MH_OK &&
+                                removed != MH_ERROR_NOT_CREATED;
+                        }
+                    }
+                    if (!retained)
+                    {
+                        g_reachUnitCameraPositionTarget = nullptr;
+                        g_origReachUnitCameraPosition = nullptr;
+                    }
                     LOG("Reach seat aim: FAILED to install the shot-origin "
-                        "hook (create=%d); seated personal-weapon shots keep "
+                        "hook (create=%d, cleanup=%s); seated personal-weapon "
+                        "shots keep "
                         "firing from the engine's own eye point and will not "
                         "follow the crosshair exactly",
-                        (int)created);
+                        (int)created, retained ? "retained for verified teardown"
+                                               : "complete");
                 }
             }
             else if (reachVehicleCameraResolved)
@@ -24973,6 +25564,7 @@ namespace
         static bool loggedNativeAim = false;
         static bool loggedAimFallback = false;
         static bool loggedAimReadFallback = false;
+        static bool loggedReticleAimFallback = false;
         static uint32_t loggedRecenters = 0;
         static uint64_t loggedSeat = 0;
         const uint32_t generation = g_reachCamera.generation.load(
@@ -24998,6 +25590,7 @@ namespace
             loggedNativeAim = false;
             loggedAimFallback = false;
             loggedAimReadFallback = false;
+            loggedReticleAimFallback = false;
             for (auto& missSlot : g_reachVehicleCensusMisses)
                 missSlot.state.store(0, std::memory_order_release);
         }
@@ -25024,6 +25617,13 @@ namespace
             LOG("Reach vehicle aim: coherent feedback read was stale or torn; "
                 "the input frame used the legacy compact publication");
         }
+        if (!loggedReticleAimFallback &&
+            g_reachReticleAimFallbacks.load(std::memory_order_relaxed) != 0)
+        {
+            loggedReticleAimFallback = true;
+            LOG("Reach vehicle reticle: native seated aim was unavailable or "
+                "could not map into tracked space; controller reticle retained");
+        }
         if (!loggedShotMove &&
             g_reachFiringOriginMoves.load(std::memory_order_relaxed) != 0)
         {
@@ -25036,8 +25636,9 @@ namespace
         {
             loggedShotSkip = true;
             LOG("Reach seat aim: a firing-path substitution was SKIPPED "
-                "(stale or non-finite rendered eye); those shots kept the "
-                "stock origin");
+                "(not a current allows-weapons personal seat, key mismatch, "
+                "or stale/invalid completed eye); those shots kept the stock "
+                "origin");
         }
         if (!loggedCameraFault &&
             g_reachVehicleCameraFaults.load(std::memory_order_relaxed) != 0)
@@ -25125,20 +25726,21 @@ namespace
         if (!loggedPatchActivity && patchSerial != 0)
         {
             loggedPatchActivity = true;
-            LOG("Reach first-person vehicles: transient native seat-bit "
-                "body-hide transaction observed (serial=%u, current=%s)",
+            LOG("Reach first-person vehicles: native seat-bit one-frame-"
+                "interval body-hide lease observed (serial=%u, current=%s)",
                 patchSerial,
-                g_reachVehicleSeatPatchState.load(
-                    std::memory_order_relaxed) == 2 ? "fallback" : "restored");
+                ReachNativeSeatLeaseStateName(
+                    ReachNativeSeatLeaseState()));
         }
         if (!loggedPatchFailure &&
             g_reachVehicleSeatPatchFailures.load(
                 std::memory_order_relaxed) != 0)
         {
             loggedPatchFailure = true;
-            LOG("Reach first-person vehicles: native seat-bit body hide could "
-                "not be installed/restored safely; body hide alone fell back, "
-                "unit-aim feedback and the seat camera continue");
+            LOG("Reach first-person vehicles: native seat-bit body-hide lease "
+                "could not be installed/reconciled safely; body hide alone "
+                "fell back or remains cleanup-pending, while unit-aim feedback "
+                "and the seat camera continue");
         }
         const uint32_t recenters = g_reachVehicleSeatRecenters.load(
             std::memory_order_relaxed);
@@ -28243,6 +28845,26 @@ bool Game_ComputeAimStick(float& outRx, float& outRy)
 #endif
     outRx = Clamp(-errYaw * k, -1.0f, 1.0f);
     return true;
+}
+
+bool Game_GetReachVehicleReticleAimDirection(
+    uint64_t expectedPreparedSerial, float outCameraLocal[3])
+{
+#if HALOMCCVR_EXPERIMENTAL_REACH_RENDER_CANDIDATE
+    if (!outCameraLocal || !expectedPreparedSerial ||
+        TitleAdapter_GetActiveTitle() != GameTitle::HaloReach)
+    {
+        return false;
+    }
+    if (ReachReadCompletedReticleAim(
+            expectedPreparedSerial, outCameraLocal))
+        return true;
+    g_reachReticleAimFallbacks.fetch_add(1, std::memory_order_relaxed);
+#else
+    (void)expectedPreparedSerial;
+    (void)outCameraLocal;
+#endif
+    return false;
 }
 
 // True while a seat's angular limit is holding the weapon short of the hand's

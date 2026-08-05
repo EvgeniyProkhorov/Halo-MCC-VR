@@ -1154,8 +1154,8 @@ int main()
                     entry.identity;
         }
         // The player-seat census counts each IDENTITY once; the fingerprint
-        // table is larger than the identity list because retail maps alias
-        // the Warthog and Mongoose one ULP away from their HREK tuples.
+        // table is larger than the identity list because retail maps carry
+        // eight explicit full-tuple aliases for HREK import-rounding variants.
         int reachPlayerSeatCount = 0;
         for (int id = 1; id <= kReachVehicleIdentityCount; ++id)
             for (int seat = 0; seat < kReachVehicleSeatLimit; ++seat)
@@ -1169,9 +1169,9 @@ int main()
               ReachResolveVehicleFingerprint(alteredReachFingerprint) ==
                   ReachVehicleId::Unknown,
             "Reach HREK fingerprints resolve 34 identities/50 player seats and fail closed on mutation");
-        // R-V17: the retail 1-ULP aliases resolve to their vehicles, and the
-        // fingerprint table is exactly the identity list plus those two rows.
-        Check(kReachVehicleFingerprintCount == kReachVehicleIdentityCount + 2 &&
+        // Retail aliases stay exact full tuples: six rows complete the
+        // accepted-partial 619644c miss census beside R-V17's first two.
+        Check(kReachVehicleFingerprintCount == kReachVehicleIdentityCount + 8 &&
               ReachResolveVehicleFingerprint(
                   {0x3F978071, 0xBD406A82, 0xBAD03632, 0x3EC25783}) ==
                   ReachVehicleId::Warthog &&
@@ -1180,8 +1180,103 @@ int main()
                   ReachVehicleId::Mongoose &&
               ReachResolveVehicleFingerprint(
                   {0x3F978072, 0xBD406A82, 0xBAD03632, 0x3EC25783}) ==
-                  ReachVehicleId::Warthog,
-            "Retail Warthog/Mongoose 1-ULP fingerprint aliases resolve to their identities");
+                  ReachVehicleId::Warthog &&
+              ReachResolveVehicleFingerprint(
+                  {0x3F73045A, 0x3DD8D24E, 0xBC93505D, 0x3F1EA4E9}) ==
+                  ReachVehicleId::ShadeFlak &&
+              ReachResolveVehicleFingerprint(
+                  {0x3F7A9153, 0x3E1B9697, 0xBC935062, 0x3F1EF5FC}) ==
+                  ReachVehicleId::ShadePlasma &&
+              ReachResolveVehicleFingerprint(
+                  {0x400D30E2, 0x3D70D852, 0x3D28430B, 0x3EBBF788}) ==
+                  ReachVehicleId::Scorpion &&
+              ReachResolveVehicleFingerprint(
+                  {0x3EE99B18, 0x3D9811F2, 0xB991445F, 0x3E8589DB}) ==
+                  ReachVehicleId::Machinegun &&
+              ReachResolveVehicleFingerprint(
+                  {0x40A69CFE, 0xBF19A963, 0xBB2A0198, 0x3F8AF1EF}) ==
+                  ReachVehicleId::Sabre &&
+              ReachResolveVehicleFingerprint(
+                  {0x3F786DCE, 0x3C8C975D, 0xBC8111A1, 0x3EE5C245}) ==
+                  ReachVehicleId::Cart,
+            "Eight exact retail fingerprint aliases resolve to their HREK identities");
+        const ReachVehicleFingerprint shadePlasmaHrek{
+            0x3F7A9153, 0x3E1B9697, 0xBC935063, 0x3F1EF5FC};
+        const ReachVehicleFingerprint shadePlasmaRetail{
+            0x3F7A9153, 0x3E1B9697, 0xBC935062, 0x3F1EF5FC};
+        const ReachVehicleFingerprint shadeFlakHrek{
+            0x3F73045B, 0x3DD8D24F, 0xBC93505D, 0x3F1EA4E9};
+        const ReachVehicleFingerprint shadeFlakRetail{
+            0x3F73045A, 0x3DD8D24E, 0xBC93505D, 0x3F1EA4E9};
+        const ReachVehicleFingerprint machinegunHrek{
+            0x3EE99B18, 0x3D9811F2, 0xB9914460, 0x3E8589DB};
+        const ReachVehicleFingerprint machinegunRetail{
+            0x3EE99B18, 0x3D9811F2, 0xB991445F, 0x3E8589DB};
+        const ReachVehicleFingerprint plasmaTurret{
+            0x3F000000, 0x00000000, 0x00000000, 0x3DCCCCCD};
+        const ReachVehicleFingerprint scorpionAntiInfantry{
+            0x3ED28405, 0x3DB8AD5D, 0xB8A6B78A, 0x3D8A1BD8};
+        const ReachVehicleFingerprint corvetteCannon{
+            0x40400000, 0x00000000, 0x00000000, 0x00000000};
+        const ReachVehicleFingerprint warthogChaingun{
+            0x3F1CC397, 0x3E86AFD5, 0xB3A6AFD5, 0x3E9C5885};
+        const ReachVehicleFingerprint scorpionHrek{
+            0x400D30E2, 0x3D70D852, 0x3D28430C, 0x3EBBF788};
+        const ReachVehicleFingerprint scorpionRetail{
+            0x400D30E2, 0x3D70D852, 0x3D28430B, 0x3EBBF788};
+        const ReachVehicleFingerprint warthogRetail{
+            0x3F978071, 0xBD406A82, 0xBAD03632, 0x3EC25783};
+        Check(ReachVehiclePhysicsTypeMatches(
+                  ReachVehicleId::ShadePlasma, shadePlasmaHrek, 16) &&
+              ReachVehiclePhysicsTypeMatches(
+                  ReachVehicleId::ShadePlasma, shadePlasmaRetail, 6) &&
+              !ReachVehiclePhysicsTypeMatches(
+                  ReachVehicleId::ShadePlasma, shadePlasmaHrek, 6) &&
+              !ReachVehiclePhysicsTypeMatches(
+                  ReachVehicleId::ShadePlasma, shadePlasmaRetail, 16) &&
+              ReachVehiclePhysicsTypeMatches(
+                  ReachVehicleId::ShadeFlak, shadeFlakHrek, 16) &&
+              ReachVehiclePhysicsTypeMatches(
+                  ReachVehicleId::ShadeFlak, shadeFlakRetail, 6) &&
+              !ReachVehiclePhysicsTypeMatches(
+                  ReachVehicleId::ShadeFlak, shadeFlakHrek, 6) &&
+              !ReachVehiclePhysicsTypeMatches(
+                  ReachVehicleId::ShadeFlak, shadeFlakRetail, 16) &&
+              ReachVehiclePhysicsTypeMatches(
+                  ReachVehicleId::Machinegun, machinegunHrek, 16) &&
+              ReachVehiclePhysicsTypeMatches(
+                  ReachVehicleId::Machinegun, machinegunRetail, 6) &&
+              !ReachVehiclePhysicsTypeMatches(
+                  ReachVehicleId::Machinegun, machinegunHrek, 6) &&
+              !ReachVehiclePhysicsTypeMatches(
+                  ReachVehicleId::Machinegun, machinegunRetail, 16) &&
+              ReachVehiclePhysicsTypeMatches(
+                  ReachVehicleId::PlasmaTurret, plasmaTurret, 16) &&
+              ReachVehiclePhysicsTypeMatches(
+                  ReachVehicleId::PlasmaTurret, plasmaTurret, 6) &&
+              ReachVehiclePhysicsTypeMatches(
+                  ReachVehicleId::ScorpionAntiInfantry,
+                  scorpionAntiInfantry, 16) &&
+              ReachVehiclePhysicsTypeMatches(
+                  ReachVehicleId::ScorpionAntiInfantry,
+                  scorpionAntiInfantry, 6) &&
+              ReachVehiclePhysicsTypeMatches(
+                  ReachVehicleId::CorvetteCannon, corvetteCannon, 6) &&
+              ReachVehiclePhysicsTypeMatches(
+                  ReachVehicleId::Scorpion, scorpionHrek, 0) &&
+              ReachVehiclePhysicsTypeMatches(
+                  ReachVehicleId::Scorpion, scorpionRetail, 0) &&
+              ReachVehiclePhysicsTypeMatches(
+                  ReachVehicleId::Warthog, warthogRetail, 1) &&
+              !ReachVehiclePhysicsTypeMatches(
+                  ReachVehicleId::WarthogChaingun, warthogChaingun, 6) &&
+              !ReachVehiclePhysicsTypeMatches(
+                  ReachVehicleId::Scorpion, scorpionHrek, 6) &&
+              !ReachVehiclePhysicsTypeMatches(
+                  ReachVehicleId::ShadeFlak, shadePlasmaRetail, 6) &&
+              !ReachVehiclePhysicsTypeMatches(
+                  ReachVehicleId::Unknown, alteredReachFingerprint, -1),
+            "Reach fingerprint/type proof accepts only canonical and evidenced retail pairs");
         Check(ReachVehicleSeatIsDriver(ReachVehicleId::Warthog, 0) &&
               !ReachVehicleSeatIsDriver(ReachVehicleId::Warthog, 1) &&
               !ReachVehicleSeatIsDriver(
@@ -1207,6 +1302,105 @@ int main()
         // 72-144 Hz headset consumes that frame's render-matched carrier basis.
         Check(!kReachR_V15RawHullFollowEnabled,
             "Reach vehicle follow stays on the render-matched carrier basis");
+        // R-V20: body hiding retains values and full salted identities only;
+        // no loaded tag pointer is legal across the one-frame interval.
+        {
+            constexpr ReachSeatLeaseKey leaseKey{
+                37, 0x12340007, 0x23450009, 0x00030021, 3};
+            constexpr ReachSeatLeaseKey otherGeneration{
+                38, 0x12340007, 0x23450009, 0x00030021, 3};
+            constexpr ReachSeatLeaseKey otherUnit{
+                37, 0x12350007, 0x23450009, 0x00030021, 3};
+            constexpr ReachSeatLeaseKey otherParent{
+                37, 0x12340007, 0x23460009, 0x00030021, 3};
+            constexpr ReachSeatLeaseKey otherDefinition{
+                37, 0x12340007, 0x23450009, 0x00040021, 3};
+            constexpr ReachSeatLeaseKey otherSeat{
+                37, 0x12340007, 0x23450009, 0x00030021, 4};
+            constexpr uint32_t originalFlags = 0x04020014;
+            constexpr uint32_t writtenFlags =
+                originalFlags & ~kReachSeatThirdPersonCameraBit;
+            Check(
+                sizeof(ReachSeatLeaseKey) == 5 * sizeof(uint32_t) &&
+                sizeof(ReachSeatLeasePayload) == 7 * sizeof(uint32_t) &&
+                ReachSeatLeaseKeyValid(leaseKey) &&
+                ReachSeatLeaseKeyEqual(leaseKey, leaseKey) &&
+                !ReachSeatLeaseKeyEqual(leaseKey, otherGeneration) &&
+                !ReachSeatLeaseKeyEqual(leaseKey, otherUnit) &&
+                !ReachSeatLeaseKeyEqual(leaseKey, otherParent) &&
+                !ReachSeatLeaseKeyEqual(leaseKey, otherDefinition) &&
+                !ReachSeatLeaseKeyEqual(leaseKey, otherSeat) &&
+                !ReachSeatLeaseKeyValid(
+                    {0, 0x12340007, 0x23450009, 0x00030021, 3}) &&
+                !ReachSeatLeaseKeyValid(
+                    {37, -1, 0x23450009, 0x00030021, 3}) &&
+                !ReachSeatLeaseKeyValid(
+                    {37, 0x12340007, -1, 0x00030021, 3}) &&
+                !ReachSeatLeaseKeyValid(
+                    {37, 0x12340007, 0x23450009, 0xFFFFFFFFu, 3}) &&
+                !ReachSeatLeaseKeyValid(
+                    {37, 0x12340007, 0x23450009, 0x00030021, 16}),
+                "Reach body-hide lease key preserves generation, both salted handles, definition datum and raw seat");
+            Check(
+                ReachSeatLeaseRetainsHook(
+                    ReachSeatLeaseState::Installing) &&
+                ReachSeatLeaseRetainsHook(ReachSeatLeaseState::Active) &&
+                ReachSeatLeaseRetainsHook(
+                    ReachSeatLeaseState::RestorePending) &&
+                !ReachSeatLeaseRetainsHook(
+                    ReachSeatLeaseState::External) &&
+                !ReachSeatLeaseRetainsHook(ReachSeatLeaseState::Empty) &&
+                !ReachSeatLeaseRetainsHook(
+                    ReachSeatLeaseState::CleanupLocked) &&
+                ReachSeatLeaseOwnsMutation(ReachSeatLeaseState::Active) &&
+                ReachSeatLeaseOwnsMutation(
+                    ReachSeatLeaseState::RestorePending) &&
+                !ReachSeatLeaseOwnsMutation(
+                    ReachSeatLeaseState::Installing) &&
+                ReachSeatLeaseBlocksKey(
+                    ReachSeatLeaseState::External, leaseKey, leaseKey) &&
+                !ReachSeatLeaseBlocksKey(
+                    ReachSeatLeaseState::External, leaseKey, otherSeat) &&
+                ReachSeatLeaseBlocksKey(
+                    ReachSeatLeaseState::Active, leaseKey, otherSeat),
+                "Reach body-hide lease retains teardown ownership only while installing/owned/pending and never retries an external exact key");
+            Check(
+                ReachSeatLeaseCanAcquireCleanupLock(
+                    ReachSeatLeaseState::Empty) &&
+                ReachSeatLeaseCanAcquireCleanupLock(
+                    ReachSeatLeaseState::External) &&
+                !ReachSeatLeaseCanAcquireCleanupLock(
+                    ReachSeatLeaseState::Installing) &&
+                !ReachSeatLeaseCanAcquireCleanupLock(
+                    ReachSeatLeaseState::Active) &&
+                !ReachSeatLeaseCanAcquireCleanupLock(
+                    ReachSeatLeaseState::RestorePending) &&
+                !ReachSeatLeaseCanAcquireCleanupLock(
+                    ReachSeatLeaseState::CleanupLocked) &&
+                ReachSeatLeaseCleanupLocked(
+                    ReachSeatLeaseState::CleanupLocked) &&
+                !ReachSeatLeaseCleanupLocked(
+                    ReachSeatLeaseState::Empty) &&
+                ReachSeatLeaseBlocksKey(
+                    ReachSeatLeaseState::CleanupLocked,
+                    leaseKey, otherSeat),
+                "Reach body-hide cleanup lock races conclusively with Installing on the shared state and blocks every new key");
+            Check(
+                writtenFlags == 0x04020004 &&
+                ReachClassifySeatLeaseRestore(
+                    originalFlags, originalFlags, writtenFlags) ==
+                    ReachSeatLeaseRestoreDisposition::AlreadyOriginal &&
+                ReachClassifySeatLeaseRestore(
+                    writtenFlags, originalFlags, writtenFlags) ==
+                    ReachSeatLeaseRestoreDisposition::RestoreOriginal &&
+                ReachClassifySeatLeaseRestore(
+                    originalFlags ^ 0x40u, originalFlags, writtenFlags) ==
+                    ReachSeatLeaseRestoreDisposition::ExternalWrite &&
+                ReachClassifySeatLeaseRestore(
+                    writtenFlags, writtenFlags, writtenFlags) ==
+                    ReachSeatLeaseRestoreDisposition::AlreadyOriginal,
+                "Reach body-hide restoration writes only exact owned flags and yields to engine/tag changes");
+        }
         // R-V18: entering a Reach seat selects the same native aim feedback
         // under BOTH view-follow settings.
         {
@@ -1229,11 +1423,340 @@ int main()
                     ReachAimFeedbackSource::SeatedCompactFallback &&
                 ReachSelectAimFeedbackSource(false, true, true) ==
                     ReachAimFeedbackSource::OnFootCompact &&
+                ReachAimFeedbackCanDriveReticle(
+                    ReachAimFeedbackSource::SeatedUnitAim) &&
+                !ReachAimFeedbackCanDriveReticle(
+                    ReachAimFeedbackSource::SeatedCompactFallback) &&
+                !ReachAimFeedbackCanDriveReticle(
+                    ReachAimFeedbackSource::OnFootCompact) &&
                 !ReachVehicleSeatAuthorsSteering(
                     ReachVehicleId::Warthog, 0, false) &&
                 ReachVehicleSeatAuthorsSteering(
                     ReachVehicleId::Warthog, 0, true),
                 "Reach unit-aim feedback stays active under both view-follow modes");
+        }
+        // Completed-pair reticle truth is expressed in the final Reach camera
+        // basis. Identity here means Reach world +X is camera forward, world
+        // -Y is camera right and world +Z is camera up.
+        {
+            const float forward[3] = {1.0f, 0.0f, 0.0f};
+            const float up[3] = {0.0f, 0.0f, 1.0f};
+            const float right[3] = {0.0f, -1.0f, 0.0f};
+            float localForward[3]{};
+            float localRight[3]{};
+            float localUp[3]{};
+            const float scaledForward[3] = {2.0f, 0.0f, 0.0f};
+            float localScaledForward[3]{};
+            Check(
+                ReachWorldAimToCameraLocal(
+                    forward, forward, up, localForward) &&
+                ReachWorldAimToCameraLocal(
+                    right, forward, up, localRight) &&
+                ReachWorldAimToCameraLocal(
+                    up, forward, up, localUp) &&
+                ReachWorldAimToCameraLocal(
+                    scaledForward, forward, up, localScaledForward) &&
+                std::fabs(localForward[0]) < 1.0e-6f &&
+                std::fabs(localForward[1]) < 1.0e-6f &&
+                std::fabs(localForward[2] + 1.0f) < 1.0e-6f &&
+                std::fabs(localRight[0] - 1.0f) < 1.0e-6f &&
+                std::fabs(localRight[1]) < 1.0e-6f &&
+                std::fabs(localRight[2]) < 1.0e-6f &&
+                std::fabs(localUp[0]) < 1.0e-6f &&
+                std::fabs(localUp[1] - 1.0f) < 1.0e-6f &&
+                std::fabs(localUp[2]) < 1.0e-6f &&
+                std::fabs(localScaledForward[2] + 1.0f) < 1.0e-6f,
+                "Reach completed-pair aim maps forward/right/up to OpenXR -Z/+X/+Y and normalizes");
+
+            // Non-trivial yaw, pitch and roll: world -> local -> world must
+            // round-trip through the exact F/U/R basis and sign convention.
+            constexpr float yaw = 0.71f;
+            constexpr float pitch = -0.29f;
+            constexpr float roll = 0.23f;
+            const float cy = std::cos(yaw), sy = std::sin(yaw);
+            const float cp = std::cos(pitch), sp = std::sin(pitch);
+            const float cr = std::cos(roll), sr = std::sin(roll);
+            const float rolledForward[3] = {cp * cy, cp * sy, sp};
+            const float rolledUp[3] = {
+                (-sp * cy) * cr + sy * sr,
+                (-sp * sy) * cr - cy * sr,
+                cp * cr};
+            const float rolledRight[3] = {
+                rolledForward[1] * rolledUp[2] -
+                    rolledForward[2] * rolledUp[1],
+                rolledForward[2] * rolledUp[0] -
+                    rolledForward[0] * rolledUp[2],
+                rolledForward[0] * rolledUp[1] -
+                    rolledForward[1] * rolledUp[0]};
+            const float worldAim[3] = {0.2f, -0.7f, 0.6f};
+            float normalizedWorldAim[3]{};
+            float rolledLocal[3]{};
+            float roundTrip[3]{};
+            const bool converted = ReachNormalizeUnitAimingVector(
+                    worldAim, normalizedWorldAim) &&
+                ReachWorldAimToCameraLocal(
+                    worldAim, rolledForward, rolledUp, rolledLocal);
+            if (converted)
+            {
+                for (int component = 0; component < 3; ++component)
+                {
+                    roundTrip[component] =
+                        rolledRight[component] * rolledLocal[0] +
+                        rolledUp[component] * rolledLocal[1] -
+                        rolledForward[component] * rolledLocal[2];
+                }
+            }
+            Check(
+                converted &&
+                std::fabs(roundTrip[0] - normalizedWorldAim[0]) < 1.0e-5f &&
+                std::fabs(roundTrip[1] - normalizedWorldAim[1]) < 1.0e-5f &&
+                std::fabs(roundTrip[2] - normalizedWorldAim[2]) < 1.0e-5f,
+                "Reach camera-local aim round-trips through a rolled yaw/pitch basis");
+
+            const float zero[3] = {};
+            const float nonUnitForward[3] = {1.1f, 0.0f, 0.0f};
+            const float nonOrthogonalUp[3] = {1.0f, 0.0f, 0.0f};
+            const float invalidAim[3] = {
+                std::numeric_limits<float>::quiet_NaN(), 0.0f, 1.0f};
+            const float invalidUp[3] = {
+                0.0f, std::numeric_limits<float>::infinity(), 1.0f};
+            float rejected[3]{};
+            Check(
+                !ReachWorldAimToCameraLocal(
+                    zero, forward, up, rejected) &&
+                !ReachWorldAimToCameraLocal(
+                    invalidAim, forward, up, rejected) &&
+                !ReachWorldAimToCameraLocal(
+                    forward, nonUnitForward, up, rejected) &&
+                !ReachWorldAimToCameraLocal(
+                    forward, forward, nonOrthogonalUp, rejected) &&
+                !ReachWorldAimToCameraLocal(
+                    forward, forward, invalidUp, rejected),
+                "Reach camera-local aim rejects zero/non-finite aim and invalid camera bases");
+        }
+
+        // Admission is exact to one completed prepared serial and one complete
+        // salted seat occupation. View-follow never appears in this decision;
+        // only native SeatedUnitAim may take reticle ownership.
+        {
+            constexpr uint32_t generation = 37;
+            constexpr uint64_t serial = 0x1020304050607080ull;
+            constexpr ReachSeatLeaseKey occupation{
+                generation, 0x12340007, 0x23450009, 0x00030021, 3};
+            ReachReticleAimSample sample{};
+            sample.generation = generation;
+            sample.preparedSerial = serial;
+            sample.source = ReachAimFeedbackSource::SeatedUnitAim;
+            sample.occupation = occupation;
+            sample.cameraLocalDirection[0] = 0.6f;
+            sample.cameraLocalDirection[1] = 0.0f;
+            sample.cameraLocalDirection[2] = -0.8f;
+            Check(
+                ReachReticleAimSampleAdmitted(
+                    sample, generation, serial) &&
+                !ReachReticleAimSampleAdmitted(
+                    sample, generation + 1, serial) &&
+                !ReachReticleAimSampleAdmitted(
+                    sample, generation, serial + 1),
+                "Reach reticle sample admission requires current generation and exact prepared serial");
+
+            ReachReticleAimSample fallback = sample;
+            fallback.source =
+                ReachAimFeedbackSource::SeatedCompactFallback;
+            ReachReticleAimSample onFoot = sample;
+            onFoot.source = ReachAimFeedbackSource::OnFootCompact;
+            ReachReticleAimSample invalidKey = sample;
+            invalidKey.occupation.directParent = -1;
+            ReachReticleAimSample wrongKeyGeneration = sample;
+            wrongKeyGeneration.occupation.generation = generation + 1;
+            ReachReticleAimSample invalidVector = sample;
+            invalidVector.cameraLocalDirection[0] =
+                std::numeric_limits<float>::quiet_NaN();
+            ReachReticleAimSample zeroVector = sample;
+            zeroVector.cameraLocalDirection[0] = 0.0f;
+            zeroVector.cameraLocalDirection[1] = 0.0f;
+            zeroVector.cameraLocalDirection[2] = 0.0f;
+            Check(
+                !ReachReticleAimSampleAdmitted(
+                    fallback, generation, serial) &&
+                !ReachReticleAimSampleAdmitted(
+                    onFoot, generation, serial) &&
+                !ReachReticleAimSampleAdmitted(
+                    invalidKey, generation, serial) &&
+                !ReachReticleAimSampleAdmitted(
+                    wrongKeyGeneration, generation, serial) &&
+                !ReachReticleAimSampleAdmitted(
+                    invalidVector, generation, serial) &&
+                !ReachReticleAimSampleAdmitted(
+                    zeroVector, generation, serial),
+                "Reach reticle sample rejects fallback sources, incomplete full keys and invalid vectors");
+
+            ReachReticleAimSample next = sample;
+            next.occupation.seatIndex = 4;
+            next.cameraLocalDirection[0] = -0.8f;
+            next.cameraLocalDirection[2] = -0.6f;
+            const ReachReticleAimSample afterFailed =
+                ReachReticleAimSampleAfterAttempt(sample, next, false);
+            const ReachReticleAimSample afterCompleted =
+                ReachReticleAimSampleAfterAttempt(sample, next, true);
+            ReachReticleAimSample revocation = next;
+            revocation.source =
+                ReachAimFeedbackSource::SeatedCompactFallback;
+            const ReachReticleAimSample afterCompletedRevocation =
+                ReachReticleAimSampleAfterAttempt(
+                    sample, revocation, true);
+            Check(
+                afterFailed.occupation.seatIndex == 3 &&
+                afterFailed.cameraLocalDirection[0] == 0.6f &&
+                afterCompleted.preparedSerial == serial &&
+                afterCompleted.occupation.seatIndex == 4 &&
+                afterCompleted.cameraLocalDirection[0] == -0.8f &&
+                ReachReticleAimSampleAdmitted(
+                    afterCompleted, generation, serial) &&
+                afterCompletedRevocation.occupation.seatIndex == 4 &&
+                !ReachReticleAimSampleAdmitted(
+                    afterCompletedRevocation, generation, serial),
+                "Reach reticle publication preserves a prior pair across failure and replaces it on every later completed same-serial pair");
+        }
+
+        // Personal-weapon origin substitution requires one fresh, matching
+        // full-salt seat/eye pair. The 100 ms boundary is admitted exactly;
+        // every stale, mismatched or vehicle-barrel case remains stock.
+        {
+            constexpr uint32_t generation = 41;
+            constexpr uint64_t nowMs = 5000;
+            constexpr ReachSeatLeaseKey occupation{
+                generation, 0x12340007, 0x23450009, 0x00030021, 3};
+            ReachShotOriginSample sample{};
+            sample.currentGeneration = generation;
+            sample.nowMs = nowMs;
+            sample.occupationSampleMs = nowMs - kReachShotOriginFreshMs;
+            sample.renderedEyeSampleMs = nowMs - kReachShotOriginFreshMs;
+            sample.renderedEyePreparedSerial = 77;
+            sample.active = true;
+            sample.allowsWeapons = true;
+            sample.firingUnitIndex = 7;
+            sample.occupation = occupation;
+            sample.renderedEye = occupation;
+            sample.renderedEyePosition[0] = 1.0f;
+            sample.renderedEyePosition[1] = 2.0f;
+            sample.renderedEyePosition[2] = 3.0f;
+            Check(
+                ReachShotOriginSampleAdmitted(sample),
+                "Reach personal-shot origin admits the exact fresh full-key boundary");
+            ReachShotOriginSample saltedFiringArgument = sample;
+            saltedFiringArgument.firingUnitIndex = 0x7ABC0007;
+            Check(
+                ReachShotOriginSampleAdmitted(saltedFiringArgument),
+                "Reach personal-shot origin matches the engine firing argument by object index");
+
+            ReachShotOriginSample staleOccupation = sample;
+            staleOccupation.occupationSampleMs =
+                nowMs - kReachShotOriginFreshMs - 1;
+            ReachShotOriginSample staleEye = sample;
+            staleEye.renderedEyeSampleMs =
+                nowMs - kReachShotOriginFreshMs - 1;
+            ReachShotOriginSample futureEye = sample;
+            futureEye.renderedEyeSampleMs = nowMs + 1;
+            ReachShotOriginSample wrongGeneration = sample;
+            wrongGeneration.currentGeneration = generation + 1;
+            ReachShotOriginSample wrongSalt = sample;
+            wrongSalt.renderedEye.unitHandle ^= 0x00010000;
+            ReachShotOriginSample wrongParent = sample;
+            wrongParent.renderedEye.directParent ^= 0x00010000;
+            ReachShotOriginSample wrongDefinition = sample;
+            wrongDefinition.renderedEye.definitionDatum ^= 1;
+            ReachShotOriginSample wrongSeat = sample;
+            wrongSeat.renderedEye.seatIndex = 4;
+            ReachShotOriginSample barrelSeat = sample;
+            barrelSeat.allowsWeapons = false;
+            ReachShotOriginSample wrongUnit = sample;
+            wrongUnit.firingUnitIndex = 8;
+            ReachShotOriginSample noCompletedPair = sample;
+            noCompletedPair.renderedEyePreparedSerial = 0;
+            ReachShotOriginSample invalidEye = sample;
+            invalidEye.renderedEyePosition[1] =
+                std::numeric_limits<float>::quiet_NaN();
+            Check(
+                !ReachShotOriginSampleAdmitted(staleOccupation) &&
+                !ReachShotOriginSampleAdmitted(staleEye) &&
+                !ReachShotOriginSampleAdmitted(futureEye) &&
+                !ReachShotOriginSampleAdmitted(wrongGeneration) &&
+                !ReachShotOriginSampleAdmitted(wrongSalt) &&
+                !ReachShotOriginSampleAdmitted(wrongParent) &&
+                !ReachShotOriginSampleAdmitted(wrongDefinition) &&
+                !ReachShotOriginSampleAdmitted(wrongSeat) &&
+                !ReachShotOriginSampleAdmitted(barrelSeat) &&
+                !ReachShotOriginSampleAdmitted(wrongUnit) &&
+                !ReachShotOriginSampleAdmitted(noCompletedPair) &&
+                !ReachShotOriginSampleAdmitted(invalidEye),
+                "Reach personal-shot origin rejects stale, mismatched, barrel and invalid samples");
+        }
+
+        // The same validated stereo centre supplies both native-aim rotation
+        // and ray origin. q/-q sign equivalence and symmetric eye cant must not
+        // create a false centre rotation.
+        {
+            const float identity[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+            const float negativeScaledIdentity[4] = {
+                0.0f, 0.0f, 0.0f, -2.0f};
+            const float leftPosition[3] = {-0.032f, 1.5f, -2.0f};
+            const float rightPosition[3] = {0.032f, 1.5f, -2.0f};
+            ReachStereoCenterPose signAligned{};
+            Check(
+                ReachBuildStereoCenterPose(
+                    identity, leftPosition,
+                    negativeScaledIdentity, rightPosition,
+                    signAligned) &&
+                std::fabs(signAligned.orientation[0]) < 1.0e-6f &&
+                std::fabs(signAligned.orientation[1]) < 1.0e-6f &&
+                std::fabs(signAligned.orientation[2]) < 1.0e-6f &&
+                std::fabs(signAligned.orientation[3] - 1.0f) < 1.0e-6f &&
+                std::fabs(signAligned.position[0]) < 1.0e-6f &&
+                std::fabs(signAligned.position[1] - 1.5f) < 1.0e-6f &&
+                std::fabs(signAligned.position[2] + 2.0f) < 1.0e-6f,
+                "Reach stereo centre aligns q/-q and uses the exact eye-position midpoint");
+
+            constexpr float halfCant = 0.10f;
+            const float cantSin = std::sin(halfCant);
+            const float cantCos = std::cos(halfCant);
+            const float leftCant[4] = {
+                0.0f, cantSin, 0.0f, cantCos};
+            const float rightCant[4] = {
+                0.0f, -cantSin, 0.0f, cantCos};
+            ReachStereoCenterPose symmetricCant{};
+            Check(
+                ReachBuildStereoCenterPose(
+                    leftCant, leftPosition, rightCant, rightPosition,
+                    symmetricCant) &&
+                std::fabs(symmetricCant.orientation[0]) < 1.0e-6f &&
+                std::fabs(symmetricCant.orientation[1]) < 1.0e-6f &&
+                std::fabs(symmetricCant.orientation[2]) < 1.0e-6f &&
+                std::fabs(symmetricCant.orientation[3] - 1.0f) < 1.0e-6f,
+                "Reach stereo centre averages symmetric canted-eye orientations without bias");
+
+            const float zeroQuaternion[4] = {};
+            const float quarterTurnX[4] = {1.0f, 0.0f, 0.0f, 0.0f};
+            const float invalidQuaternion[4] = {
+                0.0f, 0.0f,
+                std::numeric_limits<float>::quiet_NaN(), 1.0f};
+            const float invalidPosition[3] = {
+                0.0f, std::numeric_limits<float>::infinity(), 0.0f};
+            ReachStereoCenterPose rejected{};
+            Check(
+                !ReachBuildStereoCenterPose(
+                    zeroQuaternion, leftPosition,
+                    identity, rightPosition, rejected) &&
+                !ReachBuildStereoCenterPose(
+                    identity, leftPosition,
+                    quarterTurnX, rightPosition, rejected) &&
+                !ReachBuildStereoCenterPose(
+                    invalidQuaternion, leftPosition,
+                    identity, rightPosition, rejected) &&
+                !ReachBuildStereoCenterPose(
+                    identity, invalidPosition,
+                    identity, rightPosition, rejected),
+                "Reach stereo centre rejects zero/non-finite and ambiguous eye poses");
         }
         ReachSeatCameraBasis reachBasis{};
         reachBasis.forward[0] = 1.0f;
@@ -4625,6 +5148,140 @@ int main()
               ConfigReachSeatTrimSlot(12, -1) == -1 &&
               ConfigReachSeatTrimSlot(12, 16) == -1,
         "Reach vehicle names and raw seat indices map to a bounded independent bank");
+    // The completed Blender scene is the standalone product default, not a
+    // Steam-only side effect of whichever config happened to be edited.
+    {
+        const Config fresh;
+        bool allReachShippedRowsApplied =
+            kConfigReachShippedSeatTrimCount == 25;
+        for (const ConfigReachShippedSeatTrim& trim :
+             kConfigReachShippedSeatTrims)
+        {
+            const int slot =
+                ConfigReachSeatTrimSlot(trim.vehicleId, trim.seatIndex);
+            allReachShippedRowsApplied =
+                allReachShippedRowsApplied && slot >= 0 &&
+                fresh.reach_vehicle_cam_forward_set[slot] &&
+                fresh.reach_vehicle_cam_up_set[slot] &&
+                fresh.reach_vehicle_cam_right_set[slot] &&
+                ConfigReachSeatCamForward(fresh, slot) == trim.forward &&
+                ConfigReachSeatCamUp(fresh, slot) == trim.up &&
+                ConfigReachSeatCamRight(fresh, slot) == trim.right;
+        }
+        const int scorpion0 = ConfigReachSeatTrimSlot(14, 0);
+        const int shadePlasma0 = ConfigReachSeatTrimSlot(17, 0);
+        const int shadeFlak0 = ConfigReachSeatTrimSlot(18, 0);
+        const int plasmaTurret0 = ConfigReachSeatTrimSlot(19, 0);
+        const int sabre0 = ConfigReachSeatTrimSlot(13, 0);
+        Check(allReachShippedRowsApplied &&
+                  ConfigReachSeatCamUp(fresh, scorpion0) == 2.69f &&
+                  ConfigReachSeatCamUp(fresh, shadePlasma0) == 2.41f &&
+                  ConfigReachSeatCamForward(fresh, shadeFlak0) == 0.11f &&
+                  ConfigReachSeatCamUp(fresh, shadeFlak0) == 2.27f &&
+                  ConfigReachSeatCamUp(fresh, plasmaTurret0) == 0.24f &&
+                  ConfigReachSeatCamForward(fresh, sabre0) == 42.43f &&
+                  ConfigReachSeatCamUp(fresh, sabre0) == -8.18f,
+            "All 25 user-authored Reach Blender placements ship as built-in defaults");
+
+        {
+            std::ofstream file(primary);
+            file << "config_version = 5\n";
+        }
+        ConfigLoad(primary.c_str());
+        ConfigSave();
+        const std::string shippedReachConfig = ReadTextFile(primary);
+        Check(CountText(shippedReachConfig,
+                  "\nvehicle_cam_up_m_reach_scorpion_seat0 = 2.69") == 1 &&
+                  CountText(shippedReachConfig,
+                  "\nvehicle_cam_up_m_reach_shade_plasma_seat0 = 2.41") == 1 &&
+                  CountText(shippedReachConfig,
+                  "\nvehicle_cam_forward_m_reach_shade_flak_seat0 = 0.11") == 1 &&
+                  CountText(shippedReachConfig,
+                  "\nvehicle_cam_up_m_reach_plasma_turret_seat0 = 0.24") == 1 &&
+                  CountText(shippedReachConfig,
+                  "\nvehicle_cam_forward_m_reach_sabre_seat0 = 42.43") == 1,
+            "Saving a bare config materializes the Reach Blender camera defaults");
+        ConfigLoad(primary.c_str());
+        Check(ConfigReachSeatCamUp(g_config, scorpion0) == 2.69f &&
+                  ConfigReachSeatCamUp(g_config, shadePlasma0) == 2.41f &&
+                  ConfigReachSeatCamForward(g_config, shadeFlak0) == 0.11f &&
+                  ConfigReachSeatCamUp(g_config, shadeFlak0) == 2.27f &&
+                  ConfigReachSeatCamUp(g_config, plasmaTurret0) == 0.24f &&
+                  ConfigReachSeatCamForward(g_config, sabre0) == 42.43f &&
+                  ConfigReachSeatCamUp(g_config, sabre0) == -8.18f,
+            "Reach shipped camera defaults survive a save/load round trip");
+
+        // F1's seat reset is not representable by deleting numeric keys now
+        // that absence selects the shipped Blender row. The explicit
+        // tombstone must survive save/load and suppress all three numeric axes.
+        g_config.vehicle_cam_forward_m = 0.34f;
+        g_config.vehicle_cam_up_m = -0.27f;
+        g_config.vehicle_cam_right_m = 0.19f;
+        ConfigReachSeatUseUniversalTrim(g_config, scorpion0);
+        Check(g_config.reach_vehicle_cam_use_universal[scorpion0] &&
+                  !g_config.reach_vehicle_cam_forward_set[scorpion0] &&
+                  !g_config.reach_vehicle_cam_up_set[scorpion0] &&
+                  !g_config.reach_vehicle_cam_right_set[scorpion0] &&
+                  ConfigReachSeatCamForward(g_config, scorpion0) == 0.34f &&
+                  ConfigReachSeatCamUp(g_config, scorpion0) == -0.27f &&
+                  ConfigReachSeatCamRight(g_config, scorpion0) == 0.19f,
+            "Reach Back to universal clears all axes and displays the universal triplet");
+        ConfigSave();
+        const std::string universalReachConfig = ReadTextFile(primary);
+        Check(CountText(universalReachConfig,
+                  "\nvehicle_cam_use_universal_reach_scorpion_seat0 = 1") == 1 &&
+                  CountText(universalReachConfig,
+                  "\nvehicle_cam_forward_m_reach_scorpion_seat0") == 0 &&
+                  CountText(universalReachConfig,
+                  "\nvehicle_cam_up_m_reach_scorpion_seat0") == 0 &&
+                  CountText(universalReachConfig,
+                  "\nvehicle_cam_right_m_reach_scorpion_seat0") == 0,
+            "Saving a Reach universal reset writes one tombstone and no numeric seat rows");
+        ConfigLoad(primary.c_str());
+        Check(g_config.reach_vehicle_cam_use_universal[scorpion0] &&
+                  !g_config.reach_vehicle_cam_forward_set[scorpion0] &&
+                  !g_config.reach_vehicle_cam_up_set[scorpion0] &&
+                  !g_config.reach_vehicle_cam_right_set[scorpion0] &&
+                  ConfigReachSeatCamForward(g_config, scorpion0) == 0.34f &&
+                  ConfigReachSeatCamUp(g_config, scorpion0) == -0.27f &&
+                  ConfigReachSeatCamRight(g_config, scorpion0) == 0.19f,
+            "Reach Back to universal survives a config reload");
+
+        // This is the pure state transition used immediately before any of the
+        // three F1 sliders writes its changed axis.
+        ConfigReachSeatBeginTrimEdit(g_config, scorpion0);
+        g_config.reach_vehicle_cam_forward_v[scorpion0] = 0.88f;
+        Check(!g_config.reach_vehicle_cam_use_universal[scorpion0] &&
+                  g_config.reach_vehicle_cam_forward_set[scorpion0] &&
+                  g_config.reach_vehicle_cam_up_set[scorpion0] &&
+                  g_config.reach_vehicle_cam_right_set[scorpion0] &&
+                  ConfigReachSeatCamForward(g_config, scorpion0) == 0.88f &&
+                  ConfigReachSeatCamUp(g_config, scorpion0) == -0.27f &&
+                  ConfigReachSeatCamRight(g_config, scorpion0) == 0.19f,
+            "The first F1 move after reset preserves the other displayed universal axes");
+        ConfigSave();
+        ConfigLoad(primary.c_str());
+        Check(!g_config.reach_vehicle_cam_use_universal[scorpion0] &&
+                  ConfigReachSeatCamForward(g_config, scorpion0) == 0.88f &&
+                  ConfigReachSeatCamUp(g_config, scorpion0) == -0.27f &&
+                  ConfigReachSeatCamRight(g_config, scorpion0) == 0.19f,
+            "The first post-reset Reach slider triplet survives save/load");
+
+        // A hand-edited or stale file can contain both shapes. Any valid
+        // numeric row is the explicit override regardless of line ordering.
+        {
+            std::ofstream file(primary);
+            file << "config_version = 5\n";
+            file << "vehicle_cam_forward_m_reach_scorpion_seat0 = 0.44\n";
+            file << "vehicle_cam_use_universal_reach_scorpion_seat0 = 1\n";
+        }
+        ConfigLoad(primary.c_str());
+        Check(!g_config.reach_vehicle_cam_use_universal[scorpion0] &&
+                  ConfigReachSeatCamForward(g_config, scorpion0) == 0.44f &&
+                  ConfigReachSeatCamUp(g_config, scorpion0) == 2.69f &&
+                  ConfigReachSeatCamRight(g_config, scorpion0) == 0.00f,
+            "A valid Reach numeric seat key overrides a tombstone independent of file order");
+    }
     {
         std::ofstream file(primary);
         file << "config_version = 5\n";
@@ -4646,6 +5303,7 @@ int main()
     const int reachGhost0 = ConfigReachSeatTrimSlot(3, 0);
     const int reachWraithGunner0 = ConfigReachSeatTrimSlot(6, 0);
     const int reachHogChaingun0 = ConfigReachSeatTrimSlot(9, 0);
+    const int reachMacCannon0 = ConfigReachSeatTrimSlot(21, 0);
     const int reachCart15 = ConfigReachSeatTrimSlot(16, 15);
     Check(ConfigReachSeatCamForward(g_config, reachFalcon10) == 0.42f &&
               ConfigReachSeatCamUp(g_config, reachSpaceBanshee0) == -0.23f &&
@@ -4658,8 +5316,9 @@ int main()
                   kReachVehicleCamUpMin &&
               ConfigReachSeatCamRight(g_config, reachCart15) ==
                   kReachVehicleCamRightMax &&
-              ConfigReachSeatCamForward(g_config, reachBanshee0) == 0.20f &&
-              !g_config.reach_vehicle_cam_up_set[reachGhost0] &&
+              ConfigReachSeatCamForward(g_config, reachMacCannon0) == 0.20f &&
+              g_config.reach_vehicle_cam_up_set[reachGhost0] &&
+              ConfigReachSeatCamUp(g_config, reachGhost0) == 1.13f &&
               ConfigSeatCamForward(g_config, hogDriver) != 0.42f &&
               ConfigOdstSeatCamForward(g_config,
                   ConfigOdstSeatTrimSlot(2, 0, false)) != 0.42f,
@@ -6713,6 +7372,45 @@ int main()
                 approx(sideBasis[0], 0.0f) &&
                 approx(sideBasis[1], 1.0f) &&
                 approx(sideBasis[2], 0.0f);
+            float composedAim[9], recoveredYaw = 0.0f,
+                recoveredPitch = 0.0f;
+            constexpr float aimHullYaw = 0.7f;
+            constexpr float aimHullPitch = 0.25f;
+            constexpr float aimGameYawRef = 1.1f;
+            constexpr float aimTrackedYaw = -0.4f;
+            constexpr float aimTrackedPitch = 0.2f;
+            const bool inverseFollowSafe =
+                Halo3ComposeRollStableFollowBasis(
+                    aimHullYaw, aimHullPitch, aimGameYawRef,
+                    aimTrackedYaw, aimTrackedPitch, 0.0f, composedAim) &&
+                Halo3InverseRollStableFollowForward(
+                    composedAim, aimHullYaw, aimHullPitch, aimGameYawRef,
+                    recoveredYaw, recoveredPitch) &&
+                approx(recoveredYaw, aimTrackedYaw) &&
+                approx(recoveredPitch, aimTrackedPitch);
+            float flatAim[9], flatYaw = 0.0f, flatPitch = 0.0f;
+            constexpr float flatHullYaw = -0.3f;
+            constexpr float flatGameYawRef = 0.4f;
+            constexpr float flatTrackedYaw = 0.55f;
+            constexpr float flatTrackedPitch = -0.25f;
+            const bool inverseFlatSafe =
+                Halo3ComposeRollStableFollowBasis(
+                    flatHullYaw, 0.0f, flatGameYawRef, flatTrackedYaw,
+                    flatTrackedPitch, 0.0f, flatAim) &&
+                Halo3InverseRollStableFollowForward(
+                    flatAim, flatHullYaw, 0.0f, flatGameYawRef,
+                    flatYaw, flatPitch) &&
+                approx(flatYaw, flatTrackedYaw) &&
+                approx(flatPitch, flatTrackedPitch);
+            const float zeroAim[3] = {};
+            const bool inverseRejectsZero =
+                !Halo3InverseRollStableFollowForward(
+                    zeroAim, 0.0f, 0.0f, 0.0f,
+                    recoveredYaw, recoveredPitch);
+            const bool inverseRejectsNonfinite =
+                !Halo3InverseRollStableFollowForward(
+                    badNose, 0.0f, 0.0f, 0.0f,
+                    recoveredYaw, recoveredPitch);
             const bool pitchSeatPolicy =
                 Halo3SeatFollowsPitch(Halo3VehicleId::Warthog, 0, false) &&
                 Halo3SeatFollowsPitch(Halo3VehicleId::Warthog, 1, false) &&
@@ -6723,6 +7421,11 @@ int main()
                 !Halo3SeatFollowsPitch(Halo3VehicleId::Unknown, 0, false);
             Check(pitchSafe && hillSafe && sideSafe && pitchSeatPolicy,
                   "Vehicle pitch follow is roll-stable and seat-safe");
+            const bool inverseSafe = inverseFollowSafe &&
+                inverseFlatSafe && inverseRejectsZero &&
+                inverseRejectsNonfinite;
+            Check(inverseSafe,
+                  "World-space vehicle aim inverts to tracked yaw/pitch");
         }
 
         // C9 steering ownership. The seat that authors steering must be

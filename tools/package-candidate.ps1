@@ -7,9 +7,10 @@ param(
     [switch]$Clean
 )
 
-# Halo MCC VR is one cumulative build: Halo 3 + ODST + Halo: Reach, with Reach
-# admitted only as one complete parity transaction. There is one `release` preset and no Reach
-# on/off switch. This stages one unaccepted local candidate under out/candidates
+# Halo MCC VR is one cumulative build: Halo 3 + ODST + Halo: Reach. Reach's
+# camera core is permanent while optional player-visible features fail open
+# independently. There is one release preset and no Reach on/off switch. This
+# stages one unaccepted local candidate under out/candidates
 # after a passing build and tests, then automatically installs those
 # exact manifest-verified bytes into the dedicated MCC mod directory. It never
 # launches MCC and never labels rebuilt bytes as an accepted release.
@@ -132,7 +133,7 @@ try {
         (Get-FileHash -LiteralPath $launcherPath -Algorithm SHA256).Hash
 
     $manifest = [ordered]@{
-        schema_version = 6
+        schema_version = 7
         status = 'UNTESTED_LOCAL_CANDIDATE'
         accepted = $false
         package_id = $packageId
@@ -152,7 +153,8 @@ try {
             launches_mcc = $false
             changes_config = $false
         }
-        # Reach is one permanent, all-or-nothing per-eye parity transaction.
+        # Reach support is permanent, while player-visible optional features
+        # fail open independently and never disarm the working camera core.
         reach_permanent = $true
         reach_controller_input_enabled = $true
         reach_render_candidate_compiled = $true
@@ -169,13 +171,24 @@ try {
         reach_procedural_crosshair_substitute_enabled = $false
         reach_native_hud_layout_enabled = $false
         reach_projectile_alignment_enabled = $false
+        reach_vehicle_view_follow_off_preserved = $true
+        reach_vehicle_view_follow_render_matched_enabled = $true
+        reach_vehicle_view_follow_refresh_invariant = $true
+        reach_vehicle_blender_camera_defaults_enabled = $true
+        reach_vehicle_retail_camera_aliases_enabled = $true
+        reach_vehicle_body_hide_interval_lease_enabled = $true
+        reach_native_seated_aim_reticle_enabled = $true
+        reach_personal_weapon_rendered_eye_origin_enabled = $true
+        reach_vehicle_barrel_origin_alignment_enabled = $false
+        reach_vehicle_barrel_origin_policy = 'stock'
+        reach_workshop_content_dependency = $false
         reach_fp_nested_camera_workspace = $true
         reach_fp_world_projection_execution_status = $true
         reach_forced_floating_hands = $true
         reach_copyresource_enabled = $true
         reach_engine_memory_writes_enabled = $true
         reach_runtime_hooks_enabled = $true
-        base_release = 'MCC_VR_ALPHA_0.2.2'
+        base_release = 'MCC_VR_ALPHA_0.3.1'
         files = [ordered]@{
             'halo3xr.dll' = [ordered]@{
                 bytes = $dll.Length
@@ -186,7 +199,7 @@ try {
                 sha256 = $launcherHash
             }
         }
-        note = 'Reach temporarily forces independently controller-bound floating hands and adds the mandatory HREK-authored class-2 crosshair transaction. Full HUD layout and projectile alignment are not included. Not accepted until this exact DLL hash passes authored red/green crosshair, Reach Spartan/Elite, lifecycle, and Halo 3/ODST regression testing.'
+        note = 'Cumulative Reach vehicle bundle: accepted View Follow OFF is preserved; View Follow ON uses the render-matched carrier basis with no refresh-rate filter; all 25 user-authored Blender camera placements plus exact retail aliases are embedded; and the native seat-bit lease hides the player body across the stereo pair and inter-frame interval. Native seated unit aim drives the Reach reticle immediately with either View Follow option; allows-weapons personal shots use the completed rendered eye, while every vehicle barrel origin remains stock. No Workshop content is required, activated, copied or redistributed. Full HUD layout and universal projectile alignment are not included. Not accepted until this exact DLL hash passes 72-144 Hz, both View Follow options, camera placement, body, authored red/green crosshair, Reach Spartan/Elite, seated personal/mounted/Covenant-turret weapon, lifecycle, and required regression tests.'
     }
 
     $manifestPath = Join-Path $packageDir 'CANDIDATE-MANIFEST.json'

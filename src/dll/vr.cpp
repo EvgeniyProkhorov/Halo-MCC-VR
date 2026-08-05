@@ -39,6 +39,7 @@
 #include "../common/cutscene_theater_logic.h"
 #include "../common/frame_pacing_logic.h"
 #include "../common/input_logic.h"
+#include "../common/reach_vehicle_logic.h"
 #include "../common/scope_logic.h"
 
 extern "C" IMAGE_DOS_HEADER __ImageBase;
@@ -8042,6 +8043,60 @@ float4 ps_scope_linearize(VSOut i):SV_Target { return paint(i.uv,true); }
                             const XrVector3f aimRay = Rotate(
                                 g_reticleAimPose.orientation, {0.0f,0.0f,-1.0f});
                             float aimDir[3] = {aimRay.x,aimRay.y,aimRay.z};
+                            ReachStereoCenterPose reachCenter{};
+                            bool reachNativeAim = false;
+                            if (reachTitle && projection.viewCount == 2 &&
+                                projectionViews.size() == 2)
+                            {
+                                const XrPosef& left =
+                                    projectionViews[0].pose;
+                                const XrPosef& right =
+                                    projectionViews[1].pose;
+                                const float leftQuaternion[4] = {
+                                    left.orientation.x, left.orientation.y,
+                                    left.orientation.z, left.orientation.w};
+                                const float rightQuaternion[4] = {
+                                    right.orientation.x, right.orientation.y,
+                                    right.orientation.z, right.orientation.w};
+                                const float leftPosition[3] = {
+                                    left.position.x, left.position.y,
+                                    left.position.z};
+                                const float rightPosition[3] = {
+                                    right.position.x, right.position.y,
+                                    right.position.z};
+                                float cameraLocalAim[3]{};
+                                if (ReachBuildStereoCenterPose(
+                                        leftQuaternion, leftPosition,
+                                        rightQuaternion, rightPosition,
+                                        reachCenter) &&
+                                    Game_GetReachVehicleReticleAimDirection(
+                                        g_preparedFrame.serial,
+                                        cameraLocalAim))
+                                {
+                                    const XrVector3f rotated = Rotate(
+                                        {reachCenter.orientation[0],
+                                         reachCenter.orientation[1],
+                                         reachCenter.orientation[2],
+                                         reachCenter.orientation[3]},
+                                        {cameraLocalAim[0],
+                                         cameraLocalAim[1],
+                                         cameraLocalAim[2]});
+                                    const float lengthSquared =
+                                        rotated.x * rotated.x +
+                                        rotated.y * rotated.y +
+                                        rotated.z * rotated.z;
+                                    if (std::isfinite(lengthSquared) &&
+                                        lengthSquared > 1.0e-8f)
+                                    {
+                                        const float inverseLength =
+                                            1.0f / sqrtf(lengthSquared);
+                                        aimDir[0] = rotated.x * inverseLength;
+                                        aimDir[1] = rotated.y * inverseLength;
+                                        aimDir[2] = rotated.z * inverseLength;
+                                        reachNativeAim = true;
+                                    }
+                                }
+                            }
                             // A vehicle seat bounds the weapon to a cone around
                             // the hull, so a hand outside it asks for an angle
                             // the engine will never reach. While that limit is
@@ -8049,7 +8104,8 @@ float4 ps_scope_linearize(VSOut i):SV_Target { return paint(i.uv,true); }
                             // reticle is meant to be the truth, and this is the
                             // one case where the hand ray is not.
                             float clampedAim[3];
-                            if (Game_GetClampedAimDirection(clampedAim))
+                            if (!reachNativeAim &&
+                                Game_GetClampedAimDirection(clampedAim))
                             {
                                 aimDir[0] = clampedAim[0];
                                 aimDir[1] = clampedAim[1];
@@ -8081,10 +8137,23 @@ float4 ps_scope_linearize(VSOut i):SV_Target { return paint(i.uv,true); }
                                 {{0, 0}, {(int32_t)kReticleSize, (int32_t)kReticleSize}};
                             reticleQuad.subImage.imageArrayIndex = 0;
                             reticleQuad.pose.orientation = q;
+                            XrVector3f reticleOrigin =
+                                g_reticleAimPose.position;
+                            if (reachNativeAim)
+                            {
+                                // The direction and origin share one validated
+                                // predicted-display-time stereo-center pose.
+                                // Vehicle barrels retain their native origin
+                                // and therefore their honest close parallax.
+                                reticleOrigin = {
+                                    reachCenter.position[0],
+                                    reachCenter.position[1],
+                                    reachCenter.position[2]};
+                            }
                             reticleQuad.pose.position = {
-                                g_reticleAimPose.position.x + aimDir[0] * dist,
-                                g_reticleAimPose.position.y + aimDir[1] * dist,
-                                g_reticleAimPose.position.z + aimDir[2] * dist};
+                                reticleOrigin.x + aimDir[0] * dist,
+                                reticleOrigin.y + aimDir[1] * dist,
+                                reticleOrigin.z + aimDir[2] * dist};
                             const float w = 2.0f * dist *
                                 tanf(g_config.crosshair_size_deg * 0.5f * 0.0174533f);
                             reticleQuad.size = {w, w};

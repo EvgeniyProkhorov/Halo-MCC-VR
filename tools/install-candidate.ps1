@@ -103,9 +103,10 @@ $repoStatus = @(& git -C $repoRoot status --porcelain=v1 --untracked-files=norma
 if ($LASTEXITCODE -ne 0 -or $repoStatus.Count -ne 0) {
     throw 'Repository is dirty; refusing automatic deployment.'
 }
-if ([int]$manifest.schema_version -ne 6 -or
+if ([int]$manifest.schema_version -ne 7 -or
         [string]$manifest.status -cne 'UNTESTED_LOCAL_CANDIDATE' -or
         $manifest.accepted -ne $false -or
+        [string]$manifest.base_release -cne 'MCC_VR_ALPHA_0.3.1' -or
         [string]$manifest.package_id -cne $packageId -or
         [string]$manifest.source_commit -notmatch '^[0-9a-f]{40}$' -or
         [string]$manifest.source_commit -cne $head -or
@@ -126,6 +127,17 @@ if ([int]$manifest.schema_version -ne 6 -or
         $manifest.reach_fp_nested_camera_workspace -ne $true -or
         $manifest.reach_fp_world_projection_execution_status -ne $true -or
         $manifest.reach_forced_floating_hands -ne $true -or
+        $manifest.reach_vehicle_view_follow_off_preserved -ne $true -or
+        $manifest.reach_vehicle_view_follow_render_matched_enabled -ne $true -or
+        $manifest.reach_vehicle_view_follow_refresh_invariant -ne $true -or
+        $manifest.reach_vehicle_blender_camera_defaults_enabled -ne $true -or
+        $manifest.reach_vehicle_retail_camera_aliases_enabled -ne $true -or
+        $manifest.reach_vehicle_body_hide_interval_lease_enabled -ne $true -or
+        $manifest.reach_native_seated_aim_reticle_enabled -ne $true -or
+        $manifest.reach_personal_weapon_rendered_eye_origin_enabled -ne $true -or
+        $manifest.reach_vehicle_barrel_origin_alignment_enabled -ne $false -or
+        [string]$manifest.reach_vehicle_barrel_origin_policy -cne 'stock' -or
+        $manifest.reach_workshop_content_dependency -ne $false -or
         $manifest.reach_runtime_hooks_enabled -ne $true) {
     throw 'Candidate manifest identity or cumulative-title contract is invalid.'
 }

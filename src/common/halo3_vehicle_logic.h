@@ -1273,6 +1273,77 @@ inline bool Halo3ComposeRollStableFollowBasis(
     return true;
 }
 
+// Dormant algebraic inverse retained from the pre-package Reach reticle draft.
+// The active reticle path deliberately does not use it: it projects world aim
+// through the final completed compact-camera basis, which already includes
+// pitch trim, View Follow, roll and headset smoothing. Keeping this pure helper
+// tested records the rejected draft's math without putting it on a hot path.
+inline bool Halo3InverseRollStableFollowForward(
+    const float worldForward[3], float hullYaw, float hullPitch,
+    float gameYawRef, float& outTrackedYawDelta, float& outTrackedPitch)
+{
+    if (!worldForward || !std::isfinite(hullYaw) ||
+        !std::isfinite(hullPitch) || !std::isfinite(gameYawRef) ||
+        !std::isfinite(worldForward[0]) ||
+        !std::isfinite(worldForward[1]) ||
+        !std::isfinite(worldForward[2]))
+    {
+        return false;
+    }
+
+    const float worldLengthSquared =
+        worldForward[0] * worldForward[0] +
+        worldForward[1] * worldForward[1] +
+        worldForward[2] * worldForward[2];
+    if (!std::isfinite(worldLengthSquared) || worldLengthSquared < 1.0e-8f)
+        return false;
+    const float inverseWorldLength = 1.0f / std::sqrt(worldLengthSquared);
+    const float normalizedWorld[3] = {
+        worldForward[0] * inverseWorldLength,
+        worldForward[1] * inverseWorldLength,
+        worldForward[2] * inverseWorldLength};
+
+    float hullBasis[9];
+    if (!Halo3ComposeRollStableFollowBasis(
+            hullYaw, hullPitch, hullYaw, 0.0f, 0.0f, 0.0f, hullBasis))
+    {
+        return false;
+    }
+
+    // Basis columns are forward, left, up, so H^-1 is H transpose.
+    float local[3] = {
+        normalizedWorld[0] * hullBasis[0] +
+            normalizedWorld[1] * hullBasis[1] +
+            normalizedWorld[2] * hullBasis[2],
+        normalizedWorld[0] * hullBasis[3] +
+            normalizedWorld[1] * hullBasis[4] +
+            normalizedWorld[2] * hullBasis[5],
+        normalizedWorld[0] * hullBasis[6] +
+            normalizedWorld[1] * hullBasis[7] +
+            normalizedWorld[2] * hullBasis[8]};
+    const float localLengthSquared =
+        local[0] * local[0] + local[1] * local[1] + local[2] * local[2];
+    if (!std::isfinite(localLengthSquared) || localLengthSquared < 1.0e-8f)
+        return false;
+    const float inverseLocalLength = 1.0f / std::sqrt(localLengthSquared);
+    local[0] *= inverseLocalLength;
+    local[1] *= inverseLocalLength;
+    local[2] *= inverseLocalLength;
+
+    const float localYaw = std::atan2(local[1], local[0]);
+    const float clampedZ = local[2] < -1.0f
+        ? -1.0f
+        : (local[2] > 1.0f ? 1.0f : local[2]);
+    const float trackedYawDelta = Halo3WrapPi(
+        localYaw - Halo3WrapPi(gameYawRef - hullYaw));
+    const float trackedPitch = std::asin(clampedZ);
+    if (!std::isfinite(trackedYawDelta) || !std::isfinite(trackedPitch))
+        return false;
+    outTrackedYawDelta = trackedYawDelta;
+    outTrackedPitch = trackedPitch;
+    return true;
+}
+
 inline bool Halo3TransformBasisVector(const float basis[9],
                                       const float local[3], float out[3])
 {

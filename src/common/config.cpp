@@ -12,9 +12,10 @@
 
 Config g_config;
 
-// The maintainer's headset-tuned seat placements become the built-in defaults,
-// so a config file that predates a key is still tuned rather than bare. An
-// entry naming a seat the slot table cannot key is skipped rather than written
+// Shipped per-seat placements become built-in defaults, so a config file that
+// predates a key is still placed rather than bare. Halo 3/ODST rows are
+// headset-tuned; Reach rows are the user's Blender-authored, headset-unverified
+// lineup. An entry the slot table cannot key is skipped rather than written
 // somewhere else, which keeps a future enum change from silently landing a
 // scorpion's trim on a mongoose.
 Config::Config()
@@ -62,6 +63,20 @@ Config::Config()
             odst_vehicle_cam_right_v[slot] = trim.right;
             odst_vehicle_cam_right_set[slot] = true;
         }
+    }
+    for (const ConfigReachShippedSeatTrim& trim :
+         kConfigReachShippedSeatTrims)
+    {
+        const int slot =
+            ConfigReachSeatTrimSlot(trim.vehicleId, trim.seatIndex);
+        if (slot < 0 || slot >= kReachVehicleTrimSlots)
+            continue;
+        reach_vehicle_cam_forward_v[slot] = trim.forward;
+        reach_vehicle_cam_up_v[slot] = trim.up;
+        reach_vehicle_cam_right_v[slot] = trim.right;
+        reach_vehicle_cam_forward_set[slot] = true;
+        reach_vehicle_cam_up_set[slot] = true;
+        reach_vehicle_cam_right_set[slot] = true;
     }
 }
 static std::wstring g_path;
@@ -163,8 +178,12 @@ static void ParseOdstSeatTrim(const char* key, const char* suffix,
 
 // Reach uses role-neutral seat0..seat15 keys because raw indices do not imply
 // the same driver/passenger/gunner role across its official HREK tags.
-static void ParseReachSeatTrim(const char* key, const char* suffix,
-                              const char* val, float* values, bool* setFlags)
+static constexpr char kReachSeatUniversalPrefix[] =
+    "vehicle_cam_use_universal_reach_";
+static constexpr size_t kReachSeatUniversalPrefixLength =
+    sizeof(kReachSeatUniversalPrefix) - 1;
+
+static int FindReachSeatTrimSlot(const char* key, const char* suffix)
 {
     for (int v = 0; v < kReachVehicleTrimCount; ++v)
     {
@@ -177,14 +196,33 @@ static void ParseReachSeatTrim(const char* key, const char* suffix,
         ++rest;
         for (int s = 0; s < kReachVehicleSeatSlots; ++s)
             if (!strcmp(rest, kReachVehicleSeatNames[s]))
-            {
-                const int slot = v * kReachVehicleSeatSlots + s;
-                if (ParseFloatSetting(key, val, values[slot]))
-                    setFlags[slot] = true;
-                return;
-            }
+                return v * kReachVehicleSeatSlots + s;
     }
     LOG("config: unknown Reach vehicle or seat in '%s' ignored", key);
+    return -1;
+}
+
+static int ParseReachSeatTrim(const char* key, const char* suffix,
+                              const char* val, float* values, bool* setFlags)
+{
+    const int slot = FindReachSeatTrimSlot(key, suffix);
+    if (slot < 0 || !ParseFloatSetting(key, val, values[slot]))
+        return -1;
+    setFlags[slot] = true;
+    return slot;
+}
+
+static int ParseReachSeatUniversal(
+    const char* key, const char* suffix, const char* val, bool* tombstones)
+{
+    const int slot = FindReachSeatTrimSlot(key, suffix);
+    if (slot < 0)
+        return -1;
+    float parsed = tombstones[slot] ? 1.0f : 0.0f;
+    if (!ParseFloatSetting(key, val, parsed))
+        return -1;
+    tombstones[slot] = parsed != 0.0f;
+    return slot;
 }
 
 static bool FileExists(const wchar_t* path)
@@ -339,6 +377,7 @@ void ConfigLoad(const wchar_t* path)
         ConfigSave();
         return;
     }
+    bool reachNumericKeyLoaded[kReachVehicleTrimSlots] = {};
     char line[512];
     int loadedConfigVersion = 1;
     bool loadedLegacyCurvature = false;
@@ -443,26 +482,43 @@ void ConfigLoad(const wchar_t* path)
         // following the universal trim), and an unknown suffix is reported,
         // not silently swallowed.
         // Title banks must be tested before the generic Halo 3 prefix.
+        else if (!strncmp(key, kReachSeatUniversalPrefix,
+                          kReachSeatUniversalPrefixLength))
+            ParseReachSeatUniversal(
+                key, key + kReachSeatUniversalPrefixLength, val,
+                g_config.reach_vehicle_cam_use_universal);
         else if (!strncmp(key, "vehicle_cam_forward_m_reach_", 28))
-            ParseReachSeatTrim(key, key + 28, val,
-                g_config.reach_vehicle_cam_forward_v,
+        {
+            const int slot = ParseReachSeatTrim(
+                key, key + 28, val, g_config.reach_vehicle_cam_forward_v,
                 g_config.reach_vehicle_cam_forward_set);
+            if (slot >= 0)
+                reachNumericKeyLoaded[slot] = true;
+        }
         else if (!strncmp(key, "vehicle_cam_forward_m_odst_", 27))
             ParseOdstSeatTrim(key, key + 27, val,
                               g_config.odst_vehicle_cam_forward_v,
                               g_config.odst_vehicle_cam_forward_set);
         else if (!strncmp(key, "vehicle_cam_up_m_reach_", 23))
-            ParseReachSeatTrim(key, key + 23, val,
-                g_config.reach_vehicle_cam_up_v,
+        {
+            const int slot = ParseReachSeatTrim(
+                key, key + 23, val, g_config.reach_vehicle_cam_up_v,
                 g_config.reach_vehicle_cam_up_set);
+            if (slot >= 0)
+                reachNumericKeyLoaded[slot] = true;
+        }
         else if (!strncmp(key, "vehicle_cam_up_m_odst_", 22))
             ParseOdstSeatTrim(key, key + 22, val,
                               g_config.odst_vehicle_cam_up_v,
                               g_config.odst_vehicle_cam_up_set);
         else if (!strncmp(key, "vehicle_cam_right_m_reach_", 26))
-            ParseReachSeatTrim(key, key + 26, val,
-                g_config.reach_vehicle_cam_right_v,
+        {
+            const int slot = ParseReachSeatTrim(
+                key, key + 26, val, g_config.reach_vehicle_cam_right_v,
                 g_config.reach_vehicle_cam_right_set);
+            if (slot >= 0)
+                reachNumericKeyLoaded[slot] = true;
+        }
         else if (!strncmp(key, "vehicle_cam_right_m_odst_", 25))
             ParseOdstSeatTrim(key, key + 25, val,
                               g_config.odst_vehicle_cam_right_v,
@@ -645,6 +701,18 @@ void ConfigLoad(const wchar_t* path)
             LOG("config: unknown key '%s' ignored", key);
     }
     fclose(f);
+    for (int i = 0; i < kReachVehicleTrimSlots; ++i)
+    {
+        // A valid numeric key is an explicit seat override even if a stale or
+        // hand-edited tombstone appears later in the file.
+        if (reachNumericKeyLoaded[i])
+            g_config.reach_vehicle_cam_use_universal[i] = false;
+        if (!g_config.reach_vehicle_cam_use_universal[i])
+            continue;
+        g_config.reach_vehicle_cam_forward_set[i] = false;
+        g_config.reach_vehicle_cam_up_set[i] = false;
+        g_config.reach_vehicle_cam_right_set[i] = false;
+    }
     if (loadedConfigVersion < 3 && loadedScopeZoom)
     {
         // Version 3 moved the scope to the gameplay/bullet origin. The former
@@ -988,10 +1056,19 @@ void ConfigSave()
     fprintf(f, "#             warthog_rocket falcon sabre scorpion forklift cart\n");
     fprintf(f, "#             shade_plasma shade_flak plasma_turret machinegun\n");
     fprintf(f, "#   seats: seat0 through seat15 (only authored seats are used)\n");
+    fprintf(f, "# F1's Back to universal trim persists as:\n");
+    fprintf(f, "#   vehicle_cam_use_universal_reach_<vehicle>_<seat> = 1\n");
     for (int v = 0; v < kReachVehicleTrimCount; ++v)
         for (int s = 0; s < kReachVehicleSeatSlots; ++s)
         {
             const int i = v * kReachVehicleSeatSlots + s;
+            if (g_config.reach_vehicle_cam_use_universal[i])
+            {
+                fprintf(f,
+                    "vehicle_cam_use_universal_reach_%s_%s = 1\n",
+                    kReachVehicleTrimNames[v], kReachVehicleSeatNames[s]);
+                continue;
+            }
             if (g_config.reach_vehicle_cam_forward_set[i])
                 fprintf(f, "vehicle_cam_forward_m_reach_%s_%s = %.2f\n",
                     kReachVehicleTrimNames[v], kReachVehicleSeatNames[s],

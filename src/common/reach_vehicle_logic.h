@@ -61,14 +61,16 @@ inline constexpr int kReachVehicleIdentityCount =
 
 // The fingerprint table carries MORE rows than identities: retail-compiled
 // maps hold model bounding spheres from a different HREK import generation
-// than the shipped source tags, and for the Warthog (radius) and Mongoose
-// (offsetX) the recomputed sphere landed exactly one ULP away. HREK's own
-// test_fbx_mongoose re-import of identical geometry authors the retail
-// Mongoose word bit-for-bit, proving the last bit is import rounding noise,
-// not different content. Each retail tuple is a full-tuple alias of its
-// identity row; the physics-type gate still has to agree.
+// than the shipped source tags. The exact retail tuples observed for Warthog,
+// Mongoose, Shade Flak, Shade Plasma, Scorpion, Machinegun, Sabre and Cart are
+// one or two ULPs away in individual words. HREK's own test_fbx_mongoose
+// re-import of identical geometry authors the retail Mongoose word bit-for-bit,
+// proving this class of last-bit difference is import rounding noise, not
+// different content. Each retail tuple is an explicit full-tuple alias of its
+// identity row; there is deliberately no tolerant comparison, and the
+// physics-type gate still has to agree.
 inline constexpr int kReachVehicleFingerprintCount =
-    kReachVehicleIdentityCount + 2;
+    kReachVehicleIdentityCount + 8;
 
 // Reach's vehicle postprocess retains a positive vehicle-authored bounding
 // sphere, otherwise it copies the referenced model's exact runtime sphere into
@@ -160,14 +162,25 @@ inline constexpr std::array<ReachVehicleFingerprintEntry,
          {0x3FE2557B, 0xBD4C676F, 0x3ACF7265, 0x3F6831B4}},
         {ReachVehicleId::SquadDropPod,
          {0x3FDAB04B, 0xBD31519F, 0x390792C5, 0x3F912A02}},
-        // Retail-map aliases (see kReachVehicleFingerprintCount): the same
-        // vehicles as their HREK rows above, one mantissa bit adrift. Logged
-        // unmatched in every retail session ever recorded — 'active warthog'
-        // and 'active mongoose' appear in no log before these rows existed.
+        // Exact retail-map aliases of the HREK identities above. Warthog and
+        // Mongoose came from R-V17; the remaining six are the complete
+        // accepted-partial 619644c miss census.
         {ReachVehicleId::Warthog,
          {0x3F978071, 0xBD406A82, 0xBAD03632, 0x3EC25783}},
         {ReachVehicleId::Mongoose,
          {0x3F2ABABB, 0x39815C02, 0x39CE6FFD, 0x3E7776E0}},
+        {ReachVehicleId::ShadeFlak,
+         {0x3F73045A, 0x3DD8D24E, 0xBC93505D, 0x3F1EA4E9}},
+        {ReachVehicleId::ShadePlasma,
+         {0x3F7A9153, 0x3E1B9697, 0xBC935062, 0x3F1EF5FC}},
+        {ReachVehicleId::Scorpion,
+         {0x400D30E2, 0x3D70D852, 0x3D28430B, 0x3EBBF788}},
+        {ReachVehicleId::Machinegun,
+         {0x3EE99B18, 0x3D9811F2, 0xB991445F, 0x3E8589DB}},
+        {ReachVehicleId::Sabre,
+         {0x40A69CFE, 0xBF19A963, 0xBB2A0198, 0x3F8AF1EF}},
+        {ReachVehicleId::Cart,
+         {0x3F786DCE, 0x3C8C975D, 0xBC8111A1, 0x3EE5C245}},
     }};
 
 inline constexpr bool ReachVehicleFingerprintEqual(
@@ -403,7 +416,171 @@ inline constexpr int ReachVehicleExpectedPhysicsType(ReachVehicleId id)
     }
 }
 
+// The HREK accessor returns the first populated one of its fifteen physics
+// blocks, or 16 when none is authored. Retail's compiled maps report the
+// official type-turret block (index 6) for five HREK type-16 weapon identities.
+// Tuple and type form one proof: the three changed retail tuples pair only with
+// 6, their canonical HREK tuples pair only with 16, and the two bit-identical
+// tuples may pair with either evidenced representation.
+inline constexpr bool ReachVehiclePhysicsTypeMatches(
+    ReachVehicleId id, const ReachVehicleFingerprint& fingerprint,
+    int observedType)
+{
+    switch (id)
+    {
+    case ReachVehicleId::ShadePlasma:
+        return (ReachVehicleFingerprintEqual(
+                    fingerprint,
+                    {0x3F7A9153, 0x3E1B9697, 0xBC935063, 0x3F1EF5FC}) &&
+                observedType == 16) ||
+            (ReachVehicleFingerprintEqual(
+                    fingerprint,
+                    {0x3F7A9153, 0x3E1B9697, 0xBC935062, 0x3F1EF5FC}) &&
+                observedType == 6);
+    case ReachVehicleId::ShadeFlak:
+        return (ReachVehicleFingerprintEqual(
+                    fingerprint,
+                    {0x3F73045B, 0x3DD8D24F, 0xBC93505D, 0x3F1EA4E9}) &&
+                observedType == 16) ||
+            (ReachVehicleFingerprintEqual(
+                    fingerprint,
+                    {0x3F73045A, 0x3DD8D24E, 0xBC93505D, 0x3F1EA4E9}) &&
+                observedType == 6);
+    case ReachVehicleId::Machinegun:
+        return (ReachVehicleFingerprintEqual(
+                    fingerprint,
+                    {0x3EE99B18, 0x3D9811F2, 0xB9914460, 0x3E8589DB}) &&
+                observedType == 16) ||
+            (ReachVehicleFingerprintEqual(
+                    fingerprint,
+                    {0x3EE99B18, 0x3D9811F2, 0xB991445F, 0x3E8589DB}) &&
+                observedType == 6);
+    case ReachVehicleId::PlasmaTurret:
+        return ReachVehicleFingerprintEqual(
+                   fingerprint,
+                   {0x3F000000, 0x00000000, 0x00000000, 0x3DCCCCCD}) &&
+            (observedType == 16 || observedType == 6);
+    case ReachVehicleId::ScorpionAntiInfantry:
+        return ReachVehicleFingerprintEqual(
+                   fingerprint,
+                   {0x3ED28405, 0x3DB8AD5D, 0xB8A6B78A, 0x3D8A1BD8}) &&
+            (observedType == 16 || observedType == 6);
+    default:
+        const int expectedType = ReachVehicleExpectedPhysicsType(id);
+        return expectedType >= 0 &&
+            ReachResolveVehicleFingerprint(fingerprint) == id &&
+            observedType == expectedType;
+    }
+}
+
 inline constexpr uint32_t kReachSeatThirdPersonCameraBit = 1u << 4;
+
+// Body hiding owns one complete seat-flags word between two proven outer
+// render callbacks. The runtime keeps this key and the two exact words, never
+// a tag pointer: loaded tag storage can move while the Reach module generation
+// remains unchanged.
+struct ReachSeatLeaseKey
+{
+    uint32_t generation = 0;
+    int32_t unitHandle = -1;
+    int32_t directParent = -1;
+    uint32_t definitionDatum = 0xFFFFFFFFu;
+    int32_t seatIndex = -1;
+};
+
+struct ReachSeatLeasePayload
+{
+    ReachSeatLeaseKey key{};
+    uint32_t originalFlags = 0;
+    uint32_t writtenFlags = 0;
+};
+
+enum class ReachSeatLeaseState : uint32_t
+{
+    Empty = 0,
+    Active,
+    RestorePending,
+    External,
+    Installing,
+    CleanupLocked,
+};
+
+enum class ReachSeatLeaseRestoreDisposition : uint8_t
+{
+    AlreadyOriginal = 0,
+    RestoreOriginal,
+    ExternalWrite,
+};
+
+inline constexpr bool ReachSeatLeaseKeyValid(const ReachSeatLeaseKey& key)
+{
+    return key.generation != 0 && key.unitHandle != -1 &&
+        key.directParent != -1 && key.definitionDatum != 0xFFFFFFFFu &&
+        key.seatIndex >= 0 && key.seatIndex < 16;
+}
+
+inline constexpr bool ReachSeatLeaseKeyEqual(
+    const ReachSeatLeaseKey& a, const ReachSeatLeaseKey& b)
+{
+    return a.generation == b.generation &&
+        a.unitHandle == b.unitHandle &&
+        a.directParent == b.directParent &&
+        a.definitionDatum == b.definitionDatum &&
+        a.seatIndex == b.seatIndex;
+}
+
+// Installing and CleanupLocked are opposing claims on the SAME atomic. The
+// worker must retain the hook for Installing/Active/RestorePending; once it
+// wins CleanupLocked, no callback can begin a new mutation and hook removal
+// may proceed or retry. Only Active and RestorePending assert that this feature
+// currently owns the written word.
+inline constexpr bool ReachSeatLeaseRetainsHook(ReachSeatLeaseState state)
+{
+    return state == ReachSeatLeaseState::Installing ||
+        state == ReachSeatLeaseState::Active ||
+        state == ReachSeatLeaseState::RestorePending;
+}
+
+inline constexpr bool ReachSeatLeaseCanAcquireCleanupLock(
+    ReachSeatLeaseState state)
+{
+    return state == ReachSeatLeaseState::Empty ||
+        state == ReachSeatLeaseState::External;
+}
+
+inline constexpr bool ReachSeatLeaseCleanupLocked(
+    ReachSeatLeaseState state)
+{
+    return state == ReachSeatLeaseState::CleanupLocked;
+}
+
+inline constexpr bool ReachSeatLeaseOwnsMutation(ReachSeatLeaseState state)
+{
+    return state == ReachSeatLeaseState::Active ||
+        state == ReachSeatLeaseState::RestorePending;
+}
+
+inline constexpr bool ReachSeatLeaseBlocksKey(
+    ReachSeatLeaseState state, const ReachSeatLeaseKey& held,
+    const ReachSeatLeaseKey& candidate)
+{
+    return ReachSeatLeaseCleanupLocked(state) ||
+        ReachSeatLeaseRetainsHook(state) ||
+        (state == ReachSeatLeaseState::External &&
+         ReachSeatLeaseKeyEqual(held, candidate));
+}
+
+inline constexpr ReachSeatLeaseRestoreDisposition
+ReachClassifySeatLeaseRestore(
+    uint32_t currentFlags, uint32_t originalFlags, uint32_t writtenFlags)
+{
+    if (currentFlags == originalFlags)
+        return ReachSeatLeaseRestoreDisposition::AlreadyOriginal;
+    if (currentFlags == writtenFlags)
+        return ReachSeatLeaseRestoreDisposition::RestoreOriginal;
+    return ReachSeatLeaseRestoreDisposition::ExternalWrite;
+}
+
 // R-V1: seat-flags bit 5 is Reach's authored "allows weapons". Only such a
 // seat fires the occupant's own weapon from the camera ray; every other seat
 // fires from a vehicle barrel and its shot origin must not be re-aimed.
@@ -442,6 +619,15 @@ inline constexpr ReachAimFeedbackSource ReachSelectAimFeedbackSource(
                         : ReachAimFeedbackSource::SeatedCompactFallback;
 }
 
+// Only the native unit aiming vector is an engine-authored firing direction.
+// The compact seated camera is a useful controller-loop fallback, but must not
+// move a reticle that promises where a vehicle weapon is actually pointing.
+inline constexpr bool ReachAimFeedbackCanDriveReticle(
+    ReachAimFeedbackSource source)
+{
+    return source == ReachAimFeedbackSource::SeatedUnitAim;
+}
+
 inline bool ReachNormalizeUnitAimingVector(
     const float input[3], float output[3])
 {
@@ -464,6 +650,257 @@ inline bool ReachNormalizeUnitAimingVector(
     {
         output[i] = input[i] * inverseLength;
         if (!std::isfinite(output[i]))
+            return false;
+    }
+    return true;
+}
+
+// Convert Reach world aim into the FINAL compact-camera basis captured for a
+// completed stereo pair. OpenXR camera-local axes are +X right, +Y up and -Z
+// forward. Reach stores world forward and up, so forward x up is the matching
+// +X right axis. This removes every yaw-reference, pitch-trim and view-follow
+// inversion from the compositor hand-off: those choices are already present
+// in the final camera basis.
+inline bool ReachWorldAimToCameraLocal(
+    const float worldAim[3], const float cameraForward[3],
+    const float cameraUp[3], float outLocal[3])
+{
+    if (!worldAim || !cameraForward || !cameraUp || !outLocal)
+        return false;
+
+    float normalizedAim[3]{};
+    if (!ReachNormalizeUnitAimingVector(worldAim, normalizedAim))
+        return false;
+
+    float forwardLengthSquared = 0.0f;
+    float upLengthSquared = 0.0f;
+    float forwardUpDot = 0.0f;
+    for (int component = 0; component < 3; ++component)
+    {
+        if (!std::isfinite(cameraForward[component]) ||
+            !std::isfinite(cameraUp[component]))
+        {
+            return false;
+        }
+        forwardLengthSquared +=
+            cameraForward[component] * cameraForward[component];
+        upLengthSquared += cameraUp[component] * cameraUp[component];
+        forwardUpDot += cameraForward[component] * cameraUp[component];
+    }
+    // Validate the same kind of normalized, orthogonal basis the compact
+    // camera validator admits. This helper remains self-contained so a future
+    // caller cannot bypass those preconditions accidentally.
+    constexpr float kAxisTolerance = 0.002f;
+    if (!std::isfinite(forwardLengthSquared) ||
+        !std::isfinite(upLengthSquared) || !std::isfinite(forwardUpDot) ||
+        std::fabs(forwardLengthSquared - 1.0f) >= kAxisTolerance ||
+        std::fabs(upLengthSquared - 1.0f) >= kAxisTolerance ||
+        std::fabs(forwardUpDot) >= kAxisTolerance)
+    {
+        return false;
+    }
+
+    const float right[3] = {
+        cameraForward[1] * cameraUp[2] -
+            cameraForward[2] * cameraUp[1],
+        cameraForward[2] * cameraUp[0] -
+            cameraForward[0] * cameraUp[2],
+        cameraForward[0] * cameraUp[1] -
+            cameraForward[1] * cameraUp[0]};
+    const float mapped[3] = {
+        normalizedAim[0] * right[0] +
+            normalizedAim[1] * right[1] +
+            normalizedAim[2] * right[2],
+        normalizedAim[0] * cameraUp[0] +
+            normalizedAim[1] * cameraUp[1] +
+            normalizedAim[2] * cameraUp[2],
+        -(normalizedAim[0] * cameraForward[0] +
+          normalizedAim[1] * cameraForward[1] +
+          normalizedAim[2] * cameraForward[2])};
+    return ReachNormalizeUnitAimingVector(mapped, outLocal);
+}
+
+// Plain-data identity and direction for the reticle publication. Every
+// completed pair writes one of these, including an on-foot/fallback sample
+// which deliberately revokes native reticle ownership for that exact serial.
+struct ReachReticleAimSample
+{
+    uint32_t generation = 0;
+    uint64_t preparedSerial = 0;
+    ReachAimFeedbackSource source = ReachAimFeedbackSource::OnFootCompact;
+    ReachSeatLeaseKey occupation{};
+    float cameraLocalDirection[3]{0.0f, 0.0f, -1.0f};
+};
+
+inline bool ReachReticleAimSampleAdmitted(
+    const ReachReticleAimSample& sample, uint32_t currentGeneration,
+    uint64_t expectedSerial)
+{
+    if (!currentGeneration || !expectedSerial ||
+        sample.generation != currentGeneration ||
+        sample.preparedSerial != expectedSerial ||
+        !ReachAimFeedbackCanDriveReticle(sample.source) ||
+        !ReachSeatLeaseKeyValid(sample.occupation) ||
+        sample.occupation.generation != sample.generation)
+    {
+        return false;
+    }
+    float normalized[3]{};
+    return ReachNormalizeUnitAimingVector(
+        sample.cameraLocalDirection, normalized);
+}
+
+// A failed/partial retry of one prepared serial must leave the earlier
+// completed pair intact. A later completed pair always replaces it, even when
+// its source is a fallback: otherwise a same-serial seat/source transition
+// could resurrect native aim from the earlier pair.
+inline constexpr ReachReticleAimSample ReachReticleAimSampleAfterAttempt(
+    const ReachReticleAimSample& current,
+    const ReachReticleAimSample& candidate,
+    bool completedStereoPair)
+{
+    return completedStereoPair ? candidate : current;
+}
+
+// A personal weapon may borrow the completed rendered eye only while the
+// current seat publication and completed-eye publication describe the same
+// full salted occupation. Keep this policy platform-neutral and testable: the
+// firing detour itself then performs only coherent seqlock reads and stores.
+inline constexpr uint64_t kReachShotOriginFreshMs = 100;
+
+struct ReachShotOriginSample
+{
+    uint32_t currentGeneration = 0;
+    uint64_t nowMs = 0;
+    uint64_t occupationSampleMs = 0;
+    uint64_t renderedEyeSampleMs = 0;
+    uint64_t renderedEyePreparedSerial = 0;
+    bool active = false;
+    bool allowsWeapons = false;
+    int32_t firingUnitIndex = -1;
+    ReachSeatLeaseKey occupation{};
+    ReachSeatLeaseKey renderedEye{};
+    float renderedEyePosition[3]{};
+};
+
+inline bool ReachShotOriginSampleAdmitted(
+    const ReachShotOriginSample& sample)
+{
+    if (!sample.currentGeneration || !sample.active ||
+        !sample.allowsWeapons ||
+        !ReachSeatLeaseKeyValid(sample.occupation) ||
+        !ReachSeatLeaseKeyValid(sample.renderedEye) ||
+        !ReachSeatLeaseKeyEqual(sample.occupation, sample.renderedEye) ||
+        sample.occupation.generation != sample.currentGeneration ||
+        sample.renderedEye.generation != sample.currentGeneration ||
+        !sample.renderedEyePreparedSerial || !sample.occupationSampleMs ||
+        !sample.renderedEyeSampleMs ||
+        sample.nowMs < sample.occupationSampleMs ||
+        sample.nowMs < sample.renderedEyeSampleMs ||
+        sample.nowMs - sample.occupationSampleMs >
+            kReachShotOriginFreshMs ||
+        sample.nowMs - sample.renderedEyeSampleMs >
+            kReachShotOriginFreshMs ||
+        ((sample.occupation.unitHandle ^ sample.firingUnitIndex) & 0xFFFF) != 0)
+    {
+        return false;
+    }
+    return std::isfinite(sample.renderedEyePosition[0]) &&
+        std::isfinite(sample.renderedEyePosition[1]) &&
+        std::isfinite(sample.renderedEyePosition[2]);
+}
+
+struct ReachStereoCenterPose
+{
+    // Component order matches OpenXR: x, y, z, w.
+    float orientation[4]{0.0f, 0.0f, 0.0f, 1.0f};
+    float position[3]{};
+};
+
+// Build the pose used for BOTH native-aim rotation and reticle-ray origin.
+// Quaternion sign is aligned before averaging because q and -q are the same
+// rotation. Eye orientations are normalized first; invalid/ambiguous input
+// fails open to the existing controller/clamp reticle.
+inline bool ReachBuildStereoCenterPose(
+    const float leftQuaternion[4], const float leftPosition[3],
+    const float rightQuaternion[4], const float rightPosition[3],
+    ReachStereoCenterPose& out)
+{
+    if (!leftQuaternion || !leftPosition ||
+        !rightQuaternion || !rightPosition)
+    {
+        return false;
+    }
+
+    float leftLengthSquared = 0.0f;
+    float rightLengthSquared = 0.0f;
+    for (int component = 0; component < 3; ++component)
+    {
+        if (!std::isfinite(leftPosition[component]) ||
+            !std::isfinite(rightPosition[component]))
+        {
+            return false;
+        }
+        out.position[component] =
+            (leftPosition[component] + rightPosition[component]) * 0.5f;
+        if (!std::isfinite(out.position[component]))
+            return false;
+    }
+    for (int component = 0; component < 4; ++component)
+    {
+        if (!std::isfinite(leftQuaternion[component]) ||
+            !std::isfinite(rightQuaternion[component]))
+        {
+            return false;
+        }
+        leftLengthSquared +=
+            leftQuaternion[component] * leftQuaternion[component];
+        rightLengthSquared +=
+            rightQuaternion[component] * rightQuaternion[component];
+    }
+    if (!std::isfinite(leftLengthSquared) ||
+        !std::isfinite(rightLengthSquared) ||
+        leftLengthSquared <= 1.0e-8f || rightLengthSquared <= 1.0e-8f)
+    {
+        return false;
+    }
+
+    const float inverseLeftLength = 1.0f / std::sqrt(leftLengthSquared);
+    const float inverseRightLength = 1.0f / std::sqrt(rightLengthSquared);
+    float left[4]{};
+    float right[4]{};
+    float dot = 0.0f;
+    for (int component = 0; component < 4; ++component)
+    {
+        left[component] =
+            leftQuaternion[component] * inverseLeftLength;
+        right[component] =
+            rightQuaternion[component] * inverseRightLength;
+        dot += left[component] * right[component];
+    }
+    if (!std::isfinite(dot) || std::fabs(dot) <= 1.0e-6f)
+        return false;
+
+    const float rightSign = dot < 0.0f ? -1.0f : 1.0f;
+    float centerLengthSquared = 0.0f;
+    for (int component = 0; component < 4; ++component)
+    {
+        out.orientation[component] =
+            left[component] + right[component] * rightSign;
+        centerLengthSquared +=
+            out.orientation[component] * out.orientation[component];
+    }
+    if (!std::isfinite(centerLengthSquared) ||
+        centerLengthSquared <= 1.0e-8f)
+    {
+        return false;
+    }
+    const float inverseCenterLength =
+        1.0f / std::sqrt(centerLengthSquared);
+    for (float& component : out.orientation)
+    {
+        component *= inverseCenterLength;
+        if (!std::isfinite(component))
             return false;
     }
     return true;

@@ -844,6 +844,8 @@ namespace
         {
             if (perSeat)
             {
+                if (reachSeat)
+                    ConfigReachSeatBeginTrimEdit(g_config, seatSlot);
                 trimForwardV[seatSlot] = seatFwd;
                 trimForwardSet[seatSlot] = true;
             }
@@ -861,6 +863,8 @@ namespace
         {
             if (perSeat)
             {
+                if (reachSeat)
+                    ConfigReachSeatBeginTrimEdit(g_config, seatSlot);
                 trimUpV[seatSlot] = seatUp;
                 trimUpSet[seatSlot] = true;
             }
@@ -878,6 +882,8 @@ namespace
         {
             if (perSeat)
             {
+                if (reachSeat)
+                    ConfigReachSeatBeginTrimEdit(g_config, seatSlot);
                 trimRightV[seatSlot] = seatRight;
                 trimRightSet[seatSlot] = true;
             }
@@ -890,9 +896,14 @@ namespace
         {
             if (ImGui::SmallButton("Back to the universal trim##seattrim"))
             {
-                trimForwardSet[seatSlot] = false;
-                trimUpSet[seatSlot] = false;
-                trimRightSet[seatSlot] = false;
+                if (reachSeat)
+                    ConfigReachSeatUseUniversalTrim(g_config, seatSlot);
+                else
+                {
+                    trimForwardSet[seatSlot] = false;
+                    trimUpSet[seatSlot] = false;
+                    trimRightSet[seatSlot] = false;
+                }
                 changed = true;
             }
         }
