@@ -1203,6 +1203,10 @@ int main()
               ReachVehicleUsesWheel(ReachVehicleId::Forklift) &&
               !ReachVehicleUsesWheel(ReachVehicleId::Banshee),
             "Reach view-follow and steering ownership remain seat-explicit");
+        // R-V19 is intentionally refresh-rate independent: every supported
+        // 72-144 Hz headset consumes that frame's render-matched carrier basis.
+        Check(!kReachR_V15RawHullFollowEnabled,
+            "Reach vehicle follow stays on the render-matched carrier basis");
         // R-V18: entering a Reach seat selects the same native aim feedback
         // under BOTH view-follow settings.
         {

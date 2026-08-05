@@ -415,6 +415,14 @@ inline constexpr int kReachVehicleSeatLimit = 16;
 // engine aim state, not a camera marker or the compact render camera.
 inline constexpr uintptr_t kReachUnitAimingVectorOffset = 0x214;
 
+// R-V15's raw-node re-resolve was based on a stale reading of Halo 3 C14.
+// Halo 3's accepted follow actually consumes the same live rendered node basis
+// as its seat placement. Keeping Reach's simulation-stepped rotation beside
+// rendered placement produced the headset-reported View Follow judder in
+// 619644c.
+// Retain the disproven path behind an explicit dormant switch.
+inline constexpr bool kReachR_V15RawHullFollowEnabled = false;
+
 enum class ReachAimFeedbackSource : uint8_t
 {
     OnFootCompact = 0,

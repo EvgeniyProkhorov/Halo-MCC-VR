@@ -21286,15 +21286,12 @@ namespace
                             memcpy(frame.rawCarrierForward,
                                    carrierRoot.matrix.forward,
                                    sizeof(frame.rawCarrierForward));
-                            // The follow integrator must be fed the RAW hull
-                            // forward - the headset-accepted Halo 3 rule (its
-                            // C14 failure integrated interpolation back into
-                            // view yaw). R-V16 gives the same raw forward to
-                            // the follow-off hand steering, so the re-resolve
-                            // is no longer gated on follow. Placement keeps
-                            // the rendered bank above.
+                            // R-V19 keeps follow on the rendered carrierRoot
+                            // already copied above, matching camera placement
+                            // and accepted Halo 3. Preserve R-V15's disproven
+                            // raw-node experiment inert instead of deleting it.
                             Halo3ObjectMarker carrierRaw{};
-                            if (interpolate &&
+                            if (kReachR_V15RawHullFollowEnabled && interpolate &&
                                 g_reachCamera.objectMarkers(
                                     carrier, 0, &carrierRaw,
                                     1, true, false) > 0 &&
@@ -21318,9 +21315,10 @@ namespace
                     memcpy(frame.rawCarrierForward,
                            rootMarker.matrix.forward,
                            sizeof(frame.rawCarrierForward));
-                    // Same RAW-forward rule for the vehicle's own hull.
+                    // Same dormant R-V15 experiment for a direct hull. The
+                    // active source remains rootMarker's rendered basis.
                     Halo3ObjectMarker rootRaw{};
-                    if (interpolate &&
+                    if (kReachR_V15RawHullFollowEnabled && interpolate &&
                         g_reachCamera.objectMarkers(
                             info.directParent, 0, &rootRaw,
                             1, true, false) > 0 &&
@@ -21554,7 +21552,8 @@ namespace
         if (ReachVehicleSeatAuthorsSteering(
                 identity, seatIndex, g_config.vehicle_view_follow))
         {
-            return "stick/wheel steering; native unit aim; view follows";
+            return "stick/wheel steering; native unit aim; "
+                   "render-matched view follows";
         }
         if (ReachVehicleSeatIsDriver(identity, seatIndex) &&
             ReachVehicleUsesWheel(identity))

@@ -962,6 +962,56 @@ reload without the Reach module generation changing. A safe lifetime design
 must prove engine-thread restoration on every exit/fallback path and must never
 chase that pointer from the teardown worker. Unit aim needs none of that state.
 
+## R-V19 - 2026-08-05: render-matched View Follow
+
+The exact R-V18 headset run used commit
+619644c754aeb0f62c1c3cd55ef320539ba96ed2, DLL SHA-256
+525309022E880F4A31BFBDF83BB9E246D1A8B4A7809DA78783F6BF8CFEDDA85D,
+Steam, VirtualDesktopXR 1.0.10, Meta Quest 3, and 90 Hz. Its preserved log is
+out/test-runs/619644c-reach-vehicles-steam-quest3-partial-accepted-20260805-071537/halo3xr.log
+(SHA-256 BF8E2AD9EC4005FDC7A4E2E6066EFFEF7E98A75D21B22C7CA0B6B1A005934118).
+The user reported that driving without View Follow is now great. That is
+positive headset evidence for retaining R-V18's native unit-aim feedback.
+They separately reported View Follow as nauseating, jittery and stuttering,
+and the player model as not properly hidden. Neither failed feature is stacked
+into R-V18.
+
+The run rules out a throughput stall as the View Follow cause. It held a
+90.0 Hz app cadence, reported no render stalls, and its ten-second timing
+windows stayed around 12-13 ms frame-interval p95 and 3-5 ms renderWindow p95.
+The symptom changes with the follow toggle, so the failure is the carrier
+transform supplied to follow rather than missed display deadlines.
+
+R-V15's premise was false. It called raw-only follow a headset-accepted Halo 3
+C14 rule, but C14 documents positional photon lead, not yaw sampling. The
+current accepted Halo 3 path replaces meshFrame with the live rendered node
+and then publishes xf.rawFwd = meshFrame.fwd; ODST likewise publishes its
+selected live rendered node forward. In both accepted titles, seat placement
+and follow consume one phase-matched rendered basis.
+
+Reach did the opposite whenever vehicle_cam_smoothing = 1: placement used
+rootMarker/carrierRoot from objectMarkers(..., interpolate=true), then R-V15
+overwrote only frame.rawCarrierForward with a second
+objectMarkers(..., interpolate=false) sample. At a 90 Hz render cadence over
+Reach's simulation ticks, position and the vehicle mesh therefore glide while
+follow yaw/pitch advance in raw steps. That phase split is the observed
+rotation staircase.
+
+R-V19 disables the two R-V15 raw-node re-resolves behind
+kReachR_V15RawHullFollowEnabled = false; the disproven code remains dormant.
+The already-copied rendered carrier forward now feeds yaw and roll-stable
+pitch, matching placement and Halo 3/ODST. View Follow OFF consumes neither
+follow publication, the rejected R-V16 hull servo remains disabled, and R-V18
+unit aim is independent, so the accepted OFF driving path is unchanged.
+There is no 90 Hz constant, resampler or rate-specific gain in this change:
+each rendered frame consumes its own phase-matched carrier basis throughout
+the required 72-144 Hz headset range.
+
+Proper body hiding remains a separate candidate. The R-V18 log proves the
+current transient bit-4 transaction executes and restores cleanly, while the
+headset still sees the model. That is direct evidence that a one-render-call
+write cannot reproduce Halo 3's seat-lifetime first-person state.
+
 ## R-V9 - acceptance still required
 
 Nothing in this document changes the accepted pointer. Packaging, successful
@@ -981,6 +1031,8 @@ The minimum headset pass for this candidate is:
 5. compare vehicle_cam_smoothing on/off and vehicle_bounce at 0 and a nonzero
    value;
 6. compare vehicle_view_follow off/on, including a hill and a hard yaw change;
+   exercise the runtime's available refresh rates across the supported
+   72-144 Hz range, with endpoint coverage where the headset exposes it;
 7. verify vehicle_hide_body and vehicle_hands_follow_body independently;
 8. run on-foot before and after the seats, then a cutscene/theatre transition,
    confirming no stale seat state or camera-core teardown;
