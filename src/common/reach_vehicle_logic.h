@@ -418,7 +418,7 @@ inline constexpr int ReachVehicleExpectedPhysicsType(ReachVehicleId id)
 
 // The HREK accessor returns the first populated one of its fifteen physics
 // blocks, or 16 when none is authored. Retail's compiled maps report the
-// official type-turret block (index 6) for five HREK type-16 weapon identities.
+// official type-turret block (index 6) for HREK type-16 weapon identities.
 // Tuple and type form one proof: the three changed retail tuples pair only with
 // 6, their canonical HREK tuples pair only with 16, and the two bit-identical
 // tuples may pair with either evidenced representation.
@@ -428,6 +428,15 @@ inline constexpr bool ReachVehiclePhysicsTypeMatches(
 {
     switch (id)
     {
+    case ReachVehicleId::WarthogChaingun:
+    case ReachVehicleId::WarthogGauss:
+    case ReachVehicleId::WarthogRocket:
+        // Headset log 4331c63 measured the exact canonical chaingun tuple as
+        // retail type 6. All three are HREK weapon-child identities with exact,
+        // unique full tuples; accept the official no-physics value 16 and the
+        // compiled retail turret block 6, never another type or fuzzy tuple.
+        return ReachResolveVehicleFingerprint(fingerprint) == id &&
+            (observedType == 16 || observedType == 6);
     case ReachVehicleId::ShadePlasma:
         return (ReachVehicleFingerprintEqual(
                     fingerprint,
@@ -473,7 +482,19 @@ inline constexpr bool ReachVehiclePhysicsTypeMatches(
     }
 }
 
+// Official HREK seat flags. Bit 0 is the engine-authored occupant visibility
+// switch (`invisible/completely enclosed by vehicle`); bit 4 selects the
+// third-person camera. Reach needs both states for the Halo 3 first-person
+// experience: hidden occupant plus native first-person perspective.
+inline constexpr uint32_t kReachSeatInvisibleOccupantBit = 1u << 0;
 inline constexpr uint32_t kReachSeatThirdPersonCameraBit = 1u << 4;
+
+inline constexpr uint32_t ReachFirstPersonVehicleSeatFlags(
+    uint32_t originalFlags)
+{
+    return (originalFlags | kReachSeatInvisibleOccupantBit) &
+        ~kReachSeatThirdPersonCameraBit;
+}
 
 // Body hiding owns one complete seat-flags word between two proven outer
 // render callbacks. The runtime keeps this key and the two exact words, never
@@ -591,6 +612,9 @@ inline constexpr int kReachVehicleSeatLimit = 16;
 // object at +0x214 when it builds the projectile line (R-V12/R-V18). This is
 // engine aim state, not a camera marker or the compact render camera.
 inline constexpr uintptr_t kReachUnitAimingVectorOffset = 0x214;
+// Official HREK string id queried by the projectile transaction for the live
+// weapon/vehicle firing marker.
+inline constexpr int32_t kReachSafeTriggerMarkerStringId = 0x103;
 
 // R-V15's raw-node re-resolve was based on a stale reading of Halo 3 C14.
 // Halo 3's accepted follow actually consumes the same live rendered node basis
@@ -605,6 +629,7 @@ enum class ReachAimFeedbackSource : uint8_t
     OnFootCompact = 0,
     SeatedUnitAim,
     SeatedCompactFallback,
+    SeatedBarrelAim,
 };
 
 // View follow is deliberately an input here and deliberately does not select
@@ -625,7 +650,8 @@ inline constexpr ReachAimFeedbackSource ReachSelectAimFeedbackSource(
 inline constexpr bool ReachAimFeedbackCanDriveReticle(
     ReachAimFeedbackSource source)
 {
-    return source == ReachAimFeedbackSource::SeatedUnitAim;
+    return source == ReachAimFeedbackSource::SeatedUnitAim ||
+        source == ReachAimFeedbackSource::SeatedBarrelAim;
 }
 
 // unit+0x214 is the seated UNIT's aim. HREK proves it as the projectile
@@ -637,8 +663,10 @@ inline constexpr bool ReachAimFeedbackCanDriveReticle(
 inline constexpr bool ReachSeatAimCanDriveReticle(
     ReachAimFeedbackSource source, uint32_t seatFlags)
 {
-    return ReachAimFeedbackCanDriveReticle(source) &&
+    const bool personal =
         (seatFlags & kReachSeatAllowsWeaponsBit) != 0;
+    return (source == ReachAimFeedbackSource::SeatedUnitAim && personal) ||
+        (source == ReachAimFeedbackSource::SeatedBarrelAim && !personal);
 }
 
 inline bool ReachNormalizeUnitAimingVector(
@@ -742,6 +770,10 @@ struct ReachReticleAimSample
     uint64_t preparedSerial = 0;
     ReachAimFeedbackSource source = ReachAimFeedbackSource::OnFootCompact;
     ReachSeatLeaseKey occupation{};
+    // Metres in the completed pair's camera-local frame. Personal weapons use
+    // zero (the rendered eye); vehicle weapons use the live safe_trigger
+    // marker, so direction and origin describe the same real barrel line.
+    float cameraLocalOrigin[3]{};
     float cameraLocalDirection[3]{0.0f, 0.0f, -1.0f};
 };
 
@@ -759,8 +791,13 @@ inline bool ReachReticleAimSampleAdmitted(
         return false;
     }
     float normalized[3]{};
-    return ReachNormalizeUnitAimingVector(
-        sample.cameraLocalDirection, normalized);
+    if (!ReachNormalizeUnitAimingVector(
+            sample.cameraLocalDirection, normalized))
+        return false;
+    for (float component : sample.cameraLocalOrigin)
+        if (!std::isfinite(component) || std::fabs(component) > 100.0f)
+            return false;
+    return true;
 }
 
 // A failed/partial retry of one prepared serial must leave the earlier
