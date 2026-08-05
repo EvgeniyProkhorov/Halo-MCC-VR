@@ -2373,6 +2373,68 @@ Status: **implemented, headset acceptance pending**. Required check is on-foot
 swap, Banshee, at least one ground vehicle, and exit back to on-foot in the same
 session.
 
+## Reach vehicle body visibility and projectile unit-adjust - 2026-08-05
+
+These are HREK-first bindings for implementation commit f370185. They remain
+headset-unverified and do not advance CURRENT-STATE.
+
+Official HREK unit_camera_flags_definition has four flags. Bit 2, mask 0x0004,
+is named hides player-unit from camera: only the player controlling that camera
+does not see their unit. The occupied unit camera is seat record +0x70; the
+seat block is vehicle definition +0x444 with 0x12C-byte records. HREK
+unit_get_camera_info at 0xD76980 returns that occupied camera pointer.
+
+HREK following_camera.cpp virtual slot 13 is 0x516BD0 and consumes the flag.
+Only after that semantic identification was its pinned retail homolog matched:
+
+- following-camera consumer 0x001DD360..0x001DD3C5, size 0x65, SHA-256
+  9816D2E49EBEA15C6DF97E4085112B5264448258A8600D9CD58B2733DF74ED97;
+- its sole camera resolver 0x001DDB20..0x001DDBFA, size 0xDA, SHA-256
+  4628AF07702BE30D5F05F8F81E1EE2ACF1F7744D7A821D638424D3C9B25695E8;
+- the resolver selects occupied seat +0x70 when the seat relationship matches,
+  otherwise unit default camera +0x198;
+- the consumer tests mask 0x04 at 0x001DD3B2 and returns the exact controlled
+  unit datum or NONE.
+
+The runtime therefore scopes one 16-bit bit-2 CAS around only the admitted
+normal-player outer render. It restores only its owned bit in a bounded CAS
+loop, preserving unrelated changes, and retains no tag pointer. The rejected
+between-frame seat bit-4 lease remains dormant.
+
+Official HREK weapons.cpp establishes the vehicle firing locus. The projectile
+transaction begins at 0xDE4290. It resolves the active firing weapon/barrel and
+calls unit-adjust at 0xD67EE0 exactly once. The owner helper at 0xD77E00 walks
+owner +0x390 to the selected deepest firing/control unit. HREK caller
+0xDE5050..0xDE5099 zero-extends the incoming simulation byte and writes a dword
+to stack argument 10; callee 0xD67FA4 compares that dword with 1. Arguments
+7-9 remain byte booleans.
+
+The pinned retail homolog of unit-adjust is
+0x00484F24..0x0048529F (0x37B bytes, SHA-256
+6EF679F2C9553B7F9CD942DAEF78CD1F17F262C93AB340C6E9B56B6ECDFEEFA3).
+Its sole image caller is the projectile rel32 call at 0x004C303A. Retail
+caller 0x004C2FD4..0x004C2FDE writes the
+dword tenth argument and retail callee 0x00484FE7 compares the corresponding
+dword. Production requires a unique exact 40-byte unit-adjust entry signature
+at that RVA plus the exact call edge; zero or multiple matches leave only this
+optional shot-direction feature stock.
+
+The original unit-adjust remains authoritative for origin selection,
+camera/unit projection, offsets and clipping. Replacing its returned central
+direction is intentionally before stock downstream mechanics:
+
+- HREK 0x4E32A0, called at 0xDE5446, can apply auto-aim;
+- 0xDE54B6..0xDE5502 applies ballistic lead/velocity correction;
+- 0xDE575F..0xDE58BB applies random weapon spread;
+- 0xDE64DD..0xDE663F can replace creation-data direction for an acquired target.
+
+Thus the proven claim is a central no-target/no-spread line from the native
+selected-barrel origin through the presented VR sight. It is not permission to
+remove authored spread, tracking, ballistics or aim assist. Runtime admission
+additionally requires the exact current full-salt local unit/parent/definition/
+seat key, current generation, two coherent seqlocks and non-future occupation
+and reticle samples no older than 50 ms.
+
 ## Evidence still required
 
 The unaccepted camera candidate now implements the exact outer-owner token,

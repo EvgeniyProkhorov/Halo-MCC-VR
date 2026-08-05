@@ -69,6 +69,51 @@ alternating eyes).
 choice; see `docs/ODST-LEVEL-LOAD-LOCKOUT.md`. Its undone decisive test is a
 no-mod control run.
 
+## PENDING HEADSET CANDIDATE: complete Reach vehicle repair - 2026-08-05
+
+The accepted pointer above remains 118b8bde. Implementation commit f370185 is
+the new unaccepted Reach vehicle repair bundle; the documentation-only
+descendant packaged from it must be identified by its candidate manifest. A
+passing build or install does not advance this pointer.
+
+The immediately preceding candidate was rejected. Source
+03766bd672fd9c241d1929285d6e0d63887cb157, DLL SHA-256
+E70BA41FE8D1C5E071D73E12D2C9A8D7329490A496C43ECB70D366AAA1718DAB,
+ran on Steam / VirtualDesktopXR 1.0.10 / Quest 3 / 90 Hz. The user reported a
+missing crosshair, broken Warthog turrets, vehicle shaking and a visible player
+model. Its guessed primary_trigger path was reverted by 2aa700e; no working
+View Follow OFF or Blender placement work was rolled back.
+
+The f370185 bundle contains all outstanding requested behaviors together:
+
+1. View Follow OFF retains the headset-reported good driving path. View Follow
+   ON retains R-V19's render-matched carrier basis. The rejected between-frame
+   seat-camera-mode lease is permanently dormant, removing its twice-per-frame
+   camera-state toggles and shake source.
+2. Reach's actual unit-camera hide-player bit 0x0004 is scoped only around the
+   admitted normal-player outer render. It hides the controlling player's
+   seated world model while preserving first-person arms, weapons, both View
+   Follow settings, and unrelated camera flags.
+3. The authored floating controller crosshair remains visible for every Reach
+   vehicle seat; neither occupant unit+0x214 nor the old clamped/native vehicle
+   sight can replace it during entry or seated play.
+4. The exact native projectile unit-adjust transaction keeps the engine-
+   selected active barrel and origin, then redirects only the exact local
+   vehicle weapon's central pre-spread direction through the presented
+   stabilized VR sight. Stock spread, ballistics, aim assist and tracking
+   remain stock. Fresh full-key data is bounded to 50 ms for 72-144 Hz.
+5. The 25 built-in Blender camera placements and exact retail aliases remain
+   present and config-round-trip tested, including Scorpion, Shade Plasma,
+   Shade Flak and Plasma Turret. The implementation has no runtime Workshop
+   dependency.
+
+Release x64 builds, the full core tests, the Reach parity gate and static
+lifecycle review pass. Headset acceptance still requires both View Follow
+options, Warthog/Scorpion/Covenant turrets, body visibility, crosshair and
+near/far firing checks, followed by Halo 3 and ODST regressions. Record edition,
+runtime, headset and refresh rate. Until the user explicitly accepts that exact
+installed DLL, this section is evidence only.
+
 ## NOTE: Halo 3 vehicle view-follow user-stated working - 2026-08-03
 
 The user stated "view follow works" and directed development (ODST first-person
