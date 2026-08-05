@@ -474,6 +474,14 @@ inline constexpr bool ReachVehiclePhysicsTypeMatches(
 }
 
 inline constexpr uint32_t kReachSeatThirdPersonCameraBit = 1u << 4;
+// HREK unit_camera_flags_definition bit 2: "hides player-unit from camera".
+// The controlling player's camera omits its unit; every other camera sees it.
+inline constexpr uint16_t kReachUnitCameraHidePlayerBit = 0x0004;
+
+// R-V20's between-frame seat-bit lease executed but did not hide the Reach
+// world biped in the headset. Retain its implementation as evidence, but never
+// arm it. Reach has a separate, camera-local authoring flag for this job.
+inline constexpr bool kReachR_V20SeatBitLeaseEnabled = false;
 
 // Body hiding owns one complete seat-flags word between two proven outer
 // render callbacks. The runtime keeps this key and the two exact words, never
@@ -581,6 +589,19 @@ ReachClassifySeatLeaseRestore(
     return ReachSeatLeaseRestoreDisposition::ExternalWrite;
 }
 
+inline constexpr uint16_t ReachUnitCameraHidePlayerFlags(uint16_t flags)
+{
+    return static_cast<uint16_t>(flags | kReachUnitCameraHidePlayerBit);
+}
+
+inline constexpr uint16_t ReachUnitCameraRestorePlayerFlags(
+    uint16_t currentFlags, uint16_t originalFlags)
+{
+    return static_cast<uint16_t>(
+        (currentFlags & ~kReachUnitCameraHidePlayerBit) |
+        (originalFlags & kReachUnitCameraHidePlayerBit));
+}
+
 // R-V1: seat-flags bit 5 is Reach's authored "allows weapons". Only such a
 // seat fires the occupant's own weapon from the camera ray; every other seat
 // fires from a vehicle barrel and its shot origin must not be re-aimed.
@@ -639,6 +660,66 @@ inline constexpr bool ReachSeatAimCanDriveReticle(
 {
     return ReachAimFeedbackCanDriveReticle(source) &&
         (seatFlags & kReachSeatAllowsWeaponsBit) != 0;
+}
+
+// R-V22 deliberately keeps the floating controller reticle for every Reach
+// vehicle seat. The occupant's +0x214 aim is not the selected vehicle barrel's
+// line; the native unit-adjust transaction redirects the local barrel's
+// central pre-spread direction through the presented controller sight instead.
+inline constexpr bool kReachR_V22NativeVehicleReticleEnabled = false;
+inline constexpr uint64_t kReachShotDirectionFreshMs = 50;
+inline constexpr float kReachShotDirectionMaxDistanceSq =
+    2048.0f * 2048.0f;
+
+struct ReachShotDirectionSample
+{
+    uint32_t currentGeneration = 0;
+    uint64_t nowMs = 0;
+    uint64_t occupationSampleMs = 0;
+    uint64_t targetSampleMs = 0;
+    bool active = false;
+    int32_t firingUnitIndex = -1;
+    ReachSeatLeaseKey occupation{};
+    ReachSeatLeaseKey targetKey{};
+    float origin[3]{};
+    float target[3]{};
+};
+
+inline bool ReachShotDirectionSampleAdmitted(
+    const ReachShotDirectionSample& sample)
+{
+    if (!sample.currentGeneration || !sample.active ||
+        sample.firingUnitIndex == -1 ||
+        !ReachSeatLeaseKeyValid(sample.occupation) ||
+        !ReachSeatLeaseKeyValid(sample.targetKey) ||
+        !ReachSeatLeaseKeyEqual(sample.occupation, sample.targetKey) ||
+        sample.occupation.generation != sample.currentGeneration ||
+        sample.firingUnitIndex != sample.occupation.unitHandle ||
+        !sample.occupationSampleMs || !sample.targetSampleMs ||
+        sample.nowMs < sample.occupationSampleMs ||
+        sample.nowMs < sample.targetSampleMs ||
+        sample.nowMs - sample.occupationSampleMs >
+            kReachShotDirectionFreshMs ||
+        sample.nowMs - sample.targetSampleMs >
+            kReachShotDirectionFreshMs)
+    {
+        return false;
+    }
+
+    float distanceSquared = 0.0f;
+    for (int axis = 0; axis < 3; ++axis)
+    {
+        if (!std::isfinite(sample.origin[axis]) ||
+            !std::isfinite(sample.target[axis]))
+        {
+            return false;
+        }
+        const float delta = sample.target[axis] - sample.origin[axis];
+        distanceSquared += delta * delta;
+    }
+    return std::isfinite(distanceSquared) &&
+        distanceSquared > 1.0e-8f &&
+        distanceSquared <= kReachShotDirectionMaxDistanceSq;
 }
 
 inline bool ReachNormalizeUnitAimingVector(
@@ -938,6 +1019,8 @@ inline constexpr uintptr_t kReachSeatFlagsOffset = 0x00;
 inline constexpr uintptr_t kReachSeatAttachmentMarkerOffset = 0x08;
 inline constexpr uintptr_t kReachSeatCameraOffset = 0x70;
 inline constexpr uintptr_t kReachSeatCameraMarkerOffset = 0x74;
+inline constexpr uintptr_t kReachUnitCameraFlagsOffset = 0x00;
+// The pinned retail consumer at +0x1DD3B2 tests this exact byte mask.
 inline constexpr uint32_t kReachOccupantHeadMarkerStringId = 0xC2;
 
 struct ReachSeatCameraBasis

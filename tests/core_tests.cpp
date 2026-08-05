@@ -1302,8 +1302,8 @@ int main()
         // 72-144 Hz headset consumes that frame's render-matched carrier basis.
         Check(!kReachR_V15RawHullFollowEnabled,
             "Reach vehicle follow stays on the render-matched carrier basis");
-        // R-V20: body hiding retains values and full salted identities only;
-        // no loaded tag pointer is legal across the one-frame interval.
+        // Rejected R-V20 remains dormant evidence: its value-only lease still
+        // preserves full salted identities, but may never arm again.
         {
             constexpr ReachSeatLeaseKey leaseKey{
                 37, 0x12340007, 0x23450009, 0x00030021, 3};
@@ -1321,6 +1321,7 @@ int main()
             constexpr uint32_t writtenFlags =
                 originalFlags & ~kReachSeatThirdPersonCameraBit;
             Check(
+                !kReachR_V20SeatBitLeaseEnabled &&
                 sizeof(ReachSeatLeaseKey) == 5 * sizeof(uint32_t) &&
                 sizeof(ReachSeatLeasePayload) == 7 * sizeof(uint32_t) &&
                 ReachSeatLeaseKeyValid(leaseKey) &&
@@ -1400,6 +1401,40 @@ int main()
                     writtenFlags, writtenFlags, writtenFlags) ==
                     ReachSeatLeaseRestoreDisposition::AlreadyOriginal,
                 "Reach body-hide restoration writes only exact owned flags and yields to engine/tag changes");
+        }
+        // Reach's actual body-visibility policy is unit-camera WORD bit 2.
+        // It is scoped to one admitted outer render; no seat camera-mode bit is
+        // changed, so the native first-person camera and both view-follow
+        // settings remain independent.
+        {
+            constexpr uint16_t original = 0xA521;
+            constexpr uint16_t written =
+                ReachUnitCameraHidePlayerFlags(original);
+            constexpr uint16_t alreadyHidden = 0xA525;
+            constexpr uint16_t changedDuringRender =
+                static_cast<uint16_t>(written ^ 0x0080u);
+            Check(
+                kReachSeatCameraOffset == 0x70 &&
+                kReachUnitCameraFlagsOffset == 0x00 &&
+                kReachUnitCameraHidePlayerBit == 0x0004 &&
+                written == 0xA525 &&
+                static_cast<uint16_t>(written ^ original) ==
+                    kReachUnitCameraHidePlayerBit &&
+                ReachUnitCameraHidePlayerFlags(alreadyHidden) ==
+                    alreadyHidden &&
+                ReachUnitCameraRestorePlayerFlags(
+                    written, original) == original &&
+                ReachUnitCameraRestorePlayerFlags(
+                    changedDuringRender, original) ==
+                    static_cast<uint16_t>(original ^ 0x0080u) &&
+                ReachClassifySeatLeaseRestore(
+                    written, original, written) ==
+                    ReachSeatLeaseRestoreDisposition::RestoreOriginal &&
+                ReachClassifySeatLeaseRestore(
+                    static_cast<uint16_t>(written ^ 0x0080u),
+                    original, written) ==
+                    ReachSeatLeaseRestoreDisposition::ExternalWrite,
+                "Reach body hide sets only unit-camera bit 2 and restores only that owned bit while preserving unrelated changes");
         }
         // R-V18: entering a Reach seat selects the same native aim feedback
         // under BOTH view-follow settings.
@@ -1629,6 +1664,80 @@ int main()
                 ReachAimFeedbackSource::SeatedCompactFallback,
                 kReachSeatAllowsWeaponsBit),
             "Reach unit aim drives only personal-weapon seat reticles, never vehicle barrels");
+
+        // R-V22 leaves the visible controller reticle in charge and admits a
+        // native selected-barrel direction redirect only for one fresh exact
+        // local occupation/target pair. Fifty milliseconds covers three
+        // scheduled intervals at 72 Hz without allowing long-stale aim at
+        // 144 Hz.
+        {
+            constexpr uint32_t generation = 43;
+            constexpr uint64_t nowMs = 7000;
+            constexpr ReachSeatLeaseKey occupation{
+                generation, 0x12340007, 0x23450009, 0x00030021, 3};
+            ReachShotDirectionSample sample{};
+            sample.currentGeneration = generation;
+            sample.nowMs = nowMs;
+            sample.occupationSampleMs =
+                nowMs - kReachShotDirectionFreshMs;
+            sample.targetSampleMs =
+                nowMs - kReachShotDirectionFreshMs;
+            sample.active = true;
+            sample.firingUnitIndex = occupation.unitHandle;
+            sample.occupation = occupation;
+            sample.targetKey = occupation;
+            sample.origin[0] = 1.0f;
+            sample.origin[1] = 2.0f;
+            sample.origin[2] = 3.0f;
+            sample.target[0] = 401.0f;
+            sample.target[1] = 2.0f;
+            sample.target[2] = 3.0f;
+            Check(
+                !kReachR_V22NativeVehicleReticleEnabled &&
+                ReachShotDirectionSampleAdmitted(sample),
+                "Reach vehicle shot direction admits the exact fresh full-key boundary while retaining the controller reticle");
+
+            ReachShotDirectionSample staleOccupation = sample;
+            staleOccupation.occupationSampleMs =
+                nowMs - kReachShotDirectionFreshMs - 1;
+            ReachShotDirectionSample staleTarget = sample;
+            staleTarget.targetSampleMs =
+                nowMs - kReachShotDirectionFreshMs - 1;
+            ReachShotDirectionSample futureOccupation = sample;
+            futureOccupation.occupationSampleMs = nowMs + 1;
+            ReachShotDirectionSample futureTarget = sample;
+            futureTarget.targetSampleMs = nowMs + 1;
+            ReachShotDirectionSample wrongGeneration = sample;
+            wrongGeneration.currentGeneration = generation + 1;
+            ReachShotDirectionSample wrongSalt = sample;
+            wrongSalt.targetKey.unitHandle ^= 0x00010000;
+            ReachShotDirectionSample wrongUnit = sample;
+            wrongUnit.firingUnitIndex ^= 0x00010000;
+            ReachShotDirectionSample inactive = sample;
+            inactive.active = false;
+            ReachShotDirectionSample invalidOrigin = sample;
+            invalidOrigin.origin[1] =
+                std::numeric_limits<float>::quiet_NaN();
+            ReachShotDirectionSample zeroLength = sample;
+            memcpy(zeroLength.target, zeroLength.origin,
+                   sizeof(zeroLength.target));
+            ReachShotDirectionSample excessiveDistance = sample;
+            excessiveDistance.target[0] =
+                excessiveDistance.origin[0] + 2049.0f;
+            Check(
+                !ReachShotDirectionSampleAdmitted(staleOccupation) &&
+                !ReachShotDirectionSampleAdmitted(staleTarget) &&
+                !ReachShotDirectionSampleAdmitted(futureOccupation) &&
+                !ReachShotDirectionSampleAdmitted(futureTarget) &&
+                !ReachShotDirectionSampleAdmitted(wrongGeneration) &&
+                !ReachShotDirectionSampleAdmitted(wrongSalt) &&
+                !ReachShotDirectionSampleAdmitted(wrongUnit) &&
+                !ReachShotDirectionSampleAdmitted(inactive) &&
+                !ReachShotDirectionSampleAdmitted(invalidOrigin) &&
+                !ReachShotDirectionSampleAdmitted(zeroLength) &&
+                !ReachShotDirectionSampleAdmitted(excessiveDistance),
+                "Reach vehicle shot direction rejects stale, future, mismatched and invalid samples");
+        }
 
         // Personal-weapon origin substitution requires one fresh, matching
         // full-salt seat/eye pair. The 100 ms boundary is admitted exactly;

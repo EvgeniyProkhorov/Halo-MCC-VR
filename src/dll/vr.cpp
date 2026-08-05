@@ -390,6 +390,45 @@ namespace
     // separate is intentional: weapon steering and bullets stay on raw aim.
     XrPosef g_reticleAimPose{{0, 0, 0, 1}, {0, 0, 0}};
     bool g_reticleAimPoseValid = false;
+    struct ReticleAimPosePublication
+    {
+        std::atomic<uint32_t> sequence{0};
+        std::atomic<uint64_t> sampleMs{0};
+        std::atomic<uint8_t> valid{0};
+        std::atomic<float> qx{0.0f};
+        std::atomic<float> qy{0.0f};
+        std::atomic<float> qz{0.0f};
+        std::atomic<float> qw{1.0f};
+        std::atomic<float> px{0.0f};
+        std::atomic<float> py{0.0f};
+        std::atomic<float> pz{0.0f};
+    };
+    ReticleAimPosePublication g_presentedReticleAimPose;
+
+    void PublishPresentedReticleAimPose(const XrPosef* pose)
+    {
+        auto& published = g_presentedReticleAimPose;
+        published.sequence.fetch_add(1, std::memory_order_acq_rel);
+        const bool valid = pose != nullptr;
+        published.sampleMs.store(
+            valid ? GetTickCount64() : 0, std::memory_order_relaxed);
+        published.valid.store(valid ? 1u : 0u, std::memory_order_relaxed);
+        published.qx.store(valid ? pose->orientation.x : 0.0f,
+                           std::memory_order_relaxed);
+        published.qy.store(valid ? pose->orientation.y : 0.0f,
+                           std::memory_order_relaxed);
+        published.qz.store(valid ? pose->orientation.z : 0.0f,
+                           std::memory_order_relaxed);
+        published.qw.store(valid ? pose->orientation.w : 1.0f,
+                           std::memory_order_relaxed);
+        published.px.store(valid ? pose->position.x : 0.0f,
+                           std::memory_order_relaxed);
+        published.py.store(valid ? pose->position.y : 0.0f,
+                           std::memory_order_relaxed);
+        published.pz.store(valid ? pose->position.z : 0.0f,
+                           std::memory_order_relaxed);
+        published.sequence.fetch_add(1, std::memory_order_release);
+    }
 
     // Blit (copy-with-format-conversion) resources, created on demand
     ID3D11VertexShader* g_blitVs = nullptr;
@@ -8040,6 +8079,7 @@ float4 ps_scope_linearize(VSOut i):SV_Target { return paint(i.uv,true); }
                                 ? SmoothTrackedPose(rawAim, g_reticleAimPose, smoothing)
                                 : rawAim;
                             g_reticleAimPoseValid = true;
+                            PublishPresentedReticleAimPose(&g_reticleAimPose);
                             const XrVector3f aimRay = Rotate(
                                 g_reticleAimPose.orientation, {0.0f,0.0f,-1.0f});
                             float aimDir[3] = {aimRay.x,aimRay.y,aimRay.z};
@@ -8165,6 +8205,7 @@ float4 ps_scope_linearize(VSOut i):SV_Target { return paint(i.uv,true); }
                             // Never blend from a stale pose after tracking or
                             // the crosshair is restored.
                             g_reticleAimPoseValid = false;
+                            PublishPresentedReticleAimPose(nullptr);
                         }
 
                         if (reachProjectionAdmitted &&
@@ -10073,6 +10114,43 @@ bool VR_GetAimPose(float outQuat[4], float outPos[3])
     if (!aim.valid)
         return false;
     return true;
+}
+
+bool VR_GetPresentedReticleAimPose(
+    float outQuat[4], float outPos[3], uint64_t& outSampleMs)
+{
+    if (!outQuat || !outPos)
+        return false;
+    auto& published = g_presentedReticleAimPose;
+    for (int attempt = 0; attempt < 2; ++attempt)
+    {
+        const uint32_t before =
+            published.sequence.load(std::memory_order_acquire);
+        if (!before || (before & 1u))
+            continue;
+        const bool valid =
+            published.valid.load(std::memory_order_relaxed) != 0;
+        const uint64_t sampleMs =
+            published.sampleMs.load(std::memory_order_relaxed);
+        const float q[4] = {
+            published.qx.load(std::memory_order_relaxed),
+            published.qy.load(std::memory_order_relaxed),
+            published.qz.load(std::memory_order_relaxed),
+            published.qw.load(std::memory_order_relaxed)};
+        const float p[3] = {
+            published.px.load(std::memory_order_relaxed),
+            published.py.load(std::memory_order_relaxed),
+            published.pz.load(std::memory_order_relaxed)};
+        if (published.sequence.load(std::memory_order_acquire) != before)
+            continue;
+        if (!valid || !sampleMs)
+            return false;
+        memcpy(outQuat, q, sizeof(q));
+        memcpy(outPos, p, sizeof(p));
+        outSampleMs = sampleMs;
+        return true;
+    }
+    return false;
 }
 
 bool VR_GetLeftControllerPose(float outQuat[4], float outPos[3])

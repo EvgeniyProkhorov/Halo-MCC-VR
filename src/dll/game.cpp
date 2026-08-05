@@ -15983,6 +15983,10 @@ namespace
     std::atomic<uint32_t> g_reachVehicleSeatPatchState{0};
     std::atomic<uint32_t> g_reachVehicleSeatPatchSerial{0};
     std::atomic<uint32_t> g_reachVehicleSeatPatchFailures{0};
+    std::atomic<uint32_t> g_reachUnitCameraHideSets{0};
+    std::atomic<uint32_t> g_reachUnitCameraHideAlreadySet{0};
+    std::atomic<uint32_t> g_reachUnitCameraHideRestores{0};
+    std::atomic<uint32_t> g_reachUnitCameraHideFailures{0};
     std::atomic<uint32_t> g_reachVehicleSeatRecenters{0};
     std::atomic<uint32_t> g_reachSeatAuthorsSteering{0};
 
@@ -16064,6 +16068,25 @@ namespace
     };
     ReachCompletedEyePublication g_reachCompletedEye;
 
+    // World-space point occupied by the floating controller reticle that was
+    // actually presented after aim stabilization. Vehicle fire reads this
+    // independently from the current occupation and accepts it only when the
+    // full salted seat key and title generation still match.
+    struct ReachCompletedReticleTargetPublication
+    {
+        std::atomic<uint32_t> sequence{0};
+        std::atomic<uint32_t> generation{0};
+        std::atomic<uint64_t> sampleMs{0};
+        std::atomic<int32_t> unitHandle{-1};
+        std::atomic<int32_t> directParent{-1};
+        std::atomic<uint32_t> definitionDatum{0xFFFFFFFFu};
+        std::atomic<int32_t> seatIndex{-1};
+        std::atomic<float> x{0.0f};
+        std::atomic<float> y{0.0f};
+        std::atomic<float> z{0.0f};
+    };
+    ReachCompletedReticleTargetPublication g_reachCompletedReticleTarget;
+
     void ReachClearAimFeedback()
     {
         auto& published = g_reachAimFeedback;
@@ -16107,6 +16130,21 @@ namespace
             published.sequence.fetch_add(1, std::memory_order_acq_rel);
             published.generation.store(0, std::memory_order_relaxed);
             published.preparedSerial.store(0, std::memory_order_relaxed);
+            published.sampleMs.store(0, std::memory_order_relaxed);
+            published.unitHandle.store(-1, std::memory_order_relaxed);
+            published.directParent.store(-1, std::memory_order_relaxed);
+            published.definitionDatum.store(
+                0xFFFFFFFFu, std::memory_order_relaxed);
+            published.seatIndex.store(-1, std::memory_order_relaxed);
+            published.x.store(0.0f, std::memory_order_relaxed);
+            published.y.store(0.0f, std::memory_order_relaxed);
+            published.z.store(0.0f, std::memory_order_relaxed);
+            published.sequence.fetch_add(1, std::memory_order_release);
+        }
+        {
+            auto& published = g_reachCompletedReticleTarget;
+            published.sequence.fetch_add(1, std::memory_order_acq_rel);
+            published.generation.store(0, std::memory_order_relaxed);
             published.sampleMs.store(0, std::memory_order_relaxed);
             published.unitHandle.store(-1, std::memory_order_relaxed);
             published.directParent.store(-1, std::memory_order_relaxed);
@@ -16353,6 +16391,15 @@ namespace
         float eye[3]{};
     };
 
+    struct ReachCompletedReticleTargetSnapshot
+    {
+        uint32_t sequence = 0;
+        uint32_t generation = 0;
+        uint64_t sampleMs = 0;
+        ReachSeatLeaseKey key{};
+        float target[3]{};
+    };
+
     bool ReachReadShotOccupation(ReachShotOccupationSnapshot& out)
     {
         auto& published = g_reachShotOccupation;
@@ -16411,6 +16458,42 @@ namespace
             sample.eye[0] = published.x.load(std::memory_order_relaxed);
             sample.eye[1] = published.y.load(std::memory_order_relaxed);
             sample.eye[2] = published.z.load(std::memory_order_relaxed);
+            if (published.sequence.load(std::memory_order_acquire) != before)
+                continue;
+            out = sample;
+            return true;
+        }
+        return false;
+    }
+
+    bool ReachReadCompletedReticleTarget(
+        ReachCompletedReticleTargetSnapshot& out)
+    {
+        auto& published = g_reachCompletedReticleTarget;
+        for (int attempt = 0; attempt < 2; ++attempt)
+        {
+            const uint32_t before =
+                published.sequence.load(std::memory_order_acquire);
+            if (!before || (before & 1u))
+                continue;
+            ReachCompletedReticleTargetSnapshot sample{};
+            sample.sequence = before;
+            sample.generation =
+                published.generation.load(std::memory_order_relaxed);
+            sample.sampleMs =
+                published.sampleMs.load(std::memory_order_relaxed);
+            sample.key = {
+                sample.generation,
+                published.unitHandle.load(std::memory_order_relaxed),
+                published.directParent.load(std::memory_order_relaxed),
+                published.definitionDatum.load(std::memory_order_relaxed),
+                published.seatIndex.load(std::memory_order_relaxed)};
+            sample.target[0] =
+                published.x.load(std::memory_order_relaxed);
+            sample.target[1] =
+                published.y.load(std::memory_order_relaxed);
+            sample.target[2] =
+                published.z.load(std::memory_order_relaxed);
             if (published.sequence.load(std::memory_order_acquire) != before)
                 continue;
             out = sample;
@@ -16510,6 +16593,130 @@ namespace
     {
         g_reachFiringOriginReturnA.store(0, std::memory_order_release);
         g_reachFiringOriginReturnB.store(0, std::memory_order_release);
+    }
+
+    // HREK weapons.cpp has exactly one call into this unit-adjust transaction
+    // from the projectile builder. By the time it runs Reach has selected the
+    // firing weapon, barrel, marker/origin and deepest controlling unit. The
+    // original remains responsible for all of that. For the exact local seated
+    // unit only, replace its central direction with the line from that native
+    // origin through the floating reticle point; every downstream ballistic,
+    // spread and tracking stage remains stock.
+    using ReachUnitAdjustFn = void(__fastcall*)(
+        int32_t unitIndex, float* origin, float* direction,
+        const float* basisForward, const float* barrelOffset,
+        const float* optionalCameraPoint, uint8_t firesFromCamera,
+        uint8_t useUnitAim, uint8_t collision, uint32_t simulation);
+    ReachUnitAdjustFn g_origReachUnitAdjust = nullptr;
+    void* g_reachUnitAdjustTarget = nullptr;
+    std::atomic<bool> g_reachVehicleShotRedirectEnabled{false};
+    std::atomic<uint32_t> g_reachVehicleShotRedirects{0};
+    std::atomic<uint32_t> g_reachVehicleShotRedirectMisses{0};
+
+    void ReachUnitAdjustBody(
+        int32_t unitIndex, float* origin, float* direction,
+        const float* basisForward, const float* barrelOffset,
+        const float* optionalCameraPoint, uint8_t firesFromCamera,
+        uint8_t useUnitAim, uint8_t collision, uint32_t simulation)
+    {
+        ReachUnitAdjustFn original = g_origReachUnitAdjust;
+        if (!original)
+            return;
+        original(
+            unitIndex, origin, direction, basisForward, barrelOffset,
+            optionalCameraPoint, firesFromCamera, useUnitAim, collision,
+            simulation);
+        if (!origin || !direction ||
+            !g_reachVehicleShotRedirectEnabled.load(
+                std::memory_order_acquire) ||
+            g_reachCinematicLocked.load(std::memory_order_relaxed))
+        {
+            return;
+        }
+
+        ReachShotOccupationSnapshot occupation{};
+        ReachCompletedReticleTargetSnapshot target{};
+        const bool occupationRead =
+            ReachReadShotOccupation(occupation);
+        const bool targetRead =
+            ReachReadCompletedReticleTarget(target);
+        const bool occupationCoherent = occupationRead &&
+            g_reachShotOccupation.sequence.load(
+                std::memory_order_acquire) == occupation.sequence;
+        const bool targetCoherent = targetRead &&
+            g_reachCompletedReticleTarget.sequence.load(
+                std::memory_order_acquire) == target.sequence;
+        const bool coherent = occupationCoherent && targetCoherent;
+        const uint32_t generation =
+            g_reachCamera.generation.load(std::memory_order_acquire);
+        const bool localCandidate = occupationCoherent && occupation.active &&
+            occupation.generation == generation &&
+            occupation.key.unitHandle == unitIndex;
+
+        ReachShotDirectionSample sample{};
+        sample.currentGeneration = generation;
+        sample.nowMs = GetTickCount64();
+        sample.occupationSampleMs = occupation.sampleMs;
+        sample.targetSampleMs = target.sampleMs;
+        sample.active = occupation.active;
+        sample.firingUnitIndex = unitIndex;
+        sample.occupation = occupation.key;
+        sample.targetKey = target.key;
+        memcpy(sample.origin, origin, sizeof(sample.origin));
+        memcpy(sample.target, target.target, sizeof(sample.target));
+        if (!coherent || !ReachShotDirectionSampleAdmitted(sample))
+        {
+            if (localCandidate)
+            {
+                g_reachVehicleShotRedirectMisses.fetch_add(
+                    1, std::memory_order_relaxed);
+            }
+            return;
+        }
+
+        const float towardReticle[3] = {
+            target.target[0] - origin[0],
+            target.target[1] - origin[1],
+            target.target[2] - origin[2]};
+        const float lengthSquared =
+            towardReticle[0] * towardReticle[0] +
+            towardReticle[1] * towardReticle[1] +
+            towardReticle[2] * towardReticle[2];
+        if (!std::isfinite(lengthSquared) || lengthSquared <= 1.0e-8f)
+        {
+            g_reachVehicleShotRedirectMisses.fetch_add(
+                1, std::memory_order_relaxed);
+            return;
+        }
+        const float inverseLength = 1.0f / sqrtf(lengthSquared);
+        const float normalized[3] = {
+            towardReticle[0] * inverseLength,
+            towardReticle[1] * inverseLength,
+            towardReticle[2] * inverseLength};
+        memcpy(direction, normalized, sizeof(normalized));
+        g_reachVehicleShotRedirects.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    __declspec(noinline) void __fastcall ReachUnitAdjustHook(
+        int32_t unitIndex, float* origin, float* direction,
+        const float* basisForward, const float* barrelOffset,
+        const float* optionalCameraPoint, uint8_t firesFromCamera,
+        uint8_t useUnitAim, uint8_t collision, uint32_t simulation)
+    {
+        g_reachCamera.activeCallbacks.fetch_add(
+            1, std::memory_order_acq_rel);
+        __try
+        {
+            ReachUnitAdjustBody(
+                unitIndex, origin, direction, basisForward, barrelOffset,
+                optionalCameraPoint, firesFromCamera, useUnitAim, collision,
+                simulation);
+        }
+        __finally
+        {
+            g_reachCamera.activeCallbacks.fetch_sub(
+                1, std::memory_order_acq_rel);
+        }
     }
 
     Halo3VehicleDebounce g_reachVehicleFpDebounce;
@@ -19489,6 +19696,90 @@ namespace
                 "the title's own crosshair alpha/fade fields (kill_reticle=1)");
     }
 
+    bool ReachBuildPresentedReticleWorldTarget(
+        const ReachOwnerScope& owner, float outTarget[3],
+        uint64_t& outSampleMs)
+    {
+        if (!outTarget || !owner.vehicleViewApplied ||
+            !owner.vehicle.active)
+        {
+            return false;
+        }
+
+        float q[4]{};
+        float p[3]{};
+        uint64_t sampleMs = 0;
+        if (!VR_GetPresentedReticleAimPose(q, p, sampleMs))
+            return false;
+        float qLengthSquared = 0.0f;
+        for (float component : q)
+        {
+            if (!std::isfinite(component))
+                return false;
+            qLengthSquared += component * component;
+        }
+        for (float component : p)
+            if (!std::isfinite(component))
+                return false;
+        if (!std::isfinite(qLengthSquared) || qLengthSquared <= 1.0e-8f)
+            return false;
+        const float inverseQ = 1.0f / sqrtf(qLengthSquared);
+        for (float& component : q)
+            component *= inverseQ;
+
+        const float localForward[3] = {0.0f, 0.0f, -1.0f};
+        float aimForward[3]{};
+        RotateByQuat(q, localForward, aimForward);
+        const float distance =
+            Clamp(g_config.crosshair_distance_m, 2.0f, 50.0f);
+        const float localTarget[3] = {
+            p[0] + aimForward[0] * distance,
+            p[1] + aimForward[1] * distance,
+            p[2] + aimForward[2] * distance};
+
+        const float dx = localTarget[0] - g_headPosRef[0];
+        const float dy = localTarget[1] - g_headPosRef[1];
+        const float dz = localTarget[2] - g_headPosRef[2];
+        const float sh = sinf(g_headYawRef);
+        const float ch = cosf(g_headYawRef);
+        const float roomForward = dx * sh - dz * ch;
+        const float roomRight = dx * ch + dz * sh;
+        const float positionLocal[3] = {roomForward, -roomRight, dy};
+        float offset[3]{};
+        float hullYaw = 0.0f;
+        float hullPitch = 0.0f;
+        float positionBasis[9]{};
+        const bool follows =
+            Halo3ReadRollStableFollow(hullYaw, hullPitch) &&
+            Halo3ComposeRollStableFollowBasis(
+                hullYaw, hullPitch, g_gameYawRef,
+                0.0f, 0.0f, 0.0f, positionBasis) &&
+            Halo3TransformBasisVector(
+                positionBasis, positionLocal, offset);
+        if (!follows)
+        {
+            const float cg = cosf(g_gameYawRef);
+            const float sg = sinf(g_gameYawRef);
+            offset[0] = cg * roomForward + sg * roomRight;
+            offset[1] = sg * roomForward - cg * roomRight;
+            offset[2] = dy;
+        }
+        for (int axis = 0; axis < 3; ++axis)
+        {
+            // The OpenXR quad is positioned in the same local space as the
+            // headset projection, so its room origin maps to the authored
+            // camera base. gameplayBasePosition may deliberately select the
+            // rigid hands base and would offset the sight when body-following
+            // hands are enabled.
+            outTarget[axis] = owner.vehicle.cameraBase[axis] +
+                offset[axis] * kReachWorldUnitsPerMeter;
+            if (!std::isfinite(outTarget[axis]))
+                return false;
+        }
+        outSampleMs = sampleMs;
+        return sampleMs != 0;
+    }
+
     void ReachPublishCompletedFrameFeedback(
         uint32_t generation, uint64_t preparedSerial,
         const ReachOwnerScope& owner)
@@ -19506,32 +19797,31 @@ namespace
                 owner.vehicle.directParent,
                 owner.vehicle.definitionDatum,
                 owner.vehicle.seatIndex};
-            const ReachAimFeedbackSource candidateSource =
-                owner.vehicle.unitAimValid
-                    ? ReachAimFeedbackSource::SeatedUnitAim
-                    : ReachAimFeedbackSource::SeatedCompactFallback;
-            // The occupant unit's +0x214 vector is the proven firing direction
-            // only for an authored allows-weapons seat. Mounted weapons fire
-            // from a vehicle barrel whose line we do not own; publishing the
-            // occupant vector for those seats made every turret sight lie.
-            reticle.source = ReachSeatAimCanDriveReticle(
-                    candidateSource, owner.vehicle.seatFlags)
-                ? candidateSource
-                : ReachAimFeedbackSource::SeatedCompactFallback;
-            const float* cameraForward =
-                reinterpret_cast<const float*>(owner.headCenter + 0x0C);
-            const float* cameraUp =
-                reinterpret_cast<const float*>(owner.headCenter + 0x18);
-            if (reticle.source != ReachAimFeedbackSource::SeatedUnitAim ||
-                !ReachWorldAimToCameraLocal(
-                    owner.vehicle.unitAimForward, cameraForward, cameraUp,
-                    reticle.cameraLocalDirection))
+            if (kReachR_V22NativeVehicleReticleEnabled)
             {
-                reticle.source =
-                    ReachAimFeedbackSource::SeatedCompactFallback;
-                reticle.cameraLocalDirection[0] = 0.0f;
-                reticle.cameraLocalDirection[1] = 0.0f;
-                reticle.cameraLocalDirection[2] = -1.0f;
+                const ReachAimFeedbackSource candidateSource =
+                    owner.vehicle.unitAimValid
+                        ? ReachAimFeedbackSource::SeatedUnitAim
+                        : ReachAimFeedbackSource::SeatedCompactFallback;
+                reticle.source = ReachSeatAimCanDriveReticle(
+                        candidateSource, owner.vehicle.seatFlags)
+                    ? candidateSource
+                    : ReachAimFeedbackSource::SeatedCompactFallback;
+                const float* cameraForward =
+                    reinterpret_cast<const float*>(owner.headCenter + 0x0C);
+                const float* cameraUp =
+                    reinterpret_cast<const float*>(owner.headCenter + 0x18);
+                if (reticle.source != ReachAimFeedbackSource::SeatedUnitAim ||
+                    !ReachWorldAimToCameraLocal(
+                        owner.vehicle.unitAimForward, cameraForward, cameraUp,
+                        reticle.cameraLocalDirection))
+                {
+                    reticle.source =
+                        ReachAimFeedbackSource::SeatedCompactFallback;
+                    reticle.cameraLocalDirection[0] = 0.0f;
+                    reticle.cameraLocalDirection[1] = 0.0f;
+                    reticle.cameraLocalDirection[2] = -1.0f;
+                }
             }
         }
 
@@ -19567,6 +19857,46 @@ namespace
                 std::memory_order_relaxed);
             published.z.store(
                 reticle.cameraLocalDirection[2],
+                std::memory_order_relaxed);
+            published.sequence.fetch_add(1, std::memory_order_release);
+        }
+
+        float presentedTarget[3]{};
+        uint64_t presentedTargetMs = 0;
+        const bool targetValid = seated &&
+            ReachSeatLeaseKeyValid(reticle.occupation) &&
+            ReachBuildPresentedReticleWorldTarget(
+                owner, presentedTarget, presentedTargetMs);
+        {
+            auto& published = g_reachCompletedReticleTarget;
+            published.sequence.fetch_add(1, std::memory_order_acq_rel);
+            published.generation.store(
+                targetValid ? generation : 0, std::memory_order_relaxed);
+            published.sampleMs.store(
+                targetValid ? presentedTargetMs : 0,
+                std::memory_order_relaxed);
+            published.unitHandle.store(
+                targetValid ? reticle.occupation.unitHandle : -1,
+                std::memory_order_relaxed);
+            published.directParent.store(
+                targetValid ? reticle.occupation.directParent : -1,
+                std::memory_order_relaxed);
+            published.definitionDatum.store(
+                targetValid
+                    ? reticle.occupation.definitionDatum
+                    : 0xFFFFFFFFu,
+                std::memory_order_relaxed);
+            published.seatIndex.store(
+                targetValid ? reticle.occupation.seatIndex : -1,
+                std::memory_order_relaxed);
+            published.x.store(
+                targetValid ? presentedTarget[0] : 0.0f,
+                std::memory_order_relaxed);
+            published.y.store(
+                targetValid ? presentedTarget[1] : 0.0f,
+                std::memory_order_relaxed);
+            published.z.store(
+                targetValid ? presentedTarget[2] : 0.0f,
                 std::memory_order_relaxed);
             published.sequence.fetch_add(1, std::memory_order_release);
         }
@@ -21112,8 +21442,161 @@ namespace
             seat + kReachSeatFlagsOffset);
     }
 
+    // HREK following_camera.cpp names unit-camera bit 2 "hides player-unit
+    // from camera": only the player controlling this camera stops seeing its
+    // world unit. The pinned retail following-camera consumer resolves this
+    // exact occupied seat camera and tests byte mask 0x04 at +0x1DD3B2.
+    // Keep the pointer on this render stack only; loaded tag storage is never
+    // retained across an outer call or published to another thread.
+    struct ReachUnitCameraHideScope
+    {
+        volatile SHORT* flags = nullptr;
+        uint16_t originalFlags = 0;
+        uint16_t writtenFlags = 0;
+        bool ownsMutation = false;
+    };
+
+    uint16_t* ReachResolveLiveUnitCameraFlagsPointer(
+        const ReachSeatLeaseKey& key)
+    {
+        uint32_t* seatFlags = ReachResolveLiveSeatFlagsPointer(key, true);
+        if (!seatFlags)
+            return nullptr;
+        auto* seat = reinterpret_cast<unsigned char*>(seatFlags) -
+            kReachSeatFlagsOffset;
+        return reinterpret_cast<uint16_t*>(
+            seat + kReachSeatCameraOffset + kReachUnitCameraFlagsOffset);
+    }
+
+    bool ReachBeginUnitCameraPlayerHide(
+        const ReachVehicleFrame& frame, ReachUnitCameraHideScope& scope)
+    {
+        scope = {};
+        if (!frame.active || !g_config.vehicle_first_person ||
+            !g_config.vehicle_hide_body ||
+            g_reachCamera.teardownRequested.load(std::memory_order_acquire) ||
+            g_reachCamera.vehicleCameraBindingState.load(
+                std::memory_order_acquire) != static_cast<uint8_t>(
+                    ReachVehicleCameraBindingState::Installed))
+        {
+            return false;
+        }
+        const ReachSeatLeaseKey key{
+            g_reachCamera.generation.load(std::memory_order_acquire),
+            frame.unitHandle, frame.directParent, frame.definitionDatum,
+            frame.seatIndex};
+        if (!ReachSeatLeaseKeyValid(key))
+            return false;
+
+        bool admitted = false;
+        bool failed = false;
+        __try
+        {
+            uint16_t* liveFlags =
+                ReachResolveLiveUnitCameraFlagsPointer(key);
+            if (!liveFlags)
+            {
+                failed = true;
+                __leave;
+            }
+            auto* flags = reinterpret_cast<volatile SHORT*>(liveFlags);
+            const uint16_t original = static_cast<uint16_t>(
+                InterlockedCompareExchange16(flags, 0, 0));
+            const uint16_t written =
+                ReachUnitCameraHidePlayerFlags(original);
+            if (written == original)
+            {
+                g_reachUnitCameraHideAlreadySet.fetch_add(
+                    1, std::memory_order_relaxed);
+                admitted = true;
+                __leave;
+            }
+            const uint16_t prior = static_cast<uint16_t>(
+                InterlockedCompareExchange16(
+                    flags, static_cast<SHORT>(written),
+                    static_cast<SHORT>(original)));
+            if (prior != original)
+            {
+                failed = true;
+                __leave;
+            }
+            scope.flags = flags;
+            scope.originalFlags = original;
+            scope.writtenFlags = written;
+            scope.ownsMutation = true;
+            g_reachUnitCameraHideSets.fetch_add(
+                1, std::memory_order_relaxed);
+            admitted = true;
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            failed = true;
+        }
+        if (failed)
+        {
+            g_reachUnitCameraHideFailures.fetch_add(
+                1, std::memory_order_relaxed);
+        }
+        return admitted;
+    }
+
+    void ReachEndUnitCameraPlayerHide(ReachUnitCameraHideScope& scope)
+    {
+        if (!scope.ownsMutation || !scope.flags)
+            return;
+        bool restored = false;
+        __try
+        {
+            // This scope owns only bit 2. Preserve any unrelated flag change
+            // made during the stock render while always returning our bit to
+            // its entry value. Loaded tag words are normally immutable here,
+            // but the bounded CAS loop also isolates another runtime writer.
+            for (int attempt = 0; attempt < 8; ++attempt)
+            {
+                const uint16_t current = static_cast<uint16_t>(
+                    InterlockedCompareExchange16(scope.flags, 0, 0));
+                const uint16_t desired =
+                    ReachUnitCameraRestorePlayerFlags(
+                        current, scope.originalFlags);
+                if (current == desired)
+                {
+                    restored = true;
+                    break;
+                }
+                const uint16_t prior = static_cast<uint16_t>(
+                    InterlockedCompareExchange16(
+                        scope.flags, static_cast<SHORT>(desired),
+                        static_cast<SHORT>(current)));
+                if (prior == current)
+                {
+                    restored = true;
+                    break;
+                }
+            }
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            restored = false;
+        }
+        if (restored)
+        {
+            g_reachUnitCameraHideRestores.fetch_add(
+                1, std::memory_order_relaxed);
+        }
+        else
+        {
+            // Never overwrite a third value: a title/tag writer wins, and this
+            // optional feature alone degrades for the frame.
+            g_reachUnitCameraHideFailures.fetch_add(
+                1, std::memory_order_relaxed);
+        }
+        scope = {};
+    }
+
     bool ReachRestoreNativeSeatLease()
     {
+        if (!kReachR_V20SeatBitLeaseEnabled)
+            return true;
         const ReachSeatLeaseState state = ReachNativeSeatLeaseState();
         if (!ReachSeatLeaseOwnsMutation(state))
             return state != ReachSeatLeaseState::Installing;
@@ -21191,7 +21674,8 @@ namespace
     // deliberately never restored or rewritten.
     bool ReachEnsureNativeFirstPersonSeat(const ReachVehicleFrame& frame)
     {
-        if (!frame.active || !g_config.vehicle_hide_body ||
+        if (!kReachR_V20SeatBitLeaseEnabled || !frame.active ||
+            !g_config.vehicle_hide_body ||
             g_reachCamera.teardownRequested.load(std::memory_order_acquire) ||
             g_reachCamera.vehicleCameraBindingState.load(
                 std::memory_order_acquire) != static_cast<uint8_t>(
@@ -22571,8 +23055,9 @@ namespace
             epoch.generation,candidate.preparedSerial,candidate.fpTargets);
 
         uintptr_t result = 0;
+        ReachUnitCameraHideScope bodyHide{};
         if (candidate.vehicleViewApplied)
-            ReachEnsureNativeFirstPersonSeat(candidate.vehicle);
+            ReachBeginUnitCameraPlayerHide(candidate.vehicle, bodyHide);
         __try
         {
             result = g_reachOrigMainRenderView(
@@ -22580,6 +23065,7 @@ namespace
         }
         __finally
         {
+            ReachEndUnitCameraPlayerHide(bodyHide);
             ReachEndFpPairScope();
             // Restore only the proven camera-pair data. The engine owns the
             // camera-stack callback at +0x2A8 and its push/pop lifetime.
@@ -22811,7 +23297,7 @@ namespace
     bool ScanForReachDetourIngress(bool& busy)
     {
         static bool rangesResolved = false;
-        static ReachDetourCodeRange ranges[11]{};
+        static ReachDetourCodeRange ranges[12]{};
         if (!rangesResolved)
         {
             const void* functions[] = {
@@ -22826,6 +23312,7 @@ namespace
                 reinterpret_cast<const void*>(&ReachEffectLocationDetour),
                 reinterpret_cast<const void*>(&ReachRainRenderDetour),
                 reinterpret_cast<const void*>(&ReachUnitCameraPositionHook),
+                reinterpret_cast<const void*>(&ReachUnitAdjustHook),
             };
             static_assert(_countof(functions) == _countof(ranges));
             bool resolved = true;
@@ -22850,6 +23337,7 @@ namespace
             g_reachCamera.effectLocationTarget,
             g_reachCamera.rainRenderTarget,
             g_reachUnitCameraPositionTarget,
+            g_reachUnitAdjustTarget,
         };
         void* const trampolines[] = {
             reinterpret_cast<void*>(g_reachOrigMainRenderView),
@@ -22863,6 +23351,7 @@ namespace
             reinterpret_cast<void*>(g_reachOrigEffectLocation),
             reinterpret_cast<void*>(g_reachOrigRainRender),
             reinterpret_cast<void*>(g_origReachUnitCameraPosition),
+            reinterpret_cast<void*>(g_origReachUnitAdjust),
         };
         static_assert(_countof(targets) == _countof(ranges));
         static_assert(_countof(trampolines) == _countof(ranges));
@@ -22955,12 +23444,15 @@ namespace
 
     bool DisableAndRemoveReachHooks()
     {
-        // Make the optional shot-origin detour a stock pass-through before any
-        // disable attempt. It remains in the shared verified lifecycle because
-        // both its trampoline and its original callee point into the title DLL.
+        // Make both optional firing detours stock pass-throughs before any
+        // disable attempt. Their trampolines and original callees point into
+        // the title DLL, so both remain in the shared verified lifecycle.
+        g_reachVehicleShotRedirectEnabled.store(
+            false, std::memory_order_release);
         RevokeReachFiringOriginFeature();
         bool disabledAll = true;
         void* const targets[] = {
+            g_reachUnitAdjustTarget,
             g_reachUnitCameraPositionTarget,
             g_reachCamera.rainRenderTarget,
             g_reachCamera.effectLocationTarget,
@@ -22989,6 +23481,22 @@ namespace
             return false;
 
         bool removedAll = true;
+        if (g_reachUnitAdjustTarget)
+        {
+            const MH_STATUS status =
+                MH_RemoveHook(g_reachUnitAdjustTarget);
+            if (status == MH_OK || status == MH_ERROR_NOT_CREATED)
+            {
+                g_reachUnitAdjustTarget = nullptr;
+                g_origReachUnitAdjust = nullptr;
+            }
+            else
+            {
+                removedAll = false;
+                LOG("Reach vehicle shot-line cleanup: unit-adjust hook "
+                    "remove failed");
+            }
+        }
         if (g_reachUnitCameraPositionTarget)
         {
             const MH_STATUS status =
@@ -23510,6 +24018,32 @@ namespace
         outEvaluator = evaluator;
         outReturnA = adjustCall + 5;
         outReturnB = directCall + 5;
+        return true;
+    }
+
+    // HREK weapons.cpp: unit-adjust (0xD67EE0) is called exactly once by the
+    // projectile transaction after it resolves the weapon owner, active barrel
+    // and deepest controlling unit. The pinned retail homolog is 0x484F24 and
+    // its sole projectile call is 0x4C303A. Retail is used only to match those
+    // already-understood HREK constructs.
+    bool ResolveReachUnitAdjustBinding(
+        uintptr_t base, size_t size, uintptr_t& outUnitAdjust)
+    {
+        outUnitAdjust = 0;
+        static constexpr char kUnitAdjustAob[] =
+            "48 8B C4 55 53 56 57 41 56 41 57 48 8D 68 C9 "
+            "48 81 EC D8 00 00 00 0F 29 70 B8 0F 29 78 A8 "
+            "44 0F 29 40 98 44 0F 29 48 88";
+        constexpr uintptr_t kUnitAdjustRva = 0x00484F24;
+        constexpr uintptr_t kProjectileCallRva = 0x004C303A;
+        if (!ReachColdExactSignatureAt(
+                base, size, kUnitAdjustRva, kUnitAdjustAob) ||
+            !ReachVerifyRel32Call(
+                base, kProjectileCallRva, kUnitAdjustRva))
+        {
+            return false;
+        }
+        outUnitAdjust = base + kUnitAdjustRva;
         return true;
     }
 
@@ -25061,6 +25595,10 @@ namespace
             std::memory_order_relaxed);
         g_reachVehicleSeatPatchSerial.store(0, std::memory_order_relaxed);
         g_reachVehicleSeatPatchFailures.store(0, std::memory_order_relaxed);
+        g_reachUnitCameraHideSets.store(0, std::memory_order_relaxed);
+        g_reachUnitCameraHideAlreadySet.store(0, std::memory_order_relaxed);
+        g_reachUnitCameraHideRestores.store(0, std::memory_order_relaxed);
+        g_reachUnitCameraHideFailures.store(0, std::memory_order_relaxed);
         g_reachVehicleSeatRecenters.store(0, std::memory_order_relaxed);
         g_reachSeatAuthorsSteering.store(0, std::memory_order_relaxed);
         ReachClearAimFeedback();
@@ -25086,7 +25624,7 @@ namespace
                 "per-seat trims and policy, unmatched vehicles ride the "
                 "universal trims); native unit-aim feedback is armed for view "
                 "follow OFF and ON, with rendered marker placement, a "
-                "pointer-free one-frame-interval body-hide lease, bounce and "
+                "render-scoped native unit-camera body hide, bounce and "
                 "hands",
                 kReachVehicleIdentityCount);
         }
@@ -25168,6 +25706,71 @@ namespace
                     "ambiguous; seated personal-weapon shots keep firing from "
                     "the engine's own eye point and will not follow the "
                     "crosshair exactly");
+            }
+        }
+        g_reachVehicleShotRedirectEnabled.store(
+            false, std::memory_order_release);
+        g_reachVehicleShotRedirects.store(0, std::memory_order_relaxed);
+        g_reachVehicleShotRedirectMisses.store(
+            0, std::memory_order_relaxed);
+        {
+            uintptr_t unitAdjust = 0;
+            const bool unitAdjustResolved = reachVehicleCameraResolved &&
+                ResolveReachUnitAdjustBinding(base, size, unitAdjust);
+            if (unitAdjustResolved)
+            {
+                g_reachUnitAdjustTarget =
+                    reinterpret_cast<void*>(unitAdjust);
+                const MH_STATUS created = MH_CreateHook(
+                    g_reachUnitAdjustTarget,
+                    reinterpret_cast<void*>(&ReachUnitAdjustHook),
+                    reinterpret_cast<void**>(&g_origReachUnitAdjust));
+                const bool enabled = created == MH_OK &&
+                    MH_EnableHook(g_reachUnitAdjustTarget) == MH_OK;
+                if (enabled)
+                {
+                    g_reachVehicleShotRedirectEnabled.store(
+                        true, std::memory_order_release);
+                    LOG("Reach vehicle shot line: Installed at native "
+                        "unit-adjust +0x%llX; the exact local selected barrel "
+                        "keeps its stock origin and downstream spread/tracking, "
+                        "while its central direction passes through the "
+                        "presented VR reticle",
+                        (unsigned long long)(unitAdjust - base));
+                }
+                else
+                {
+                    bool retained = created == MH_OK;
+                    if (retained)
+                    {
+                        const MH_STATUS disabled =
+                            MH_DisableHook(g_reachUnitAdjustTarget);
+                        if (ReachDisableStatusIsSafe(disabled))
+                        {
+                            const MH_STATUS removed =
+                                MH_RemoveHook(g_reachUnitAdjustTarget);
+                            retained = removed != MH_OK &&
+                                removed != MH_ERROR_NOT_CREATED;
+                        }
+                    }
+                    if (!retained)
+                    {
+                        g_reachUnitAdjustTarget = nullptr;
+                        g_origReachUnitAdjust = nullptr;
+                    }
+                    LOG("Reach vehicle shot line: FAILED to install "
+                        "(create=%d, cleanup=%s); vehicle shot alignment is "
+                        "unavailable, while the camera core remains active",
+                        (int)created, retained
+                            ? "retained for verified teardown"
+                            : "complete");
+                }
+            }
+            else if (reachVehicleCameraResolved)
+            {
+                LOG("Reach vehicle shot line: unit-adjust binding missing or "
+                    "ambiguous; vehicle shot alignment is unavailable, while "
+                    "the camera core remains active");
             }
         }
         g_reachRainDecoupled.store(0, std::memory_order_relaxed);
@@ -25565,10 +26168,14 @@ namespace
         static bool loggedBoundsFailure = false;
         static bool loggedBounceFallback = false;
         static bool loggedFollowFallback = false;
+        static bool loggedUnitCameraHide = false;
+        static bool loggedUnitCameraHideFailure = false;
         static bool loggedPatchActivity = false;
         static bool loggedPatchFailure = false;
         static bool loggedShotMove = false;
         static bool loggedShotSkip = false;
+        static bool loggedVehicleShotRedirect = false;
+        static bool loggedVehicleShotMiss = false;
         static bool loggedAnchorFallback = false;
         static bool loggedNativeAim = false;
         static bool loggedAimFallback = false;
@@ -25589,12 +26196,16 @@ namespace
             loggedBoundsFailure = false;
             loggedBounceFallback = false;
             loggedFollowFallback = false;
+            loggedUnitCameraHide = false;
+            loggedUnitCameraHideFailure = false;
             loggedPatchActivity = false;
             loggedPatchFailure = false;
             loggedRecenters = 0;
             loggedSeat = 0;
             loggedShotMove = false;
             loggedShotSkip = false;
+            loggedVehicleShotRedirect = false;
+            loggedVehicleShotMiss = false;
             loggedAnchorFallback = false;
             loggedNativeAim = false;
             loggedAimFallback = false;
@@ -25607,8 +26218,9 @@ namespace
             g_reachUnitAimSamples.load(std::memory_order_relaxed) != 0)
         {
             loggedNativeAim = true;
-            LOG("Reach vehicle aim: native unit+0x214 feedback active; weapons "
-                "and steering share this source with view follow OFF or ON");
+            LOG("Reach vehicle aim: native unit+0x214 feedback active for "
+                "input steering with view follow OFF or ON; the visible sight "
+                "and projectile central line use the controller reticle");
         }
         if (!loggedAimFallback &&
             g_reachUnitAimFallbacks.load(std::memory_order_relaxed) != 0)
@@ -25648,6 +26260,23 @@ namespace
                 "(not a current allows-weapons personal seat, key mismatch, "
                 "or stale/invalid completed eye); those shots kept the stock "
                 "origin");
+        }
+        if (!loggedVehicleShotRedirect &&
+            g_reachVehicleShotRedirects.load(
+                std::memory_order_relaxed) != 0)
+        {
+            loggedVehicleShotRedirect = true;
+            LOG("Reach vehicle shot line: native selected-barrel central "
+                "direction redirected through the presented stabilized VR "
+                "reticle (first local shot; stock spread/ballistics retained)");
+        }
+        if (!loggedVehicleShotMiss &&
+            g_reachVehicleShotRedirectMisses.load(
+                std::memory_order_relaxed) != 0)
+        {
+            loggedVehicleShotMiss = true;
+            LOG("Reach vehicle shot line: a local seated shot lacked a fresh "
+                "exact-key presented-reticle target; that shot remained stock");
         }
         if (!loggedCameraFault &&
             g_reachVehicleCameraFaults.load(std::memory_order_relaxed) != 0)
@@ -25729,6 +26358,31 @@ namespace
             LOG("Reach first-person vehicles: attached-weapon carrier root "
                 "could not be resolved; camera placement continues but view "
                 "follow is stock/world-locked for that seat");
+        }
+        const uint32_t unitCameraHideSets =
+            g_reachUnitCameraHideSets.load(std::memory_order_relaxed);
+        const uint32_t unitCameraHideNative =
+            g_reachUnitCameraHideAlreadySet.load(std::memory_order_relaxed);
+        if (!loggedUnitCameraHide &&
+            (unitCameraHideSets != 0 || unitCameraHideNative != 0))
+        {
+            loggedUnitCameraHide = true;
+            LOG("Reach first-person vehicles: native unit-camera hide-player "
+                "bit 0x%04X observed inside the admitted outer render "
+                "(set=%u, already=%u, restored=%u)",
+                static_cast<unsigned>(kReachUnitCameraHidePlayerBit),
+                unitCameraHideSets, unitCameraHideNative,
+                g_reachUnitCameraHideRestores.load(
+                    std::memory_order_relaxed));
+        }
+        if (!loggedUnitCameraHideFailure &&
+            g_reachUnitCameraHideFailures.load(
+                std::memory_order_relaxed) != 0)
+        {
+            loggedUnitCameraHideFailure = true;
+            LOG("Reach first-person vehicles: native unit-camera body hide "
+                "could not be set or restored exactly; body hide alone fell "
+                "back for that frame and the seat camera continued");
         }
         const uint32_t patchSerial = g_reachVehicleSeatPatchSerial.load(
             std::memory_order_acquire);
@@ -28865,6 +29519,10 @@ bool Game_GetReachVehicleReticleAimDirection(
     {
         return false;
     }
+    if (!kReachR_V22NativeVehicleReticleEnabled)
+    {
+        return false;
+    }
     if (ReachReadCompletedReticleAim(
             expectedPreparedSerial, outCameraLocal))
         return true;
@@ -28885,17 +29543,19 @@ bool Game_GetClampedAimDirection(float outDir[3])
         return false;
 #if HALOMCCVR_EXPERIMENTAL_REACH_RENDER_CANDIDATE
     if (TitleAdapter_GetActiveTitle() == GameTitle::HaloReach &&
-        ReachVehicleFpActive())
+        !kReachR_V22NativeVehicleReticleEnabled)
     {
         ReachShotOccupationSnapshot occupation{};
-        // The clamped publication is also derived from the occupant unit's
-        // +0x214 vector. Never let it re-enter as a fallback for a vehicle-
-        // barrel seat after the exact-pair reticle correctly declines it.
-        if (!ReachReadShotOccupation(occupation) || !occupation.active ||
-            !occupation.allowsWeapons ||
-            occupation.generation !=
-                g_reachCamera.generation.load(std::memory_order_acquire))
+        const uint32_t generation =
+            g_reachCamera.generation.load(std::memory_order_acquire);
+        const bool enteringVehicle =
+            ReachReadShotOccupation(occupation) &&
+            occupation.active && occupation.generation == generation;
+        if (ReachVehicleFpActive() || enteringVehicle)
         {
+            // R-V22 makes the presented controller reticle the central shot
+            // line for every local vehicle weapon, including entry debounce.
+            // Never replace it with the occupant unit's unrelated clamped aim.
             return false;
         }
     }

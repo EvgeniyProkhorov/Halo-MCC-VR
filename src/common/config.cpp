@@ -1095,11 +1095,10 @@ void ConfigSave()
     fprintf(f, "# OFF uses the raw node matrices as a diagnostic A/B.\n");
     fprintf(f, "# (default %d)\n", d.vehicle_cam_smoothing ? 1 : 0);
     fprintf(f, "vehicle_cam_smoothing = %d\n\n", g_config.vehicle_cam_smoothing ? 1 : 0);
-    fprintf(f, "# ON (default) tells Halo the seat you are sitting in is a\n");
-    fprintf(f, "# FIRST-PERSON seat, so the game stops drawing your own\n");
-    fprintf(f, "# character in the space your head occupies. Only the seat you\n");
-    fprintf(f, "# are actually in is changed, and it is put back the moment you\n");
-    fprintf(f, "# get out; no game file is ever modified. Has no effect at all\n");
+    fprintf(f, "# ON (default) hides only your own seated WORLD character from\n");
+    fprintf(f, "# your first-person camera. Other cameras still see it, and the\n");
+    fprintf(f, "# first-person arms and weapon remain. No game file is modified.\n");
+    fprintf(f, "# Works with vehicle_view_follow both OFF and ON; has no effect\n");
     fprintf(f, "# when vehicle_first_person = 0.\n");
     fprintf(f, "# (default %d)\n", d.vehicle_hide_body ? 1 : 0);
     fprintf(f, "vehicle_hide_body = %d\n\n", g_config.vehicle_hide_body ? 1 : 0);

@@ -195,6 +195,11 @@ void VR_SetReticleEnemy(bool enemy);
 // barrel. Position = right hand; orientation = right controller, or the
 // right->left two-hand line when two-handed aim engages. False until tracked.
 bool VR_GetAimPose(float outQuat[4], float outPos[3]);
+// Last controller pose actually used to place the floating reticle after
+// aim_stabilization. Published lock-free by the compositor so Reach's firing
+// hook can aim at the visible sight without taking the tracking lock.
+bool VR_GetPresentedReticleAimPose(
+    float outQuat[4], float outPos[3], uint64_t& outSampleMs);
 bool VR_IsTwoHandAiming();
 // Latest OpenXR per-eye FOV angles: left, right, up, down (radians).
 bool VR_GetEyeFov(int eye, float outFov[4]);

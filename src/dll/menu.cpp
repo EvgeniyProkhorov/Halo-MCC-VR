@@ -931,10 +931,10 @@ namespace
         changed |= ImGui::Checkbox("Hide my character in the seat",
                                    &g_config.vehicle_hide_body);
         ImGui::TextDisabled(
-            "ON (default) tells Halo the seat you are in is a first-person\n"
-            "seat, so your own body is no longer drawn where your head is.\n"
-            "Only the seat you occupy is changed and it is restored the\n"
-            "instant you get out. Third-person driving is unaffected.");
+            "ON (default) hides only your own seated world character from\n"
+            "your first-person camera. Other cameras still see it, and your\n"
+            "first-person arms and weapon remain. Game files are untouched.\n"
+            "It applies with View follows the vehicle both OFF and ON.");
         changed |= ImGui::Checkbox("Arms ride the seat, not my head",
                                    &g_config.vehicle_hands_follow_body);
         ImGui::TextDisabled(
