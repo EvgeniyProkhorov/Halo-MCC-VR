@@ -72,7 +72,7 @@ no-mod control run.
 ## PENDING HEADSET CANDIDATE: complete Reach vehicle repair - 2026-08-05
 
 The accepted pointer above remains 118b8bde. Implementation commit f370185 is
-the new unaccepted Reach vehicle repair bundle; the documentation-only
+the new unaccepted Reach vehicle repair bundle; the documentation/packaging-only
 descendant packaged from it must be identified by its candidate manifest. A
 passing build or install does not advance this pointer.
 

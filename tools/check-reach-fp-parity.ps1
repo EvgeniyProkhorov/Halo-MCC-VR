@@ -22,17 +22,21 @@ $repoRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $gamePath = Join-Path $repoRoot 'src\dll\game.cpp'
 $vrPath = Join-Path $repoRoot 'src\dll\vr.cpp'
 $logicPath = Join-Path $repoRoot 'src\common\reach_render_logic.h'
+$vehicleLogicPath = Join-Path $repoRoot 'src\common\reach_vehicle_logic.h'
 $chudLogicPath = Join-Path $repoRoot 'src\common\reach_chud_logic.h'
 $titleRegistryPath = Join-Path $repoRoot 'src\common\title_registry.cpp'
 $hudLayoutLogicPath = Join-Path $repoRoot 'src\common\hud_layout_logic.h'
 $agentsPath = Join-Path $repoRoot 'AGENTS.md'
+$packagePath = Join-Path $repoRoot 'tools\package-candidate.ps1'
 $game = [IO.File]::ReadAllText($gamePath)
 $vr = [IO.File]::ReadAllText($vrPath)
 $logic = [IO.File]::ReadAllText($logicPath)
+$vehicleLogic = [IO.File]::ReadAllText($vehicleLogicPath)
 $chudLogic = [IO.File]::ReadAllText($chudLogicPath)
 $titleRegistry = [IO.File]::ReadAllText($titleRegistryPath)
 $hudLayoutLogic = [IO.File]::ReadAllText($hudLayoutLogicPath)
 $agents = [IO.File]::ReadAllText($agentsPath)
+$package = [IO.File]::ReadAllText($packagePath)
 
 $forbidden = [ordered]@{
     'single Reach interpolation context' =
@@ -157,4 +161,23 @@ if ($logic -notmatch 'kReachCameraStackCallbackAob' -or
     $logic -notmatch 'cameraStackCallbackBodyHash') {
     throw 'Reach camera evidence gate missing: exact outer-camera callback proof anchors.'
 }
-Write-Host 'Reach consistency check passed: no disproven Reach-only architecture reintroduced, Reach capabilities intact, evidence constants present.'
+if ($vehicleLogic -notmatch
+        'kReachR_V20SeatBitLeaseEnabled\s*=\s*false' -or
+    $vehicleLogic -notmatch
+        'kReachR_V22NativeVehicleReticleEnabled\s*=\s*false') {
+    throw 'Reach vehicle gate rejected: a headset-disproven seat-bit/native-reticle path was re-enabled.'
+}
+$manifestContracts = @(
+    'reach_vehicle_body_hide_interval_lease_enabled\s*=\s*\$false',
+    'reach_vehicle_unit_camera_scoped_body_hide_enabled\s*=\s*\$true',
+    'reach_native_seated_aim_reticle_enabled\s*=\s*\$false',
+    'reach_controller_vehicle_reticle_enabled\s*=\s*\$true',
+    'reach_vehicle_selected_barrel_direction_alignment_enabled\s*=\s*\$true',
+    'reach_vehicle_shot_freshness_ms\s*=\s*50'
+)
+foreach ($contract in $manifestContracts) {
+    if ($package -notmatch $contract) {
+        throw 'Reach candidate manifest no longer describes the active R-V22 vehicle contract.'
+    }
+}
+Write-Host 'Reach consistency check passed: no disproven Reach-only architecture reintroduced, Reach capabilities intact, evidence constants and candidate manifest present.'

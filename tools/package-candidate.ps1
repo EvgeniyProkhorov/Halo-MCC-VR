@@ -170,17 +170,25 @@ try {
         reach_flat_crosshair_substitute_enabled = $false
         reach_procedural_crosshair_substitute_enabled = $false
         reach_native_hud_layout_enabled = $false
-        reach_projectile_alignment_enabled = $false
+        reach_projectile_alignment_enabled = $true
+        reach_projectile_alignment_scope =
+            'exact-local-reach-vehicle-central-line'
         reach_vehicle_view_follow_off_preserved = $true
         reach_vehicle_view_follow_render_matched_enabled = $true
         reach_vehicle_view_follow_refresh_invariant = $true
         reach_vehicle_blender_camera_defaults_enabled = $true
         reach_vehicle_retail_camera_aliases_enabled = $true
-        reach_vehicle_body_hide_interval_lease_enabled = $true
-        reach_native_seated_aim_reticle_enabled = $true
+        reach_vehicle_body_hide_interval_lease_enabled = $false
+        reach_vehicle_unit_camera_scoped_body_hide_enabled = $true
+        reach_native_seated_aim_reticle_enabled = $false
+        reach_controller_vehicle_reticle_enabled = $true
         reach_personal_weapon_rendered_eye_origin_enabled = $true
         reach_vehicle_barrel_origin_alignment_enabled = $false
         reach_vehicle_barrel_origin_policy = 'stock'
+        reach_vehicle_selected_barrel_direction_alignment_enabled = $true
+        reach_vehicle_shot_direction_policy =
+            'native-selected-origin-to-presented-controller-reticle'
+        reach_vehicle_shot_freshness_ms = 50
         reach_workshop_content_dependency = $false
         reach_fp_nested_camera_workspace = $true
         reach_fp_world_projection_execution_status = $true
@@ -199,7 +207,7 @@ try {
                 sha256 = $launcherHash
             }
         }
-        note = 'Cumulative Reach vehicle bundle: accepted View Follow OFF is preserved; View Follow ON uses the render-matched carrier basis with no refresh-rate filter; all 25 user-authored Blender camera placements plus exact retail aliases are embedded; and the native seat-bit lease hides the player body across the stereo pair and inter-frame interval. Native seated unit aim drives the Reach reticle immediately with either View Follow option; allows-weapons personal shots use the completed rendered eye, while every vehicle barrel origin remains stock. No Workshop content is required, activated, copied or redistributed. Full HUD layout and universal projectile alignment are not included. Not accepted until this exact DLL hash passes 72-144 Hz, both View Follow options, camera placement, body, authored red/green crosshair, Reach Spartan/Elite, seated personal/mounted/Covenant-turret weapon, lifecycle, and required regression tests.'
+        note = 'Cumulative Reach vehicle repair: headset-reported-good View Follow OFF is preserved; View Follow ON uses the render-matched carrier basis with no refresh-rate filter; all 25 user-authored Blender camera placements plus exact retail aliases remain embedded. The rejected between-frame seat camera-mode lease is dormant. A render-scoped unit-camera hide-player bit hides only the controlling player world body. The floating controller crosshair remains authoritative; the native selected vehicle barrel keeps its stock origin while its exact local central pre-spread direction passes through the presented stabilized sight, with stock spread, ballistics, aim assist and tracking retained. Both firing records have a 50 ms bound for 72-144 Hz. No Workshop content is required, activated, copied or redistributed. Not accepted until this exact DLL hash passes both View Follow options, camera placement, body, visible crosshair, Warthog/Scorpion/Covenant turret firing, lifecycle, and required Halo 3/ODST regression tests.'
     }
 
     $manifestPath = Join-Path $packageDir 'CANDIDATE-MANIFEST.json'
