@@ -21383,6 +21383,12 @@ namespace
     // hold a straight line. The vehicle's own turn rate is the real ceiling.
     inline constexpr float kReachHandSteerDeadbandRadians = 0.052f;
     inline constexpr float kReachHandSteerGain = 3.0f;
+    // The exact 2f03c82 headset run rejected R-V16: closing this servo on raw
+    // hull heading neither matched Halo 3's response nor the Reach aim vector
+    // consumed by weapons and look-steered vehicles. Keep the experiment
+    // available for evidence, but do not execute or publish it. The replacement
+    // candidate lets Reach's native first-person seat own control and aim.
+    inline constexpr bool kReachR_V16HullServoEnabled = false;
     // Names what owns the hull in this seat, so a driving report can be read
     // straight off the log instead of inferred from the config.
     const char* ReachSteeringModeName()
@@ -21480,7 +21486,8 @@ namespace
         // The hull heading the follow-off hand steering converges onto. It is
         // published from the raw hull forward for every proven ground-driver
         // frame, so it stays live in exactly the seats that steer by hand.
-        const bool publishHullHeading = frame.active &&
+        const bool publishHullHeading = kReachR_V16HullServoEnabled &&
+            frame.active &&
             ReachVehicleFpActive() && frame.carrierBasisValid &&
             !groundDriverAuthors &&
             ReachVehicleSeatIsDriver(frame.identity, frame.seatIndex) &&
@@ -28007,7 +28014,8 @@ bool Game_ComputeAimStick(float& outRx, float& outRy)
     // Deflection is continuous out of the deadband, so a small hand tremor
     // never becomes a steering step.
     float reachHullYaw = 0.0f;
-    if (ReachGroundDriverHandSteers(reachHullYaw))
+    if (kReachR_V16HullServoEnabled &&
+        ReachGroundDriverHandSteers(reachHullYaw))
     {
         const float hullErr = WrapPi(desiredYaw - reachHullYaw);
         const float magnitude = fabsf(hullErr);

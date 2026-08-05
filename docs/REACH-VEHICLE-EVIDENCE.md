@@ -792,7 +792,7 @@ Follow with smoothing OFF already fed raw and is unchanged.
 F1 switch) rests on the claim that the accepted Halo 3 driving experience is
 view-follow ON. The repository's own record says the opposite - see R-V16.
 
-## R-V16 - 2026-08-05: Halo 3's follow-off mechanism, ported whole
+## R-V16 - 2026-08-05: rejected raw-hull follow-off servo
 
 Fourth user report, against 83c1c84 (the log's source stamp for the 22:46-22:49
 session; the R-V15 DLL was installed at 22:52 and has never been driven):
@@ -859,8 +859,17 @@ climb/dive; Wraith and Scorpion keep independent turret aim with the hull on
 the move stick; passengers and gunners keep hand aim; Halo 3 and ODST are
 untouched.
 
-Headset-unverified: whether the ported mechanism reads as Halo 3 in the user's
-hands, and whether the deadband and gain suit Reach's heavier vehicles.
+Rejected in the exact Steam/VirtualDesktopXR/Quest 3 90 Hz headset run of
+commit 2f03c82, DLL SHA-256
+C7F93E2F6D9420AD7C8A4B38469185B24CD20C552DEAA74E3DC7BB77D4BCDB0F.
+The preserved log is
+`out/test-runs/2f03c82-reach-vehicles-steam-quest3-rejected-20260805-024428/halo3xr.log`
+(SHA-256 05B6CC91AB1DC2842E943E2C509A37418846179BD7003FB882A80344342F5D8A).
+The user tested both Ghost and Warthog and rejected the complete driving and
+weapon behavior, explicitly clarifying that view follow is only a secondary
+option and the base mechanism must work under both settings. The special
+3-degree-deadband/gain-3 raw-hull servo is therefore disabled, not deleted;
+R-V17's retail identity aliases remain valid independently.
 
 ## R-V17 - 2026-08-05: retail maps are one ULP off the HREK tuples
 
