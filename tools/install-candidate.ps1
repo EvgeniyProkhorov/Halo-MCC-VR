@@ -132,11 +132,21 @@ if ([int]$manifest.schema_version -ne 7 -or
         $manifest.reach_vehicle_view_follow_refresh_invariant -ne $true -or
         $manifest.reach_vehicle_blender_camera_defaults_enabled -ne $true -or
         $manifest.reach_vehicle_retail_camera_aliases_enabled -ne $true -or
-        $manifest.reach_vehicle_body_hide_interval_lease_enabled -ne $true -or
-        $manifest.reach_native_seated_aim_reticle_enabled -ne $true -or
+        $manifest.reach_projectile_alignment_enabled -ne $true -or
+        [string]$manifest.reach_projectile_alignment_scope -cne
+            'exact-local-reach-vehicle-central-line' -or
+        $manifest.reach_vehicle_body_hide_interval_lease_enabled -ne $false -or
+        $manifest.reach_vehicle_unit_camera_scoped_body_hide_enabled -ne $true -or
+        $manifest.reach_native_seated_aim_reticle_enabled -ne $false -or
+        $manifest.reach_controller_vehicle_reticle_enabled -ne $true -or
         $manifest.reach_personal_weapon_rendered_eye_origin_enabled -ne $true -or
         $manifest.reach_vehicle_barrel_origin_alignment_enabled -ne $false -or
         [string]$manifest.reach_vehicle_barrel_origin_policy -cne 'stock' -or
+        $manifest.reach_vehicle_selected_barrel_direction_alignment_enabled -ne
+            $true -or
+        [string]$manifest.reach_vehicle_shot_direction_policy -cne
+            'native-selected-origin-to-presented-controller-reticle' -or
+        [int]$manifest.reach_vehicle_shot_freshness_ms -ne 50 -or
         $manifest.reach_workshop_content_dependency -ne $false -or
         $manifest.reach_runtime_hooks_enabled -ne $true) {
     throw 'Candidate manifest identity or cumulative-title contract is invalid.'

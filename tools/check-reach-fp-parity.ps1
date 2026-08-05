@@ -28,6 +28,7 @@ $titleRegistryPath = Join-Path $repoRoot 'src\common\title_registry.cpp'
 $hudLayoutLogicPath = Join-Path $repoRoot 'src\common\hud_layout_logic.h'
 $agentsPath = Join-Path $repoRoot 'AGENTS.md'
 $packagePath = Join-Path $repoRoot 'tools\package-candidate.ps1'
+$installerPath = Join-Path $repoRoot 'tools\install-candidate.ps1'
 $game = [IO.File]::ReadAllText($gamePath)
 $vr = [IO.File]::ReadAllText($vrPath)
 $logic = [IO.File]::ReadAllText($logicPath)
@@ -37,6 +38,7 @@ $titleRegistry = [IO.File]::ReadAllText($titleRegistryPath)
 $hudLayoutLogic = [IO.File]::ReadAllText($hudLayoutLogicPath)
 $agents = [IO.File]::ReadAllText($agentsPath)
 $package = [IO.File]::ReadAllText($packagePath)
+$installer = [IO.File]::ReadAllText($installerPath)
 
 $forbidden = [ordered]@{
     'single Reach interpolation context' =
@@ -178,6 +180,19 @@ $manifestContracts = @(
 foreach ($contract in $manifestContracts) {
     if ($package -notmatch $contract) {
         throw 'Reach candidate manifest no longer describes the active R-V22 vehicle contract.'
+    }
+}
+$installerContracts = @(
+    'reach_vehicle_body_hide_interval_lease_enabled\s*-ne\s*\$false',
+    'reach_vehicle_unit_camera_scoped_body_hide_enabled\s*-ne\s*\$true',
+    'reach_native_seated_aim_reticle_enabled\s*-ne\s*\$false',
+    'reach_controller_vehicle_reticle_enabled\s*-ne\s*\$true',
+    'reach_vehicle_selected_barrel_direction_alignment_enabled\s*-ne',
+    'reach_vehicle_shot_freshness_ms\s*-ne\s*50'
+)
+foreach ($contract in $installerContracts) {
+    if ($installer -notmatch $contract) {
+        throw 'Reach candidate installer no longer enforces the active R-V22 vehicle contract.'
     }
 }
 Write-Host 'Reach consistency check passed: no disproven Reach-only architecture reintroduced, Reach capabilities intact, evidence constants and candidate manifest present.'
