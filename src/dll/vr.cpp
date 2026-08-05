@@ -7980,7 +7980,7 @@ float4 ps_scope_linearize(VSOut i):SV_Target { return paint(i.uv,true); }
                             AuthoredReticleLayerHasContent(
                                 titleCapturesArt,
                                 g_reticleContainsAuthored);
-                        bool reticleQuadSubmitted =
+                        const bool reticleQuadSubmitted =
                             reticleOwnerAdmitted && g_config.crosshair &&
                             haveAim && reticleChainAdmitted && !theaterPresentation;
 #if HALOMCCVR_EXPERIMENTAL_REACH_RENDER_CANDIDATE
@@ -8064,7 +8064,6 @@ float4 ps_scope_linearize(VSOut i):SV_Target { return paint(i.uv,true); }
                                 const float rightPosition[3] = {
                                     right.position.x, right.position.y,
                                     right.position.z};
-                                float cameraLocalOrigin[3]{};
                                 float cameraLocalAim[3]{};
                                 if (ReachBuildStereoCenterPose(
                                         leftQuaternion, leftPosition,
@@ -8072,7 +8071,6 @@ float4 ps_scope_linearize(VSOut i):SV_Target { return paint(i.uv,true); }
                                         reachCenter) &&
                                     Game_GetReachVehicleReticleAimDirection(
                                         g_preparedFrame.serial,
-                                        cameraLocalOrigin,
                                         cameraLocalAim))
                                 {
                                     const XrVector3f rotated = Rotate(
@@ -8096,50 +8094,27 @@ float4 ps_scope_linearize(VSOut i):SV_Target { return paint(i.uv,true); }
                                         aimDir[1] = rotated.y * inverseLength;
                                         aimDir[2] = rotated.z * inverseLength;
                                         reachNativeAim = true;
-                                        const XrVector3f rotatedOrigin = Rotate(
-                                            {reachCenter.orientation[0],
-                                             reachCenter.orientation[1],
-                                             reachCenter.orientation[2],
-                                             reachCenter.orientation[3]},
-                                            {cameraLocalOrigin[0],
-                                             cameraLocalOrigin[1],
-                                             cameraLocalOrigin[2]});
-                                        reachCenter.position[0] += rotatedOrigin.x;
-                                        reachCenter.position[1] += rotatedOrigin.y;
-                                        reachCenter.position[2] += rotatedOrigin.z;
                                     }
                                 }
                             }
-                            const bool reachExactLineRequired =
-                                reachTitle &&
-                                Game_ReachVehicleReticleRequiresExactLine();
-                            if (reachExactLineRequired && !reachNativeAim)
+                            // A vehicle seat bounds the weapon to a cone around
+                            // the hull, so a hand outside it asks for an angle
+                            // the engine will never reach. While that limit is
+                            // holding, show where the gun ACTUALLY points: the
+                            // reticle is meant to be the truth, and this is the
+                            // one case where the hand ray is not.
+                            float clampedAim[3];
+                            if (!reachNativeAim &&
+                                Game_GetClampedAimDirection(clampedAim))
                             {
-                                reticleQuadSubmitted = false;
-                                g_reticleAimPoseValid = false;
+                                aimDir[0] = clampedAim[0];
+                                aimDir[1] = clampedAim[1];
+                                aimDir[2] = clampedAim[2];
                             }
-                            if (reticleQuadSubmitted)
-                            {
-                                // A vehicle seat bounds the weapon to a cone
-                                // around the hull. This clamp path remains for
-                                // Halo 3/ODST and Reach on foot only; a seated
-                                // Reach vehicle was admitted above solely with
-                                // its exact firing line.
-                                float clampedAim[3];
-                                if (!reachNativeAim &&
-                                    Game_GetClampedAimDirection(clampedAim))
-                                {
-                                    aimDir[0] = clampedAim[0];
-                                    aimDir[1] = clampedAim[1];
-                                    aimDir[2] = clampedAim[2];
-                                }
-                                const float dist =
-                                    g_config.crosshair_distance_m;
-                                const float yaw =
-                                    atan2f(aimDir[0], -aimDir[2]);
-                                const float sp = fminf(
-                                    fmaxf(aimDir[1], -1.0f), 1.0f);
-                                const float pitch = asinf(sp);
+                            const float dist = g_config.crosshair_distance_m;
+                            const float yaw = atan2f(aimDir[0], -aimDir[2]);
+                            const float sp = fminf(fmaxf(aimDir[1], -1.0f), 1.0f);
+                            const float pitch = asinf(sp);
                             // Orientation whose local -Z runs along the ray
                             // (quad faces the player): global yaw about +Y
                             // (angle -yaw, same convention as TryRecenter),
@@ -8179,13 +8154,11 @@ float4 ps_scope_linearize(VSOut i):SV_Target { return paint(i.uv,true); }
                                 reticleOrigin.x + aimDir[0] * dist,
                                 reticleOrigin.y + aimDir[1] * dist,
                                 reticleOrigin.z + aimDir[2] * dist};
-                                const float w = 2.0f * dist *
-                                    tanf(g_config.crosshair_size_deg * 0.5f *
-                                         0.0174533f);
-                                reticleQuad.size = {w, w};
-                                layers.push_back(
-                                    reinterpret_cast<XrCompositionLayerBaseHeader*>(&reticleQuad));
-                            }
+                            const float w = 2.0f * dist *
+                                tanf(g_config.crosshair_size_deg * 0.5f * 0.0174533f);
+                            reticleQuad.size = {w, w};
+                            layers.push_back(
+                                reinterpret_cast<XrCompositionLayerBaseHeader*>(&reticleQuad));
                         }
                         else
                         {

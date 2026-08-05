@@ -1220,10 +1220,6 @@ int main()
             0x40400000, 0x00000000, 0x00000000, 0x00000000};
         const ReachVehicleFingerprint warthogChaingun{
             0x3F1CC397, 0x3E86AFD5, 0xB3A6AFD5, 0x3E9C5885};
-        const ReachVehicleFingerprint warthogGauss{
-            0x3F28C016, 0x3E8E27FC, 0xBC86EDEB, 0x3EA9A1F3};
-        const ReachVehicleFingerprint warthogRocket{
-            0x3F12852A, 0x3DC5E04F, 0x3BE1BCFB, 0x3EA9708D};
         const ReachVehicleFingerprint scorpionHrek{
             0x400D30E2, 0x3D70D852, 0x3D28430C, 0x3EBBF788};
         const ReachVehicleFingerprint scorpionRetail{
@@ -1272,20 +1268,8 @@ int main()
                   ReachVehicleId::Scorpion, scorpionRetail, 0) &&
               ReachVehiclePhysicsTypeMatches(
                   ReachVehicleId::Warthog, warthogRetail, 1) &&
-              ReachVehiclePhysicsTypeMatches(
-                   ReachVehicleId::WarthogChaingun, warthogChaingun, 6) &&
-              ReachVehiclePhysicsTypeMatches(
-                   ReachVehicleId::WarthogChaingun, warthogChaingun, 16) &&
-              ReachVehiclePhysicsTypeMatches(
-                   ReachVehicleId::WarthogGauss, warthogGauss, 6) &&
-              ReachVehiclePhysicsTypeMatches(
-                   ReachVehicleId::WarthogGauss, warthogGauss, 16) &&
-              ReachVehiclePhysicsTypeMatches(
-                   ReachVehicleId::WarthogRocket, warthogRocket, 6) &&
-              ReachVehiclePhysicsTypeMatches(
-                   ReachVehicleId::WarthogRocket, warthogRocket, 16) &&
               !ReachVehiclePhysicsTypeMatches(
-                   ReachVehicleId::WarthogChaingun, warthogChaingun, 1) &&
+                  ReachVehicleId::WarthogChaingun, warthogChaingun, 6) &&
               !ReachVehiclePhysicsTypeMatches(
                   ReachVehicleId::Scorpion, scorpionHrek, 6) &&
               !ReachVehiclePhysicsTypeMatches(
@@ -1592,9 +1576,6 @@ int main()
             zeroVector.cameraLocalDirection[0] = 0.0f;
             zeroVector.cameraLocalDirection[1] = 0.0f;
             zeroVector.cameraLocalDirection[2] = 0.0f;
-            ReachReticleAimSample invalidOrigin = sample;
-            invalidOrigin.cameraLocalOrigin[1] =
-                std::numeric_limits<float>::infinity();
             Check(
                 !ReachReticleAimSampleAdmitted(
                     fallback, generation, serial) &&
@@ -1607,9 +1588,7 @@ int main()
                 !ReachReticleAimSampleAdmitted(
                     invalidVector, generation, serial) &&
                 !ReachReticleAimSampleAdmitted(
-                    zeroVector, generation, serial) &&
-                !ReachReticleAimSampleAdmitted(
-                    invalidOrigin, generation, serial),
+                    zeroVector, generation, serial),
                 "Reach reticle sample rejects fallback sources, incomplete full keys and invalid vectors");
 
             ReachReticleAimSample next = sample;
@@ -1648,18 +1627,8 @@ int main()
                 ReachAimFeedbackSource::SeatedUnitAim, 0) &&
             !ReachSeatAimCanDriveReticle(
                 ReachAimFeedbackSource::SeatedCompactFallback,
-                kReachSeatAllowsWeaponsBit) &&
-            ReachSeatAimCanDriveReticle(
-                ReachAimFeedbackSource::SeatedBarrelAim, 0) &&
-            !ReachSeatAimCanDriveReticle(
-                ReachAimFeedbackSource::SeatedBarrelAim,
                 kReachSeatAllowsWeaponsBit),
-            "Reach personal and vehicle-barrel reticles admit only their matching authored seat class");
-
-        Check(
-            ReachFirstPersonVehicleSeatFlags(0x00000010u) == 0x00000001u &&
-            ReachFirstPersonVehicleSeatFlags(0xA5A50030u) == 0xA5A50021u,
-            "Reach vehicle first-person flags hide the occupant and clear only the third-person camera bit");
+            "Reach unit aim drives only personal-weapon seat reticles, never vehicle barrels");
 
         // Personal-weapon origin substitution requires one fresh, matching
         // full-salt seat/eye pair. The 100 ms boundary is admitted exactly;

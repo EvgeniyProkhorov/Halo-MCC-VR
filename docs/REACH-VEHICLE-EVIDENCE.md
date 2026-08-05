@@ -43,7 +43,7 @@ the same result from its own native constructs:
 | Normal headset look and physical lean | The seat point replaces only the gameplay camera origin; the existing Reach head-look and stereo-eye transaction remains authoritative. Authored/cinematic camera ownership still wins. |
 | Camera rides the rendered vehicle instead of swimming against it | The stock marker resolver supplies either rendered/interpolated or raw node matrices. vehicle_cam_smoothing selects that native A/B. |
 | Vehicle bounce without making the authored seat point drift | Occupant head motion is measured relative to a settled seat-local head pose. vehicle_bounce scales only that residual. |
-| Own body hidden in first person | A pointer-free one-frame-interval lease sets the occupied seat's HREK-named invisible-occupant bit 0 and clears third-person-camera bit 4 from the final stock outer-render call until the next proven outer boundary. No map file is changed. |
+| Own body hidden in first person | A pointer-free one-frame-interval lease clears the occupied seat's native third-person-camera bit 4 from the final stock outer-render call until the next proven outer boundary, so Reach's between-frame perspective consumers see the same first-person seat state. No map file is changed. |
 | Arms and gun ride the seat rather than the player's face | vehicle_hands_follow_body selects the rigid authored seat base for the Reach first-person model/controller roots. The view may still receive the configured head-bounce residual. |
 | Per-seat live placement | The existing F1 forward, height, and left/right controls bind to a Reach-only 34-by-16 bank keyed by the exact current identity and raw seat index. |
 | Optional vehicle-frame view | vehicle_view_follow follows yaw and roll-stable pitch for ground vehicles, yaw only for aircraft, and no carrier frame for walk-up turrets. Attached guns follow their ultimate carrier. |
@@ -1130,14 +1130,6 @@ Workshop item 3775043720 corroborates the content-side result by persistently
 clearing that same HREK-named bit in rebuilt maps. It supplies no executable
 binding or controller logic and is neither activated nor redistributed.
 
-The later 4331c63 headset result proved that lifetime alone was insufficient:
-the lease reported Active while the complete seated player model remained
-visible. Official HREK names seat-flags bit 0 `invisible/completely enclosed by
-vehicle`; that is the occupant-visibility construct the earlier implementation
-omitted. The corrected lease owns both native states in the same complete-word
-transaction: bit 0 set to suppress the occupant and bit 4 clear for first-person
-camera/perspective consumers.
-
 R-V20 changes only body-hide lifetime:
 
 1. The lease payload contains values only: Reach module generation, full salted
@@ -1154,9 +1146,8 @@ R-V20 changes only body-hide lifetime:
 3. The camera samples and builds after that reconciliation. Only after the last
    possible early return, immediately before the stock main_render_view call,
    the same engine thread re-resolves the complete current key and atomically
-   sets only bit 0 and clears only bit 4. A normal return deliberately leaves
-   that complete written word installed through the following one-frame
-   interval, so between-frame native consumers
+   clears only bit 4. A normal return deliberately leaves that word clear
+   through the following one-frame interval, so between-frame native consumers
    see first-person state. The next proven callback restores it before doing
    new work.
 4. An abnormal original/rollback path is different: the outer detour's finally
@@ -1294,31 +1285,14 @@ The implementation is therefore direction-truthful and origin-conservative:
    native barrel origin. The 2026-08-05 headset result disproved the additional
    inference that the occupant unit's +0x214 vector was those barrels' true
    firing angle: Warthog turrets and every tested vehicle missed the VR sight.
-   The first correction merely fell back to the controller sight and was also
-   headset-rejected: it removed a false line without acquiring the real one.
-   The replacement follows the actual HREK weapons.cpp transaction. An authored
-   allows-weapons seat uses the occupant unit's +0x214 direction and rendered
-   eye. A vehicle-barrel seat instead uses the firing direct-parent vehicle or
-   turret unit's +0x214 direction and its live `safe_trigger` marker (SID 0x103)
-   as origin. Both are transformed through the completed pair's final camera
-   basis, including a bounded camera-local origin in metres, so the compositor
-   places the sight on the same line the vehicle barrel fires.
-   There is no seated controller/clamped fallback: if an exact completed line
-   is unavailable for a frame, the VR sight is withheld for that frame rather
-   than displaying a line that the weapon does not own.
-
-The same rejected 4331c63 log exposed why the Warthog chaingun itself lost its
-authored behavior before reticle placement: retail reported exact canonical
-tuple `3F1CC397/3E86AFD5/B3A6AFD5/3E9C5885` with physics type 6, while the HREK
-source tag reports the no-physics sentinel 16. The old test explicitly rejected
-that exact pair, so the gunner became `Unknown` and received universal
-no-follow/no-steer policy. The corrected exact-type rule admits both evidenced
-representations for the three uniquely fingerprinted Warthog weapon children
-(chaingun, Gauss, rocket), still rejecting every other type and every non-exact
-tuple.
-5. No evaluator-call census, steering policy, seat limits, camera trim,
-   authored tag, or Workshop content changes in this transaction. The new
-   runtime branch is gated to Halo Reach. Halo 3 and ODST
+   The correction therefore restricts the exact-pair unit-aim sight (and its
+   clamped fallback) to authored allows-weapons seats, where HREK proves that
+   unit vector is the personal projectile direction. Vehicle-barrel seats keep
+   the controller sight and existing closed-loop steering; no unproven barrel
+   origin or direction is substituted.
+5. No vehicle-barrel origin, evaluator-call census, steering policy, seat
+   limits, camera trim, authored tag, or Workshop content changes in this
+   transaction. The new runtime branch is gated to Halo Reach. Halo 3 and ODST
    continue through the existing controller ray and shared clamped fallback
    byte-for-behavior.
 

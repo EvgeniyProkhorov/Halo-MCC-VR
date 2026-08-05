@@ -15682,7 +15682,6 @@ namespace
         bool active = false;
         bool carrierBasisValid = false;
         bool unitAimValid = false;
-        bool barrelLineValid = false;
         int32_t unitHandle = -1;
         int32_t directParent = -1;
         int32_t carrier = -1;
@@ -15694,8 +15693,6 @@ namespace
         float handsBase[3]{};
         float rawCarrierForward[3]{};
         float unitAimForward[3]{};
-        float barrelAimForward[3]{};
-        float barrelOrigin[3]{};
     };
 
     struct ReachRenderHelpers
@@ -16009,7 +16006,6 @@ namespace
     std::atomic<uint32_t> g_reachUnitAimFallbacks{0};
     std::atomic<uint32_t> g_reachAimFeedbackReadFallbacks{0};
     std::atomic<uint32_t> g_reachReticleAimFallbacks{0};
-    std::atomic<uint32_t> g_reachBarrelReticleSamples{0};
 
     // The compositor may consume only aim from the exact stereo pair it is
     // about to submit. This separate publication is written after both Reach
@@ -16031,9 +16027,6 @@ namespace
         std::atomic<float> x{0.0f};
         std::atomic<float> y{0.0f};
         std::atomic<float> z{-1.0f};
-        std::atomic<float> originX{0.0f};
-        std::atomic<float> originY{0.0f};
-        std::atomic<float> originZ{0.0f};
     };
     ReachCompletedReticleAimPublication g_reachCompletedReticleAim;
 
@@ -16107,9 +16100,6 @@ namespace
             published.x.store(0.0f, std::memory_order_relaxed);
             published.y.store(0.0f, std::memory_order_relaxed);
             published.z.store(-1.0f, std::memory_order_relaxed);
-            published.originX.store(0.0f, std::memory_order_relaxed);
-            published.originY.store(0.0f, std::memory_order_relaxed);
-            published.originZ.store(0.0f, std::memory_order_relaxed);
             published.sequence.fetch_add(1, std::memory_order_release);
         }
         {
@@ -16225,11 +16215,9 @@ namespace
     }
 
     bool ReachReadCompletedReticleAim(
-        uint64_t expectedPreparedSerial, float outCameraLocalOrigin[3],
-        float outCameraLocalDirection[3])
+        uint64_t expectedPreparedSerial, float outCameraLocal[3])
     {
-        if (!expectedPreparedSerial || !outCameraLocalOrigin ||
-            !outCameraLocalDirection)
+        if (!expectedPreparedSerial || !outCameraLocal)
             return false;
         const uint32_t currentGeneration =
             g_reachCamera.generation.load(std::memory_order_acquire);
@@ -16259,12 +16247,6 @@ namespace
                 published.y.load(std::memory_order_relaxed);
             sample.cameraLocalDirection[2] =
                 published.z.load(std::memory_order_relaxed);
-            sample.cameraLocalOrigin[0] =
-                published.originX.load(std::memory_order_relaxed);
-            sample.cameraLocalOrigin[1] =
-                published.originY.load(std::memory_order_relaxed);
-            sample.cameraLocalOrigin[2] =
-                published.originZ.load(std::memory_order_relaxed);
             if (published.sequence.load(std::memory_order_acquire) != before)
                 continue;
             if (!ReachReticleAimSampleAdmitted(
@@ -16272,10 +16254,8 @@ namespace
             {
                 return false;
             }
-            memcpy(outCameraLocalOrigin, sample.cameraLocalOrigin,
-                   sizeof(sample.cameraLocalOrigin));
             return ReachNormalizeUnitAimingVector(
-                sample.cameraLocalDirection, outCameraLocalDirection);
+                sample.cameraLocalDirection, outCameraLocal);
         }
         return false;
     }
@@ -19526,19 +19506,14 @@ namespace
                 owner.vehicle.directParent,
                 owner.vehicle.definitionDatum,
                 owner.vehicle.seatIndex};
-            const bool personal =
-                (owner.vehicle.seatFlags & kReachSeatAllowsWeaponsBit) != 0;
-            const ReachAimFeedbackSource candidateSource = personal
-                ? (owner.vehicle.unitAimValid
-                       ? ReachAimFeedbackSource::SeatedUnitAim
-                       : ReachAimFeedbackSource::SeatedCompactFallback)
-                : (owner.vehicle.barrelLineValid
-                       ? ReachAimFeedbackSource::SeatedBarrelAim
-                       : ReachAimFeedbackSource::SeatedCompactFallback);
+            const ReachAimFeedbackSource candidateSource =
+                owner.vehicle.unitAimValid
+                    ? ReachAimFeedbackSource::SeatedUnitAim
+                    : ReachAimFeedbackSource::SeatedCompactFallback;
             // The occupant unit's +0x214 vector is the proven firing direction
-            // only for an authored allows-weapons seat. Mounted weapons use
-            // the direct parent's proven barrel line; publishing the occupant
-            // vector for those seats made every turret sight lie.
+            // only for an authored allows-weapons seat. Mounted weapons fire
+            // from a vehicle barrel whose line we do not own; publishing the
+            // occupant vector for those seats made every turret sight lie.
             reticle.source = ReachSeatAimCanDriveReticle(
                     candidateSource, owner.vehicle.seatFlags)
                 ? candidateSource
@@ -19547,13 +19522,9 @@ namespace
                 reinterpret_cast<const float*>(owner.headCenter + 0x0C);
             const float* cameraUp =
                 reinterpret_cast<const float*>(owner.headCenter + 0x18);
-            const float* worldAim =
-                reticle.source == ReachAimFeedbackSource::SeatedBarrelAim
-                    ? owner.vehicle.barrelAimForward
-                    : owner.vehicle.unitAimForward;
-            if (!ReachAimFeedbackCanDriveReticle(reticle.source) ||
+            if (reticle.source != ReachAimFeedbackSource::SeatedUnitAim ||
                 !ReachWorldAimToCameraLocal(
-                    worldAim, cameraForward, cameraUp,
+                    owner.vehicle.unitAimForward, cameraForward, cameraUp,
                     reticle.cameraLocalDirection))
             {
                 reticle.source =
@@ -19561,47 +19532,6 @@ namespace
                 reticle.cameraLocalDirection[0] = 0.0f;
                 reticle.cameraLocalDirection[1] = 0.0f;
                 reticle.cameraLocalDirection[2] = -1.0f;
-            }
-            else if (reticle.source == ReachAimFeedbackSource::SeatedBarrelAim)
-            {
-                const float* cameraPosition =
-                    reinterpret_cast<const float*>(owner.headCenter + 0x00);
-                const float right[3] = {
-                    cameraForward[1] * cameraUp[2] -
-                        cameraForward[2] * cameraUp[1],
-                    cameraForward[2] * cameraUp[0] -
-                        cameraForward[0] * cameraUp[2],
-                    cameraForward[0] * cameraUp[1] -
-                        cameraForward[1] * cameraUp[0]};
-                const float delta[3] = {
-                    owner.vehicle.barrelOrigin[0] - cameraPosition[0],
-                    owner.vehicle.barrelOrigin[1] - cameraPosition[1],
-                    owner.vehicle.barrelOrigin[2] - cameraPosition[2]};
-                const float worldToMeters =
-                    1.0f / kReachWorldUnitsPerMeter;
-                reticle.cameraLocalOrigin[0] = worldToMeters *
-                    (delta[0] * right[0] + delta[1] * right[1] +
-                     delta[2] * right[2]);
-                reticle.cameraLocalOrigin[1] = worldToMeters *
-                    (delta[0] * cameraUp[0] + delta[1] * cameraUp[1] +
-                     delta[2] * cameraUp[2]);
-                reticle.cameraLocalOrigin[2] = -worldToMeters *
-                    (delta[0] * cameraForward[0] +
-                     delta[1] * cameraForward[1] +
-                     delta[2] * cameraForward[2]);
-                for (float component : reticle.cameraLocalOrigin)
-                {
-                    if (!std::isfinite(component) ||
-                        std::fabs(component) > 100.0f)
-                    {
-                        reticle.source =
-                            ReachAimFeedbackSource::SeatedCompactFallback;
-                        reticle.cameraLocalOrigin[0] = 0.0f;
-                        reticle.cameraLocalOrigin[1] = 0.0f;
-                        reticle.cameraLocalOrigin[2] = 0.0f;
-                        break;
-                    }
-                }
             }
         }
 
@@ -19638,17 +19568,8 @@ namespace
             published.z.store(
                 reticle.cameraLocalDirection[2],
                 std::memory_order_relaxed);
-            published.originX.store(
-                reticle.cameraLocalOrigin[0], std::memory_order_relaxed);
-            published.originY.store(
-                reticle.cameraLocalOrigin[1], std::memory_order_relaxed);
-            published.originZ.store(
-                reticle.cameraLocalOrigin[2], std::memory_order_relaxed);
             published.sequence.fetch_add(1, std::memory_order_release);
         }
-        if (reticle.source == ReachAimFeedbackSource::SeatedBarrelAim)
-            g_reachBarrelReticleSamples.fetch_add(
-                1, std::memory_order_relaxed);
 
         const float* eye =
             reinterpret_cast<const float*>(owner.headCenter + 0x00);
@@ -21333,7 +21254,7 @@ namespace
             const uint32_t original = static_cast<uint32_t>(
                 InterlockedCompareExchange(flags, 0, 0));
             const uint32_t written =
-                ReachFirstPersonVehicleSeatFlags(original);
+                original & ~kReachSeatThirdPersonCameraBit;
             g_reachNativeSeatLease = {key, original, written};
             if (original == written)
             {
@@ -21656,21 +21577,6 @@ namespace
                     anchorMarker = rootMarker;
                     anchorValid = true;
                 }
-                // HREK weapons.cpp builds a vehicle shot from the firing
-                // vehicle/turret unit's +0x214 aim and its live safe_trigger
-                // marker (SID 0x103). This is deliberately separate from the
-                // occupant aim used by the input loop.
-                Halo3ObjectMarker barrelMarker{};
-                float barrelAimForward[3]{};
-                const bool barrelLineValid =
-                    (seatFlags & kReachSeatAllowsWeaponsBit) == 0 &&
-                    ReachReadUnitAimingVector(
-                        info.directParent, barrelAimForward) &&
-                    g_reachCamera.objectMarkers(
-                        info.directParent, kReachSafeTriggerMarkerStringId,
-                        &barrelMarker,
-                        1, true, interpolate) > 0 &&
-                    Halo3MatrixValid(barrelMarker.matrix);
                 const int trimSlot = identity != ReachVehicleId::Unknown
                     ? ConfigReachSeatTrimSlot(
                           static_cast<int>(identity), info.seatIndex)
@@ -21795,14 +21701,6 @@ namespace
                 {
                     memcpy(frame.unitAimForward, unitAimForward,
                            sizeof(frame.unitAimForward));
-                }
-                frame.barrelLineValid = barrelLineValid;
-                if (barrelLineValid)
-                {
-                    memcpy(frame.barrelAimForward, barrelAimForward,
-                           sizeof(frame.barrelAimForward));
-                    memcpy(frame.barrelOrigin, barrelMarker.matrix.position,
-                           sizeof(frame.barrelOrigin));
                 }
                 memcpy(frame.handsBase, handsBase,
                        sizeof(frame.handsBase));
@@ -25173,7 +25071,6 @@ namespace
         g_reachAimFeedbackReadFallbacks.store(
             0, std::memory_order_relaxed);
         g_reachReticleAimFallbacks.store(0, std::memory_order_relaxed);
-        g_reachBarrelReticleSamples.store(0, std::memory_order_relaxed);
         ReachClearHullHeading();
         g_reachVehicleFpDebounce = {};
         g_reachHeadReference = {};
@@ -25677,7 +25574,6 @@ namespace
         static bool loggedAimFallback = false;
         static bool loggedAimReadFallback = false;
         static bool loggedReticleAimFallback = false;
-        static bool loggedBarrelReticle = false;
         static uint32_t loggedRecenters = 0;
         static uint64_t loggedSeat = 0;
         const uint32_t generation = g_reachCamera.generation.load(
@@ -25704,7 +25600,6 @@ namespace
             loggedAimFallback = false;
             loggedAimReadFallback = false;
             loggedReticleAimFallback = false;
-            loggedBarrelReticle = false;
             for (auto& missSlot : g_reachVehicleCensusMisses)
                 missSlot.state.store(0, std::memory_order_release);
         }
@@ -25735,17 +25630,8 @@ namespace
             g_reachReticleAimFallbacks.load(std::memory_order_relaxed) != 0)
         {
             loggedReticleAimFallback = true;
-            LOG("Reach vehicle reticle: an exact completed seated firing line "
-                "was unavailable or could not map into tracked space; no "
-                "seated fallback is displayed (on-foot controller sight is "
-                "unchanged)");
-        }
-        if (!loggedBarrelReticle &&
-            g_reachBarrelReticleSamples.load(std::memory_order_relaxed) != 0)
-        {
-            loggedBarrelReticle = true;
-            LOG("Reach vehicle reticle: exact direct-parent +0x214 and live "
-                "safe_trigger barrel line active");
+            LOG("Reach vehicle reticle: native seated aim was unavailable or "
+                "could not map into tracked space; controller reticle retained");
         }
         if (!loggedShotMove &&
             g_reachFiringOriginMoves.load(std::memory_order_relaxed) != 0)
@@ -28971,37 +28857,23 @@ bool Game_ComputeAimStick(float& outRx, float& outRy)
 }
 
 bool Game_GetReachVehicleReticleAimDirection(
-    uint64_t expectedPreparedSerial, float outCameraLocalOrigin[3],
-    float outCameraLocalDirection[3])
+    uint64_t expectedPreparedSerial, float outCameraLocal[3])
 {
 #if HALOMCCVR_EXPERIMENTAL_REACH_RENDER_CANDIDATE
-    if (!outCameraLocalOrigin || !outCameraLocalDirection ||
-        !expectedPreparedSerial ||
+    if (!outCameraLocal || !expectedPreparedSerial ||
         TitleAdapter_GetActiveTitle() != GameTitle::HaloReach)
     {
         return false;
     }
     if (ReachReadCompletedReticleAim(
-            expectedPreparedSerial, outCameraLocalOrigin,
-            outCameraLocalDirection))
+            expectedPreparedSerial, outCameraLocal))
         return true;
     g_reachReticleAimFallbacks.fetch_add(1, std::memory_order_relaxed);
 #else
     (void)expectedPreparedSerial;
-    (void)outCameraLocalOrigin;
-    (void)outCameraLocalDirection;
+    (void)outCameraLocal;
 #endif
     return false;
-}
-
-bool Game_ReachVehicleReticleRequiresExactLine()
-{
-#if HALOMCCVR_EXPERIMENTAL_REACH_RENDER_CANDIDATE
-    return TitleAdapter_GetActiveTitle() == GameTitle::HaloReach &&
-        ReachControllerAimActive() && ReachVehicleFpActive();
-#else
-    return false;
-#endif
 }
 
 // True while a seat's angular limit is holding the weapon short of the hand's
