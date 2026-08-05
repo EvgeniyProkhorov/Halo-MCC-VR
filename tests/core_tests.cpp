@@ -1576,6 +1576,9 @@ int main()
             zeroVector.cameraLocalDirection[0] = 0.0f;
             zeroVector.cameraLocalDirection[1] = 0.0f;
             zeroVector.cameraLocalDirection[2] = 0.0f;
+            ReachReticleAimSample invalidOrigin = sample;
+            invalidOrigin.cameraLocalOrigin[1] =
+                std::numeric_limits<float>::infinity();
             Check(
                 !ReachReticleAimSampleAdmitted(
                     fallback, generation, serial) &&
@@ -1588,7 +1591,9 @@ int main()
                 !ReachReticleAimSampleAdmitted(
                     invalidVector, generation, serial) &&
                 !ReachReticleAimSampleAdmitted(
-                    zeroVector, generation, serial),
+                    zeroVector, generation, serial) &&
+                !ReachReticleAimSampleAdmitted(
+                    invalidOrigin, generation, serial),
                 "Reach reticle sample rejects fallback sources, incomplete full keys and invalid vectors");
 
             ReachReticleAimSample next = sample;
@@ -1627,8 +1632,19 @@ int main()
                 ReachAimFeedbackSource::SeatedUnitAim, 0) &&
             !ReachSeatAimCanDriveReticle(
                 ReachAimFeedbackSource::SeatedCompactFallback,
+                kReachSeatAllowsWeaponsBit) &&
+            ReachSeatAimCanDriveReticle(
+                ReachAimFeedbackSource::SeatedBarrelAim, 0) &&
+            !ReachSeatAimCanDriveReticle(
+                ReachAimFeedbackSource::SeatedBarrelAim,
                 kReachSeatAllowsWeaponsBit),
-            "Reach unit aim drives only personal-weapon seat reticles, never vehicle barrels");
+            "Reach personal and vehicle barrel lines admit only their matching authored seat class");
+
+        Check(
+            kReachPrimaryTriggerMarkerStringId == 0x101 &&
+            ReachRenderHiddenSeatFlags(0x00000010u) == 0x00000011u &&
+            ReachRenderHiddenSeatFlags(0xA5A50030u) == 0xA5A50031u,
+            "Reach render-only body hide sets only the invisible-occupant bit and preserves camera flags");
 
         // Personal-weapon origin substitution requires one fresh, matching
         // full-salt seat/eye pair. The 100 ms boundary is admitted exactly;

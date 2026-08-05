@@ -43,7 +43,7 @@ the same result from its own native constructs:
 | Normal headset look and physical lean | The seat point replaces only the gameplay camera origin; the existing Reach head-look and stereo-eye transaction remains authoritative. Authored/cinematic camera ownership still wins. |
 | Camera rides the rendered vehicle instead of swimming against it | The stock marker resolver supplies either rendered/interpolated or raw node matrices. vehicle_cam_smoothing selects that native A/B. |
 | Vehicle bounce without making the authored seat point drift | Occupant head motion is measured relative to a settled seat-local head pose. vehicle_bounce scales only that residual. |
-| Own body hidden in first person | A pointer-free one-frame-interval lease clears the occupied seat's native third-person-camera bit 4 from the final stock outer-render call until the next proven outer boundary, so Reach's between-frame perspective consumers see the same first-person seat state. No map file is changed. |
+| Own body hidden in first person | The existing pointer-free one-frame lease clears third-person-camera bit 4. Separately, invisible-occupant bit 0 is set only across the bounded stock render call and restored immediately, hiding the world biped without feeding visibility state into the next camera frame. No map file is changed. |
 | Arms and gun ride the seat rather than the player's face | vehicle_hands_follow_body selects the rigid authored seat base for the Reach first-person model/controller roots. The view may still receive the configured head-bounce residual. |
 | Per-seat live placement | The existing F1 forward, height, and left/right controls bind to a Reach-only 34-by-16 bank keyed by the exact current identity and raw seat index. |
 | Optional vehicle-frame view | vehicle_view_follow follows yaw and roll-stable pitch for ground vehicles, yaw only for aircraft, and no carrier frame for walk-up turrets. Attached guns follow their ultimate carrier. |
@@ -1304,6 +1304,48 @@ View Follow OFF and ON, including near and far targets. It must record edition,
 runtime, headset and refresh rate and confirm both that the sight moves
 immediately onto the native weapon direction and that close barrel parallax
 has not been falsely removed. This section does not advance CURRENT-STATE.
+
+## R-V21 - 2026-08-05: rejected 18f8b9d and corrected Warthog transaction
+
+The Steam headset result for candidate 18f8b9d (VirtualDesktopXR 1.0.10,
+Meta Quest 3, 90 Hz) rejected all three new behaviors: the seated crosshair
+vanished, Warthog turrets regressed, and the vehicle camera shook. The preserved
+log proves the exact barrel line never published once. Source review found the
+deterministic cause: the new code passed the direct-parent vehicle handle to
+the occupant-only aim reader, which explicitly rejects object kind 1, so C++
+short-circuiting prevented every marker query.
+
+The marker itself was also wrong. HREK's safe_trigger at global string ID
+0x103 belongs to the weapon projectile transaction; it was not evidence that a
+vehicle object authors that marker. Official exported Warthog chaingun, Gauss,
+and rocket render models instead each author primary_trigger. Reach's own
+global string table places primary_trigger, fp_body_cam, and safe_trigger
+consecutively at 0x101, 0x102, and 0x103. The corrected path has a vehicle-only
++0x214 reader and queries live interpolated primary_trigger 0x101 on the same
+direct-parent turret object. Direction and origin therefore come from one real
+turret object and one completed stereo pair.
+
+The same rejected build reclassified the retail Warthog turret tuple/type-6
+pair as an authored HREK identity. Although the tuple is recognizable, the
+headset rejected the changed camera/control policy. That alias remains rejected:
+the established universal camera/control path stays byte-for-behavior, while
+the exact barrel line is independent of identity classification. In
+particular, the existing test continues to require that canonical
+Warthog-chaingun tuple plus retail type 6 does not enter the authored policy.
+
+Finally, bit 0 invisible/completely enclosed by vehicle is not held across
+frames. The accepted camera path keeps only its existing bit-4 lease. Bit 0 is
+atomically set after the final head-centre camera commit, immediately before
+the bounded stock main-render call, and restored to the exact prior word in
+that call's finally block. Thus the world occupant is hidden while it can be
+drawn, but the visibility flag cannot reach the following camera/simulation
+frame and induce the reported shake. Failure affects only model suppression.
+
+There is no seated controller or clamped reticle fallback. A completed exact
+personal-weapon or direct-parent primary_trigger barrel line submits the sight;
+an unavailable exact line submits no seated sight for that frame. Halo 3,
+ODST, Reach on foot, vehicle steering, view-follow policy, camera trims, and
+Workshop content are unchanged.
 
 ## R-V9 - acceptance still required
 

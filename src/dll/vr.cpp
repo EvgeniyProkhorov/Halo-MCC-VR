@@ -7980,7 +7980,7 @@ float4 ps_scope_linearize(VSOut i):SV_Target { return paint(i.uv,true); }
                             AuthoredReticleLayerHasContent(
                                 titleCapturesArt,
                                 g_reticleContainsAuthored);
-                        const bool reticleQuadSubmitted =
+                        bool reticleQuadSubmitted =
                             reticleOwnerAdmitted && g_config.crosshair &&
                             haveAim && reticleChainAdmitted && !theaterPresentation;
 #if HALOMCCVR_EXPERIMENTAL_REACH_RENDER_CANDIDATE
@@ -8064,6 +8064,7 @@ float4 ps_scope_linearize(VSOut i):SV_Target { return paint(i.uv,true); }
                                 const float rightPosition[3] = {
                                     right.position.x, right.position.y,
                                     right.position.z};
+                                float cameraLocalOrigin[3]{};
                                 float cameraLocalAim[3]{};
                                 if (ReachBuildStereoCenterPose(
                                         leftQuaternion, leftPosition,
@@ -8071,6 +8072,7 @@ float4 ps_scope_linearize(VSOut i):SV_Target { return paint(i.uv,true); }
                                         reachCenter) &&
                                     Game_GetReachVehicleReticleAimDirection(
                                         g_preparedFrame.serial,
+                                        cameraLocalOrigin,
                                         cameraLocalAim))
                                 {
                                     const XrVector3f rotated = Rotate(
@@ -8094,71 +8096,101 @@ float4 ps_scope_linearize(VSOut i):SV_Target { return paint(i.uv,true); }
                                         aimDir[1] = rotated.y * inverseLength;
                                         aimDir[2] = rotated.z * inverseLength;
                                         reachNativeAim = true;
+                                        const XrVector3f rotatedOrigin = Rotate(
+                                            {reachCenter.orientation[0],
+                                             reachCenter.orientation[1],
+                                             reachCenter.orientation[2],
+                                             reachCenter.orientation[3]},
+                                            {cameraLocalOrigin[0],
+                                             cameraLocalOrigin[1],
+                                             cameraLocalOrigin[2]});
+                                        reachCenter.position[0] += rotatedOrigin.x;
+                                        reachCenter.position[1] += rotatedOrigin.y;
+                                        reachCenter.position[2] += rotatedOrigin.z;
                                     }
                                 }
                             }
-                            // A vehicle seat bounds the weapon to a cone around
-                            // the hull, so a hand outside it asks for an angle
-                            // the engine will never reach. While that limit is
-                            // holding, show where the gun ACTUALLY points: the
-                            // reticle is meant to be the truth, and this is the
-                            // one case where the hand ray is not.
-                            float clampedAim[3];
-                            if (!reachNativeAim &&
-                                Game_GetClampedAimDirection(clampedAim))
+                            const bool reachExactLineRequired =
+                                reachTitle &&
+                                Game_ReachVehicleReticleRequiresExactLine();
+                            if (reachExactLineRequired && !reachNativeAim)
                             {
-                                aimDir[0] = clampedAim[0];
-                                aimDir[1] = clampedAim[1];
-                                aimDir[2] = clampedAim[2];
+                                reticleQuadSubmitted = false;
+                                g_reticleAimPoseValid = false;
                             }
-                            const float dist = g_config.crosshair_distance_m;
-                            const float yaw = atan2f(aimDir[0], -aimDir[2]);
-                            const float sp = fminf(fmaxf(aimDir[1], -1.0f), 1.0f);
-                            const float pitch = asinf(sp);
-                            // Orientation whose local -Z runs along the ray
-                            // (quad faces the player): global yaw about +Y
-                            // (angle -yaw, same convention as TryRecenter),
-                            // then local pitch about +X.
-                            const XrQuaternionf qy{0, sinf(-yaw * 0.5f), 0, cosf(-yaw * 0.5f)};
-                            const XrQuaternionf qp{sinf(pitch * 0.5f), 0, 0, cosf(pitch * 0.5f)};
-                            const XrQuaternionf q{
-                                qy.w * qp.x + qy.x * qp.w + qy.y * qp.z - qy.z * qp.y,
-                                qy.w * qp.y - qy.x * qp.z + qy.y * qp.w + qy.z * qp.x,
-                                qy.w * qp.z + qy.x * qp.y - qy.y * qp.x + qy.z * qp.w,
-                                qy.w * qp.w - qy.x * qp.x - qy.y * qp.y - qy.z * qp.z};
-                            reticleQuad = {XR_TYPE_COMPOSITION_LAYER_QUAD};
-                            reticleQuad.layerFlags =
-                                XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT |
-                                XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT;
-                            reticleQuad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
-                            reticleQuad.space = g_localSpace;
-                            reticleQuad.subImage.swapchain = g_reticleChain;
-                            reticleQuad.subImage.imageRect =
-                                {{0, 0}, {(int32_t)kReticleSize, (int32_t)kReticleSize}};
-                            reticleQuad.subImage.imageArrayIndex = 0;
-                            reticleQuad.pose.orientation = q;
-                            XrVector3f reticleOrigin =
-                                g_reticleAimPose.position;
-                            if (reachNativeAim)
+                            if (reticleQuadSubmitted)
                             {
-                                // The direction and origin share one validated
-                                // predicted-display-time stereo-center pose.
-                                // Vehicle barrels retain their native origin
-                                // and therefore their honest close parallax.
-                                reticleOrigin = {
-                                    reachCenter.position[0],
-                                    reachCenter.position[1],
-                                    reachCenter.position[2]};
+                                // The clamped path remains available to other
+                                // titles and Reach on foot. A seated Reach
+                                // vehicle reaches this block only with its
+                                // exact completed firing line.
+                                float clampedAim[3];
+                                if (!reachNativeAim &&
+                                    Game_GetClampedAimDirection(clampedAim))
+                                {
+                                    aimDir[0] = clampedAim[0];
+                                    aimDir[1] = clampedAim[1];
+                                    aimDir[2] = clampedAim[2];
+                                }
+                                const float dist =
+                                    g_config.crosshair_distance_m;
+                                const float yaw =
+                                    atan2f(aimDir[0], -aimDir[2]);
+                                const float sp = fminf(
+                                    fmaxf(aimDir[1], -1.0f), 1.0f);
+                                const float pitch = asinf(sp);
+                                const XrQuaternionf qy{
+                                    0, sinf(-yaw * 0.5f), 0,
+                                    cosf(-yaw * 0.5f)};
+                                const XrQuaternionf qp{
+                                    sinf(pitch * 0.5f), 0, 0,
+                                    cosf(pitch * 0.5f)};
+                                const XrQuaternionf q{
+                                    qy.w * qp.x + qy.x * qp.w +
+                                        qy.y * qp.z - qy.z * qp.y,
+                                    qy.w * qp.y - qy.x * qp.z +
+                                        qy.y * qp.w + qy.z * qp.x,
+                                    qy.w * qp.z + qy.x * qp.y -
+                                        qy.y * qp.x + qy.z * qp.w,
+                                    qy.w * qp.w - qy.x * qp.x -
+                                        qy.y * qp.y - qy.z * qp.z};
+                                reticleQuad = {
+                                    XR_TYPE_COMPOSITION_LAYER_QUAD};
+                                reticleQuad.layerFlags =
+                                    XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT |
+                                    XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT;
+                                reticleQuad.eyeVisibility =
+                                    XR_EYE_VISIBILITY_BOTH;
+                                reticleQuad.space = g_localSpace;
+                                reticleQuad.subImage.swapchain =
+                                    g_reticleChain;
+                                reticleQuad.subImage.imageRect =
+                                    {{0, 0},
+                                     {(int32_t)kReticleSize,
+                                      (int32_t)kReticleSize}};
+                                reticleQuad.subImage.imageArrayIndex = 0;
+                                reticleQuad.pose.orientation = q;
+                                XrVector3f reticleOrigin =
+                                    g_reticleAimPose.position;
+                                if (reachNativeAim)
+                                {
+                                    reticleOrigin = {
+                                        reachCenter.position[0],
+                                        reachCenter.position[1],
+                                        reachCenter.position[2]};
+                                }
+                                reticleQuad.pose.position = {
+                                    reticleOrigin.x + aimDir[0] * dist,
+                                    reticleOrigin.y + aimDir[1] * dist,
+                                    reticleOrigin.z + aimDir[2] * dist};
+                                const float w = 2.0f * dist *
+                                    tanf(g_config.crosshair_size_deg * 0.5f *
+                                         0.0174533f);
+                                reticleQuad.size = {w, w};
+                                layers.push_back(
+                                    reinterpret_cast<XrCompositionLayerBaseHeader*>(
+                                        &reticleQuad));
                             }
-                            reticleQuad.pose.position = {
-                                reticleOrigin.x + aimDir[0] * dist,
-                                reticleOrigin.y + aimDir[1] * dist,
-                                reticleOrigin.z + aimDir[2] * dist};
-                            const float w = 2.0f * dist *
-                                tanf(g_config.crosshair_size_deg * 0.5f * 0.0174533f);
-                            reticleQuad.size = {w, w};
-                            layers.push_back(
-                                reinterpret_cast<XrCompositionLayerBaseHeader*>(&reticleQuad));
                         }
                         else
                         {

@@ -170,12 +170,14 @@ const char* Game_VehicleSeatTrimName(int slot, VehicleTrimBank bank);
 // VR-space unit vector so the floating reticle can sit on the gun instead of
 // promising a shot the engine will never take.
 bool Game_GetClampedAimDirection(float outDir[3]);
-// Reach-only exact-frame reticle truth: returns the completed stereo pair's
-// native seated unit aim in that pair's final center-camera local axes.
-// The compositor rotates it by the submitted stereo-center orientation.
-// False leaves the existing controller/clamp reticle path untouched.
+// Reach-only exact-frame reticle truth: returns one completed stereo pair's
+// proven personal-weapon or vehicle-barrel line in final center-camera local
+// axes. Origin is metres relative to the stereo centre; direction is unitless.
+// False leaves on-foot behavior untouched; seated Reach never falls back.
 bool Game_GetReachVehicleReticleAimDirection(
-    uint64_t expectedPreparedSerial, float outCameraLocal[3]);
+    uint64_t expectedPreparedSerial, float outCameraLocalOrigin[3],
+    float outCameraLocalDirection[3]);
+bool Game_ReachVehicleReticleRequiresExactLine();
 // True while an armed tracked camera consumes the OpenXR turn action. The
 // XInput hook must then suppress stock RX/RY so the game cannot create a second
 // camera motion underneath the HMD-owned view.

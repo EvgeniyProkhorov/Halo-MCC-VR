@@ -15682,6 +15682,7 @@ namespace
         bool active = false;
         bool carrierBasisValid = false;
         bool unitAimValid = false;
+        bool barrelLineValid = false;
         int32_t unitHandle = -1;
         int32_t directParent = -1;
         int32_t carrier = -1;
@@ -15693,6 +15694,8 @@ namespace
         float handsBase[3]{};
         float rawCarrierForward[3]{};
         float unitAimForward[3]{};
+        float barrelAimForward[3]{};
+        float barrelOrigin[3]{};
     };
 
     struct ReachRenderHelpers
@@ -16006,6 +16009,9 @@ namespace
     std::atomic<uint32_t> g_reachUnitAimFallbacks{0};
     std::atomic<uint32_t> g_reachAimFeedbackReadFallbacks{0};
     std::atomic<uint32_t> g_reachReticleAimFallbacks{0};
+    std::atomic<uint32_t> g_reachBarrelReticleSamples{0};
+    std::atomic<uint32_t> g_reachRenderBodyHideSamples{0};
+    std::atomic<uint32_t> g_reachRenderBodyHideFailures{0};
 
     // The compositor may consume only aim from the exact stereo pair it is
     // about to submit. This separate publication is written after both Reach
@@ -16027,6 +16033,9 @@ namespace
         std::atomic<float> x{0.0f};
         std::atomic<float> y{0.0f};
         std::atomic<float> z{-1.0f};
+        std::atomic<float> originX{0.0f};
+        std::atomic<float> originY{0.0f};
+        std::atomic<float> originZ{0.0f};
     };
     ReachCompletedReticleAimPublication g_reachCompletedReticleAim;
 
@@ -16100,6 +16109,9 @@ namespace
             published.x.store(0.0f, std::memory_order_relaxed);
             published.y.store(0.0f, std::memory_order_relaxed);
             published.z.store(-1.0f, std::memory_order_relaxed);
+            published.originX.store(0.0f, std::memory_order_relaxed);
+            published.originY.store(0.0f, std::memory_order_relaxed);
+            published.originZ.store(0.0f, std::memory_order_relaxed);
             published.sequence.fetch_add(1, std::memory_order_release);
         }
         {
@@ -16215,9 +16227,11 @@ namespace
     }
 
     bool ReachReadCompletedReticleAim(
-        uint64_t expectedPreparedSerial, float outCameraLocal[3])
+        uint64_t expectedPreparedSerial, float outCameraLocalOrigin[3],
+        float outCameraLocalDirection[3])
     {
-        if (!expectedPreparedSerial || !outCameraLocal)
+        if (!expectedPreparedSerial || !outCameraLocalOrigin ||
+            !outCameraLocalDirection)
             return false;
         const uint32_t currentGeneration =
             g_reachCamera.generation.load(std::memory_order_acquire);
@@ -16247,6 +16261,12 @@ namespace
                 published.y.load(std::memory_order_relaxed);
             sample.cameraLocalDirection[2] =
                 published.z.load(std::memory_order_relaxed);
+            sample.cameraLocalOrigin[0] =
+                published.originX.load(std::memory_order_relaxed);
+            sample.cameraLocalOrigin[1] =
+                published.originY.load(std::memory_order_relaxed);
+            sample.cameraLocalOrigin[2] =
+                published.originZ.load(std::memory_order_relaxed);
             if (published.sequence.load(std::memory_order_acquire) != before)
                 continue;
             if (!ReachReticleAimSampleAdmitted(
@@ -16254,8 +16274,10 @@ namespace
             {
                 return false;
             }
+            memcpy(outCameraLocalOrigin, sample.cameraLocalOrigin,
+                   sizeof(sample.cameraLocalOrigin));
             return ReachNormalizeUnitAimingVector(
-                sample.cameraLocalDirection, outCameraLocal);
+                sample.cameraLocalDirection, outCameraLocalDirection);
         }
         return false;
     }
@@ -19506,14 +19528,15 @@ namespace
                 owner.vehicle.directParent,
                 owner.vehicle.definitionDatum,
                 owner.vehicle.seatIndex};
-            const ReachAimFeedbackSource candidateSource =
-                owner.vehicle.unitAimValid
-                    ? ReachAimFeedbackSource::SeatedUnitAim
-                    : ReachAimFeedbackSource::SeatedCompactFallback;
-            // The occupant unit's +0x214 vector is the proven firing direction
-            // only for an authored allows-weapons seat. Mounted weapons fire
-            // from a vehicle barrel whose line we do not own; publishing the
-            // occupant vector for those seats made every turret sight lie.
+            const bool personal =
+                (owner.vehicle.seatFlags & kReachSeatAllowsWeaponsBit) != 0;
+            const ReachAimFeedbackSource candidateSource = personal
+                ? (owner.vehicle.unitAimValid
+                       ? ReachAimFeedbackSource::SeatedUnitAim
+                       : ReachAimFeedbackSource::SeatedCompactFallback)
+                : (owner.vehicle.barrelLineValid
+                       ? ReachAimFeedbackSource::SeatedBarrelAim
+                       : ReachAimFeedbackSource::SeatedCompactFallback);
             reticle.source = ReachSeatAimCanDriveReticle(
                     candidateSource, owner.vehicle.seatFlags)
                 ? candidateSource
@@ -19522,9 +19545,13 @@ namespace
                 reinterpret_cast<const float*>(owner.headCenter + 0x0C);
             const float* cameraUp =
                 reinterpret_cast<const float*>(owner.headCenter + 0x18);
-            if (reticle.source != ReachAimFeedbackSource::SeatedUnitAim ||
+            const float* worldAim =
+                reticle.source == ReachAimFeedbackSource::SeatedBarrelAim
+                    ? owner.vehicle.barrelAimForward
+                    : owner.vehicle.unitAimForward;
+            if (!ReachAimFeedbackCanDriveReticle(reticle.source) ||
                 !ReachWorldAimToCameraLocal(
-                    owner.vehicle.unitAimForward, cameraForward, cameraUp,
+                    worldAim, cameraForward, cameraUp,
                     reticle.cameraLocalDirection))
             {
                 reticle.source =
@@ -19532,6 +19559,45 @@ namespace
                 reticle.cameraLocalDirection[0] = 0.0f;
                 reticle.cameraLocalDirection[1] = 0.0f;
                 reticle.cameraLocalDirection[2] = -1.0f;
+            }
+            else if (reticle.source == ReachAimFeedbackSource::SeatedBarrelAim)
+            {
+                const float* cameraPosition =
+                    reinterpret_cast<const float*>(owner.headCenter + 0x00);
+                const float right[3] = {
+                    cameraForward[1] * cameraUp[2] -
+                        cameraForward[2] * cameraUp[1],
+                    cameraForward[2] * cameraUp[0] -
+                        cameraForward[0] * cameraUp[2],
+                    cameraForward[0] * cameraUp[1] -
+                        cameraForward[1] * cameraUp[0]};
+                const float delta[3] = {
+                    owner.vehicle.barrelOrigin[0] - cameraPosition[0],
+                    owner.vehicle.barrelOrigin[1] - cameraPosition[1],
+                    owner.vehicle.barrelOrigin[2] - cameraPosition[2]};
+                const float worldToMeters = 1.0f / kReachWorldUnitsPerMeter;
+                reticle.cameraLocalOrigin[0] = worldToMeters *
+                    (delta[0] * right[0] + delta[1] * right[1] +
+                     delta[2] * right[2]);
+                reticle.cameraLocalOrigin[1] = worldToMeters *
+                    (delta[0] * cameraUp[0] + delta[1] * cameraUp[1] +
+                     delta[2] * cameraUp[2]);
+                reticle.cameraLocalOrigin[2] = -worldToMeters *
+                    (delta[0] * cameraForward[0] +
+                     delta[1] * cameraForward[1] +
+                     delta[2] * cameraForward[2]);
+                for (float component : reticle.cameraLocalOrigin)
+                {
+                    if (!std::isfinite(component) ||
+                        std::fabs(component) > 100.0f)
+                    {
+                        reticle.source =
+                            ReachAimFeedbackSource::SeatedCompactFallback;
+                        memset(reticle.cameraLocalOrigin, 0,
+                               sizeof(reticle.cameraLocalOrigin));
+                        break;
+                    }
+                }
             }
         }
 
@@ -19568,8 +19634,17 @@ namespace
             published.z.store(
                 reticle.cameraLocalDirection[2],
                 std::memory_order_relaxed);
+            published.originX.store(
+                reticle.cameraLocalOrigin[0], std::memory_order_relaxed);
+            published.originY.store(
+                reticle.cameraLocalOrigin[1], std::memory_order_relaxed);
+            published.originZ.store(
+                reticle.cameraLocalOrigin[2], std::memory_order_relaxed);
             published.sequence.fetch_add(1, std::memory_order_release);
         }
+        if (reticle.source == ReachAimFeedbackSource::SeatedBarrelAim)
+            g_reachBarrelReticleSamples.fetch_add(
+                1, std::memory_order_relaxed);
 
         const float* eye =
             reinterpret_cast<const float*>(owner.headCenter + 0x00);
@@ -20919,6 +20994,34 @@ namespace
         return copied && ReachNormalizeUnitAimingVector(raw, out);
     }
 
+    // Vehicles are unit subclasses and HREK's projectile transaction consumes
+    // the firing vehicle/turret unit's +0x214 vector. Keep this reader separate
+    // from the occupant-only helper above so an object-class mix-up cannot make
+    // every mounted sight silently unavailable again.
+    bool ReachReadVehicleAimingVector(int32_t vehicleHandle, float out[3])
+    {
+        if (!out || vehicleHandle == -1)
+            return false;
+        float raw[3]{};
+        bool copied = false;
+        __try
+        {
+            uint8_t kind = 0;
+            const unsigned char* data =
+                ReachVehicleObjectData(vehicleHandle, kind);
+            if (data && kind == kReachObjectKindVehicle)
+            {
+                memcpy(raw, data + kReachUnitAimingVectorOffset, sizeof(raw));
+                copied = true;
+            }
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            copied = false;
+        }
+        return copied && ReachNormalizeUnitAimingVector(raw, out);
+    }
+
     unsigned char* ReachPackedTagBlockElement(
         uint32_t packedData, int index, size_t stride)
     {
@@ -21315,6 +21418,83 @@ namespace
         return false;
     }
 
+    struct ReachRenderBodyHideScope
+    {
+        volatile LONG* flags = nullptr;
+        uint32_t prior = 0;
+        uint32_t hidden = 0;
+        bool wrote = false;
+    };
+
+    // Bit 0 is a render visibility switch, not a camera ownership switch. Hold
+    // it only across the already-bounded stock render call, then restore the
+    // exact prior word in the same finally block. The longer-lived bit-4 lease
+    // remains unchanged, preserving the previously stable camera motion.
+    bool ReachBeginRenderBodyHide(
+        const ReachVehicleFrame& frame, ReachRenderBodyHideScope& scope)
+    {
+        scope = {};
+        if (!frame.active || !g_config.vehicle_hide_body)
+            return false;
+        const ReachSeatLeaseKey key{
+            g_reachCamera.generation.load(std::memory_order_acquire),
+            frame.unitHandle, frame.directParent, frame.definitionDatum,
+            frame.seatIndex};
+        bool hidden = false;
+        __try
+        {
+            uint32_t* live = ReachResolveLiveSeatFlagsPointer(key, true);
+            if (!live)
+                __leave;
+            scope.flags = reinterpret_cast<volatile LONG*>(live);
+            scope.prior = static_cast<uint32_t>(
+                InterlockedCompareExchange(scope.flags, 0, 0));
+            scope.hidden = ReachRenderHiddenSeatFlags(scope.prior);
+            if (scope.hidden == scope.prior)
+            {
+                hidden = true;
+                __leave;
+            }
+            const uint32_t observed = static_cast<uint32_t>(
+                InterlockedCompareExchange(
+                    scope.flags, static_cast<LONG>(scope.hidden),
+                    static_cast<LONG>(scope.prior)));
+            scope.wrote = observed == scope.prior;
+            hidden = scope.wrote;
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            hidden = false;
+        }
+        if (hidden)
+            g_reachRenderBodyHideSamples.fetch_add(1, std::memory_order_relaxed);
+        else
+            g_reachRenderBodyHideFailures.fetch_add(1, std::memory_order_relaxed);
+        return hidden;
+    }
+
+    void ReachEndRenderBodyHide(ReachRenderBodyHideScope& scope)
+    {
+        if (!scope.wrote || !scope.flags)
+            return;
+        bool restored = false;
+        __try
+        {
+            const uint32_t observed = static_cast<uint32_t>(
+                InterlockedCompareExchange(
+                    scope.flags, static_cast<LONG>(scope.prior),
+                    static_cast<LONG>(scope.hidden)));
+            restored = observed == scope.hidden || observed == scope.prior;
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            restored = false;
+        }
+        if (!restored)
+            g_reachRenderBodyHideFailures.fetch_add(1, std::memory_order_relaxed);
+        scope = {};
+    }
+
     // Sample only on Reach's proven normal-player outer-render thread, whose
     // engine TLS is valid. The XInput hook reads only the resulting lock-free
     // snapshot and never calls title code from MCC's input thread.
@@ -21577,6 +21757,17 @@ namespace
                     anchorMarker = rootMarker;
                     anchorValid = true;
                 }
+                Halo3ObjectMarker barrelMarker{};
+                float barrelAimForward[3]{};
+                const bool barrelLineValid =
+                    (seatFlags & kReachSeatAllowsWeaponsBit) == 0 &&
+                    ReachReadVehicleAimingVector(
+                        info.directParent, barrelAimForward) &&
+                    g_reachCamera.objectMarkers(
+                        info.directParent,
+                        kReachPrimaryTriggerMarkerStringId,
+                        &barrelMarker, 1, true, interpolate) > 0 &&
+                    Halo3MatrixValid(barrelMarker.matrix);
                 const int trimSlot = identity != ReachVehicleId::Unknown
                     ? ConfigReachSeatTrimSlot(
                           static_cast<int>(identity), info.seatIndex)
@@ -21701,6 +21892,14 @@ namespace
                 {
                     memcpy(frame.unitAimForward, unitAimForward,
                            sizeof(frame.unitAimForward));
+                }
+                frame.barrelLineValid = barrelLineValid;
+                if (barrelLineValid)
+                {
+                    memcpy(frame.barrelAimForward, barrelAimForward,
+                           sizeof(frame.barrelAimForward));
+                    memcpy(frame.barrelOrigin, barrelMarker.matrix.position,
+                           sizeof(frame.barrelOrigin));
                 }
                 memcpy(frame.handsBase, handsBase,
                        sizeof(frame.handsBase));
@@ -22573,6 +22772,9 @@ namespace
         uintptr_t result = 0;
         if (candidate.vehicleViewApplied)
             ReachEnsureNativeFirstPersonSeat(candidate.vehicle);
+        ReachRenderBodyHideScope bodyHide{};
+        if (candidate.vehicleViewApplied)
+            ReachBeginRenderBodyHide(candidate.vehicle, bodyHide);
         __try
         {
             result = g_reachOrigMainRenderView(
@@ -22580,6 +22782,7 @@ namespace
         }
         __finally
         {
+            ReachEndRenderBodyHide(bodyHide);
             ReachEndFpPairScope();
             // Restore only the proven camera-pair data. The engine owns the
             // camera-stack callback at +0x2A8 and its push/pop lifetime.
@@ -25071,6 +25274,9 @@ namespace
         g_reachAimFeedbackReadFallbacks.store(
             0, std::memory_order_relaxed);
         g_reachReticleAimFallbacks.store(0, std::memory_order_relaxed);
+        g_reachBarrelReticleSamples.store(0, std::memory_order_relaxed);
+        g_reachRenderBodyHideSamples.store(0, std::memory_order_relaxed);
+        g_reachRenderBodyHideFailures.store(0, std::memory_order_relaxed);
         ReachClearHullHeading();
         g_reachVehicleFpDebounce = {};
         g_reachHeadReference = {};
@@ -25574,6 +25780,9 @@ namespace
         static bool loggedAimFallback = false;
         static bool loggedAimReadFallback = false;
         static bool loggedReticleAimFallback = false;
+        static bool loggedBarrelReticle = false;
+        static bool loggedRenderBodyHide = false;
+        static bool loggedRenderBodyHideFailure = false;
         static uint32_t loggedRecenters = 0;
         static uint64_t loggedSeat = 0;
         const uint32_t generation = g_reachCamera.generation.load(
@@ -25600,6 +25809,9 @@ namespace
             loggedAimFallback = false;
             loggedAimReadFallback = false;
             loggedReticleAimFallback = false;
+            loggedBarrelReticle = false;
+            loggedRenderBodyHide = false;
+            loggedRenderBodyHideFailure = false;
             for (auto& missSlot : g_reachVehicleCensusMisses)
                 missSlot.state.store(0, std::memory_order_release);
         }
@@ -25630,8 +25842,29 @@ namespace
             g_reachReticleAimFallbacks.load(std::memory_order_relaxed) != 0)
         {
             loggedReticleAimFallback = true;
-            LOG("Reach vehicle reticle: native seated aim was unavailable or "
-                "could not map into tracked space; controller reticle retained");
+            LOG("Reach vehicle reticle: exact completed seated firing line "
+                "unavailable; no seated fallback displayed");
+        }
+        if (!loggedBarrelReticle &&
+            g_reachBarrelReticleSamples.load(std::memory_order_relaxed) != 0)
+        {
+            loggedBarrelReticle = true;
+            LOG("Reach vehicle reticle: exact vehicle +0x214 and live "
+                "primary_trigger barrel line active");
+        }
+        if (!loggedRenderBodyHide &&
+            g_reachRenderBodyHideSamples.load(std::memory_order_relaxed) != 0)
+        {
+            loggedRenderBodyHide = true;
+            LOG("Reach first-person vehicles: occupant hidden only inside the "
+                "bounded render call; camera-state lifetime unchanged");
+        }
+        if (!loggedRenderBodyHideFailure &&
+            g_reachRenderBodyHideFailures.load(std::memory_order_relaxed) != 0)
+        {
+            loggedRenderBodyHideFailure = true;
+            LOG("Reach first-person vehicles: render-only occupant hide had a "
+                "resolve/write/restore failure; camera path remained active");
         }
         if (!loggedShotMove &&
             g_reachFiringOriginMoves.load(std::memory_order_relaxed) != 0)
@@ -28857,23 +29090,37 @@ bool Game_ComputeAimStick(float& outRx, float& outRy)
 }
 
 bool Game_GetReachVehicleReticleAimDirection(
-    uint64_t expectedPreparedSerial, float outCameraLocal[3])
+    uint64_t expectedPreparedSerial, float outCameraLocalOrigin[3],
+    float outCameraLocalDirection[3])
 {
 #if HALOMCCVR_EXPERIMENTAL_REACH_RENDER_CANDIDATE
-    if (!outCameraLocal || !expectedPreparedSerial ||
+    if (!outCameraLocalOrigin || !outCameraLocalDirection ||
+        !expectedPreparedSerial ||
         TitleAdapter_GetActiveTitle() != GameTitle::HaloReach)
     {
         return false;
     }
     if (ReachReadCompletedReticleAim(
-            expectedPreparedSerial, outCameraLocal))
+            expectedPreparedSerial, outCameraLocalOrigin,
+            outCameraLocalDirection))
         return true;
     g_reachReticleAimFallbacks.fetch_add(1, std::memory_order_relaxed);
 #else
     (void)expectedPreparedSerial;
-    (void)outCameraLocal;
+    (void)outCameraLocalOrigin;
+    (void)outCameraLocalDirection;
 #endif
     return false;
+}
+
+bool Game_ReachVehicleReticleRequiresExactLine()
+{
+#if HALOMCCVR_EXPERIMENTAL_REACH_RENDER_CANDIDATE
+    return TitleAdapter_GetActiveTitle() == GameTitle::HaloReach &&
+        ReachControllerAimActive() && ReachVehicleFpActive();
+#else
+    return false;
+#endif
 }
 
 // True while a seat's angular limit is holding the weapon short of the hand's
