@@ -900,6 +900,68 @@ observed at retail carries the same latent risk; a tolerant radius compare
 would immunize all of them and is deliberately NOT done here, because a
 bit-exact table is what makes the match provable.
 
+## R-V18 - 2026-08-05: actual unit aim under both view-follow modes
+
+The rejected 2f03c82 candidate changed Reach seat bit 4 only around one
+main_render_view call. It restored the bit in the call's __finally, so Reach's
+simulation, player-control, aiming and firing work between render calls still
+saw a third-person seat. That could hide the body for one render, but it could
+not reproduce a tag-authored first-person vehicle.
+
+The locally installed, deliberately inactive Workshop item 3775043720 is a
+9.066 GB set of rebuilt campaign maps with no DLL, controller profile, scripts
+or source tags. Read-only cache comparison is corroboration, not a source of
+bindings: its Warthog, Ghost, Revenant, Banshee, Falcon and several gunner/turret
+seats chiefly clear the same HREK-named third person camera bit 4. For example,
+the stock Warthog words 04020014 00000870 08001C10 08001C10 become
+04020004 00000820 08001C00 08001C00. The item is not activated, copied or
+redistributed, and cannot be a Store-edition dependency.
+
+Official HREK explains why lifetime matters. The unit camera-position evaluator
+at HREK 0xD76E60 reads the live 0x12C seat record and tests bit 4. It is consumed
+outside rendering by the player-control camera/desired-angle path
+(0x1E770F/0x1E7934), the unit firing adjustment
+(0xD67EE0/0xD67F8E), unit aiming-origin paths
+(0xE5C440/0xE5C543 and 0xE5C6D1/0xE5C704), and the projectile transaction
+(0xDE4290/0xDE52DD). A render-scoped write therefore cannot establish the
+native state those consumers require.
+
+HREK weapons.cpp also proves the ordinary projectile forward independently:
+inside the unit-adjust body, 0xD67FAB reads unit+0x214 x/y and 0xD67FB8 reads
+unit+0x21C z. This is the actual unit aiming vector recorded already in R-V12.
+Reach previously fed the shared VR controller loop the compact render-camera
+forward instead. In a seated chase-camera engine those are not the same state.
+
+R-V18 makes one player-visible change: a structurally proven Reach seat feeds
+the VR controller loop the same actual unit aim state Reach uses for firing.
+The Workshop-style persistent seat lifetime is deliberately not stacked into
+this candidate.
+
+1. The existing bit-4 body-hide write remains scoped to one synchronous render
+   call and restores in its __finally. No loaded tag pointer survives the frame.
+   The installed Workshop maps prove a persistent native-camera lead, but it
+   has a separate lifetime/fallback risk and requires its own later candidate.
+2. Every seated frame reads that same local unit's +0x214 vector through the
+   proven object collection, with an isolated SEH boundary, finite and broad
+   length guard, then normalizes it. Failure falls back to the compact camera
+   for that frame and is counted; it never faults the vehicle frame or camera
+   core. The legacy shared aim publication remains the compact camera, so a
+   stale or torn coherent-unit read also fails back to compact rather than
+   retaining stale steering feedback.
+3. vehicle_view_follow does not select either mechanism. OFF retains the
+   accepted Halo 3 closed-loop hand-aim behavior and leaves the turn stick on
+   the world-locked view. ON retains Halo 3's stick/wheel steering ownership
+   while the view follows the hull. Both modes use the same native Reach aim
+   source for weapons and controller feedback.
+4. The R-V16 raw-hull/deadband/gain servo remains dormant. R-V17's exact retail
+   Warthog and Mongoose aliases remain active.
+
+Why the persistent lead is withheld: the loaded seat record is
+definition-shared, and a cached tag pointer can become stale across a map-cache
+reload without the Reach module generation changing. A safe lifetime design
+must prove engine-thread restoration on every exit/fallback path and must never
+chase that pointer from the teardown worker. Unit aim needs none of that state.
+
 ## R-V9 - acceptance still required
 
 Nothing in this document changes the accepted pointer. Packaging, successful

@@ -15681,6 +15681,7 @@ namespace
     {
         bool active = false;
         bool carrierBasisValid = false;
+        bool unitAimValid = false;
         int32_t unitHandle = -1;
         int32_t directParent = -1;
         int32_t carrier = -1;
@@ -15692,6 +15693,7 @@ namespace
         float cameraBase[3]{};
         float handsBase[3]{};
         float rawCarrierForward[3]{};
+        float unitAimForward[3]{};
     };
 
     struct ReachRenderHelpers
@@ -15984,6 +15986,106 @@ namespace
     std::atomic<uint32_t> g_reachVehicleSeatPatchFailures{0};
     std::atomic<uint32_t> g_reachVehicleSeatRecenters{0};
     std::atomic<uint32_t> g_reachSeatAuthorsSteering{0};
+
+    // Reach's camera thread publishes one coherent aim direction for the input
+    // thread. Unlike the shared legacy three-float publication, this cannot
+    // combine components from adjacent frames after the ready flag is already
+    // true. The source identifies the deliberate per-frame fallback.
+    struct ReachAimFeedbackPublication
+    {
+        std::atomic<uint32_t> sequence{0};
+        std::atomic<uint32_t> generation{0};
+        std::atomic<uint64_t> sampleMs{0};
+        std::atomic<uint8_t> source{
+            static_cast<uint8_t>(ReachAimFeedbackSource::OnFootCompact)};
+        std::atomic<float> x{1.0f};
+        std::atomic<float> y{0.0f};
+        std::atomic<float> z{0.0f};
+    };
+    ReachAimFeedbackPublication g_reachAimFeedback;
+    std::atomic<uint32_t> g_reachUnitAimSamples{0};
+    std::atomic<uint32_t> g_reachUnitAimFallbacks{0};
+    std::atomic<uint32_t> g_reachAimFeedbackReadFallbacks{0};
+
+    void ReachClearAimFeedback()
+    {
+        auto& published = g_reachAimFeedback;
+        published.sequence.fetch_add(1, std::memory_order_acq_rel);
+        published.generation.store(0, std::memory_order_relaxed);
+        published.sampleMs.store(0, std::memory_order_relaxed);
+        published.source.store(
+            static_cast<uint8_t>(ReachAimFeedbackSource::OnFootCompact),
+            std::memory_order_relaxed);
+        published.x.store(1.0f, std::memory_order_relaxed);
+        published.y.store(0.0f, std::memory_order_relaxed);
+        published.z.store(0.0f, std::memory_order_relaxed);
+        published.sequence.fetch_add(1, std::memory_order_release);
+    }
+
+    void ReachPublishAimFeedback(
+        uint32_t generation, ReachAimFeedbackSource source,
+        const float forward[3])
+    {
+        if (!generation || !forward || !std::isfinite(forward[0]) ||
+            !std::isfinite(forward[1]) || !std::isfinite(forward[2]))
+        {
+            return;
+        }
+        auto& published = g_reachAimFeedback;
+        published.sequence.fetch_add(1, std::memory_order_acq_rel);
+        published.generation.store(generation, std::memory_order_relaxed);
+        published.sampleMs.store(GetTickCount64(), std::memory_order_relaxed);
+        published.source.store(
+            static_cast<uint8_t>(source), std::memory_order_relaxed);
+        published.x.store(forward[0], std::memory_order_relaxed);
+        published.y.store(forward[1], std::memory_order_relaxed);
+        published.z.store(forward[2], std::memory_order_relaxed);
+        published.sequence.fetch_add(1, std::memory_order_release);
+        if (source == ReachAimFeedbackSource::SeatedUnitAim)
+            g_reachUnitAimSamples.fetch_add(1, std::memory_order_relaxed);
+        else if (source == ReachAimFeedbackSource::SeatedCompactFallback)
+            g_reachUnitAimFallbacks.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    bool ReachReadAimFeedback(float out[3])
+    {
+        if (!out)
+            return false;
+        const uint32_t generation =
+            g_reachCamera.generation.load(std::memory_order_acquire);
+        const uint64_t nowMs = GetTickCount64();
+        auto& published = g_reachAimFeedback;
+        for (int attempt = 0; attempt < 2; ++attempt)
+        {
+            const uint32_t before =
+                published.sequence.load(std::memory_order_acquire);
+            if (!before || (before & 1u))
+                continue;
+            const uint32_t sampleGeneration =
+                published.generation.load(std::memory_order_relaxed);
+            const uint64_t sampleMs =
+                published.sampleMs.load(std::memory_order_relaxed);
+            const auto source = static_cast<ReachAimFeedbackSource>(
+                published.source.load(std::memory_order_relaxed));
+            const float sample[3] = {
+                published.x.load(std::memory_order_relaxed),
+                published.y.load(std::memory_order_relaxed),
+                published.z.load(std::memory_order_relaxed)};
+            if (published.sequence.load(std::memory_order_acquire) != before)
+                continue;
+            if (sampleGeneration != generation || !sampleMs ||
+                nowMs < sampleMs || nowMs - sampleMs > 500 ||
+                source == ReachAimFeedbackSource::OnFootCompact ||
+                !std::isfinite(sample[0]) || !std::isfinite(sample[1]) ||
+                !std::isfinite(sample[2]))
+            {
+                return false;
+            }
+            memcpy(out, sample, sizeof(sample));
+            return true;
+        }
+        return false;
+    }
 
     // The 2026-08-04 session produced 21 seated periods that stayed stock with
     // no logged reason: the identity-miss line dedups once per generation and
@@ -18724,19 +18826,34 @@ namespace
                 g_reachStockHeadingYaw.store(atan2f(sfy, sfx),
                                              std::memory_order_relaxed);
                 g_reachMoveHeadingValid.store(true, std::memory_order_release);
-                // Publish the pristine game aim forward — the same vector Halo 3
-                // exposes at CamCopyHook (g_aimFwd*/g_aimSeen) — so the shared
-                // closed-loop aim steering in Game_ComputeAimStick can drive
-                // Reach's frozen sim aim onto the controller ray. Read-only:
-                // stockCompact is never modified (headCenter is the writable
-                // copy). Raw forward, matching Halo 3's publication; the yaw uses
-                // the same atan2(y,x) convention as the heading above.
                 if (isfinite(stockFwd[2]))
                 {
+                    // Preserve the legacy compact-camera publication as the
+                    // baseline fallback. Seated R-V18 unit aim travels only
+                    // through the coherent publication below, so a stale/torn
+                    // coherent read can never fall back to a stale or
+                    // component-torn unit vector.
                     g_aimFwdX.store(stockFwd[0]);
                     g_aimFwdY.store(stockFwd[1]);
                     g_aimFwdZ.store(stockFwd[2]);
                     g_aimSeen.store(true, std::memory_order_release);
+
+                    // Seated, publish normalized unit +0x214 aim: the exact
+                    // state HREK weapons.cpp consumes for projectile forward.
+                    // View-follow does not select this source.
+                    const bool seated = vehicle && vehicle->active;
+                    const ReachAimFeedbackSource aimSource =
+                        ReachSelectAimFeedbackSource(
+                            seated, seated && vehicle->unitAimValid,
+                            g_config.vehicle_view_follow);
+                    const float* aimForward =
+                        aimSource == ReachAimFeedbackSource::SeatedUnitAim
+                            ? vehicle->unitAimForward
+                            : stockFwd;
+                    ReachPublishAimFeedback(
+                        g_reachCamera.generation.load(
+                            std::memory_order_relaxed),
+                        aimSource, aimForward);
                 }
             }
         }
@@ -20397,6 +20514,35 @@ namespace
             entry + kReachObjectEntryDataOffset);
     }
 
+    // Optional per-frame read of the SAME local unit handle whose native
+    // camera-info call proved the occupied seat. Keep its SEH boundary separate
+    // from the vehicle-frame transaction: an unavailable aim sample falls back
+    // to the compact camera for this frame and never disables the camera core.
+    bool ReachReadUnitAimingVector(int32_t unitHandle, float out[3])
+    {
+        if (!out || unitHandle == -1)
+            return false;
+        float raw[3]{};
+        bool copied = false;
+        __try
+        {
+            uint8_t unitKind = 0;
+            const unsigned char* unitData =
+                ReachVehicleObjectData(unitHandle, unitKind);
+            if (unitData && unitKind != kReachObjectKindVehicle)
+            {
+                memcpy(raw, unitData + kReachUnitAimingVectorOffset,
+                       sizeof(raw));
+                copied = true;
+            }
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            copied = false;
+        }
+        return copied && ReachNormalizeUnitAimingVector(raw, out);
+    }
+
     unsigned char* ReachPackedTagBlockElement(
         uint32_t packedData, int index, size_t stride)
     {
@@ -20756,6 +20902,8 @@ namespace
         bool followFallback = false;
         bool anchorFallback = false;
         bool faulted = false;
+        bool unitAimValid = false;
+        float unitAimForward[3]{};
         __try
         {
             do
@@ -20783,6 +20931,9 @@ namespace
                 }
                 if (!structurallySeated)
                     break;
+
+                unitAimValid = ReachReadUnitAimingVector(
+                    unit, unitAimForward);
 
                 uint8_t parentKind = 0;
                 unsigned char* parentData = ReachVehicleObjectData(
@@ -21013,6 +21164,12 @@ namespace
                 frame.seatFlags = seatFlags;
                 frame.seatFlagsPointer = reinterpret_cast<uint32_t*>(
                     seat + kReachSeatFlagsOffset);
+                frame.unitAimValid = unitAimValid;
+                if (unitAimValid)
+                {
+                    memcpy(frame.unitAimForward, unitAimForward,
+                           sizeof(frame.unitAimForward));
+                }
                 memcpy(frame.handsBase, handsBase,
                        sizeof(frame.handsBase));
                 memcpy(frame.cameraBase, handsBase,
@@ -21387,23 +21544,24 @@ namespace
     // hull heading neither matched Halo 3's response nor the Reach aim vector
     // consumed by weapons and look-steered vehicles. Keep the experiment
     // available for evidence, but do not execute or publish it. The replacement
-    // candidate lets Reach's native first-person seat own control and aim.
+    // candidate closes the shared control loop on Reach's native unit aim.
     inline constexpr bool kReachR_V16HullServoEnabled = false;
     // Names what owns the hull in this seat, so a driving report can be read
     // straight off the log instead of inferred from the config.
-    const char* ReachSteeringModeName()
+    const char* ReachSteeringModeName(
+        ReachVehicleId identity, int seatIndex)
     {
-        if (g_reachSeatAuthorsSteering.load(std::memory_order_relaxed) != 0)
-            return "steering by stick/wheel (view follows the hull)";
-        ReachVehicleId identity = ReachVehicleId::Unknown;
-        int seatIndex = -1;
-        if (ReachCurrentSeat(identity, seatIndex) &&
-            ReachVehicleSeatIsDriver(identity, seatIndex) &&
+        if (ReachVehicleSeatAuthorsSteering(
+                identity, seatIndex, g_config.vehicle_view_follow))
+        {
+            return "stick/wheel steering; native unit aim; view follows";
+        }
+        if (ReachVehicleSeatIsDriver(identity, seatIndex) &&
             ReachVehicleUsesWheel(identity))
         {
-            return "steering by hand heading (stick turns the view)";
+            return "native unit-aim steering; stick turns the world-locked view";
         }
-        return "seat does not steer";
+        return "native unit-aim weapon control";
     }
 
     // True only for the seat class this steering belongs to: a look-steered
@@ -22530,6 +22688,7 @@ namespace
             g_reachVehicleSeatPatchSerial.fetch_add(
                 1, std::memory_order_release);
         }
+        ReachClearAimFeedback();
 
         // Put the engine's third-person effect branch back before anything
         // else can unload the module. Optional, so a failure is logged rather
@@ -24328,6 +24487,11 @@ namespace
         g_reachVehicleSeatPatchFailures.store(0, std::memory_order_relaxed);
         g_reachVehicleSeatRecenters.store(0, std::memory_order_relaxed);
         g_reachSeatAuthorsSteering.store(0, std::memory_order_relaxed);
+        ReachClearAimFeedback();
+        g_reachUnitAimSamples.store(0, std::memory_order_relaxed);
+        g_reachUnitAimFallbacks.store(0, std::memory_order_relaxed);
+        g_reachAimFeedbackReadFallbacks.store(
+            0, std::memory_order_relaxed);
         ReachClearHullHeading();
         g_reachVehicleFpDebounce = {};
         g_reachHeadReference = {};
@@ -24341,8 +24505,9 @@ namespace
             LOG("Reach first-person vehicles: Installed; every structurally "
                 "proven seat gets the camera (%d exact HREK identities carry "
                 "per-seat trims and policy, unmatched vehicles ride the "
-                "universal trims), rendered marker placement, body hide, "
-                "bounce, hands and view follow are armed",
+                "universal trims); native unit-aim feedback is armed for view "
+                "follow OFF and ON, with rendered marker placement, transient "
+                "body hide, bounce and hands",
                 kReachVehicleIdentityCount);
         }
 
@@ -24806,6 +24971,9 @@ namespace
         static bool loggedShotMove = false;
         static bool loggedShotSkip = false;
         static bool loggedAnchorFallback = false;
+        static bool loggedNativeAim = false;
+        static bool loggedAimFallback = false;
+        static bool loggedAimReadFallback = false;
         static uint32_t loggedRecenters = 0;
         static uint64_t loggedSeat = 0;
         const uint32_t generation = g_reachCamera.generation.load(
@@ -24828,8 +24996,34 @@ namespace
             loggedShotMove = false;
             loggedShotSkip = false;
             loggedAnchorFallback = false;
+            loggedNativeAim = false;
+            loggedAimFallback = false;
+            loggedAimReadFallback = false;
             for (auto& missSlot : g_reachVehicleCensusMisses)
                 missSlot.state.store(0, std::memory_order_release);
+        }
+        if (!loggedNativeAim &&
+            g_reachUnitAimSamples.load(std::memory_order_relaxed) != 0)
+        {
+            loggedNativeAim = true;
+            LOG("Reach vehicle aim: native unit+0x214 feedback active; weapons "
+                "and steering share this source with view follow OFF or ON");
+        }
+        if (!loggedAimFallback &&
+            g_reachUnitAimFallbacks.load(std::memory_order_relaxed) != 0)
+        {
+            loggedAimFallback = true;
+            LOG("Reach vehicle aim: native unit aim was unavailable for at "
+                "least one seated frame; compact-camera fallback kept that "
+                "frame live");
+        }
+        if (!loggedAimReadFallback &&
+            g_reachAimFeedbackReadFallbacks.load(
+                std::memory_order_relaxed) != 0)
+        {
+            loggedAimReadFallback = true;
+            LOG("Reach vehicle aim: coherent feedback read was stale or torn; "
+                "the input frame used the legacy compact publication");
         }
         if (!loggedShotMove &&
             g_reachFiringOriginMoves.load(std::memory_order_relaxed) != 0)
@@ -24944,8 +25138,8 @@ namespace
         {
             loggedPatchFailure = true;
             LOG("Reach first-person vehicles: native seat-bit body hide could "
-                "not be installed/restored safely; body hide alone fell back "
-                "and the seat camera continues");
+                "not be installed/restored safely; body hide alone fell back, "
+                "unit-aim feedback and the seat camera continue");
         }
         const uint32_t recenters = g_reachVehicleSeatRecenters.load(
             std::memory_order_relaxed);
@@ -24978,7 +25172,8 @@ namespace
                     ConfigReachSeatCamRight(g_config, slot),
                     ConfigReachSeatCamUp(g_config, slot),
                     g_config.vehicle_view_follow ? "ON" : "OFF",
-                    ReachSteeringModeName());
+                    ReachSteeringModeName(
+                        static_cast<ReachVehicleId>(identity), seat));
             }
             else if (identity == kReachVehicleGenericIdentityCode && seat >= 0)
             {
@@ -27911,7 +28106,26 @@ bool Game_ComputeAimStick(float& outRx, float& outRy)
     // which left ~5 degrees of miss at 5 m; keeping it would now double-correct
     // an error that no longer exists.
 
-    const float ax = g_aimFwdX.load(), ay = g_aimFwdY.load(), az = g_aimFwdZ.load();
+    float aimForward[3] = {
+        g_aimFwdX.load(), g_aimFwdY.load(), g_aimFwdZ.load()};
+#if HALOMCCVR_EXPERIMENTAL_REACH_RENDER_CANDIDATE
+    if (ReachControllerAimActive() && ReachVehicleFpActive())
+    {
+        float coherentReachAim[3]{};
+        if (ReachReadAimFeedback(coherentReachAim))
+        {
+            memcpy(aimForward, coherentReachAim, sizeof(aimForward));
+        }
+        else
+        {
+            // The old compact-camera publication is the frame-local fallback.
+            // Count it for the worker; never log or touch title state here.
+            g_reachAimFeedbackReadFallbacks.fetch_add(
+                1, std::memory_order_relaxed);
+        }
+    }
+#endif
+    const float ax = aimForward[0], ay = aimForward[1], az = aimForward[2];
     const float aimYaw = atan2f(ay, ax);
     const float aimPitch = asinf(Clamp(az, -1.0f, 1.0f));
 

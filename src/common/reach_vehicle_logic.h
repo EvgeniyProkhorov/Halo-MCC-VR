@@ -410,6 +410,57 @@ inline constexpr uint32_t kReachSeatThirdPersonCameraBit = 1u << 4;
 inline constexpr uint32_t kReachSeatAllowsWeaponsBit = 1u << 5;
 inline constexpr int kReachVehicleSeatLimit = 16;
 
+// HREK weapons.cpp reads the ordinary unit aiming vector from the live unit
+// object at +0x214 when it builds the projectile line (R-V12/R-V18). This is
+// engine aim state, not a camera marker or the compact render camera.
+inline constexpr uintptr_t kReachUnitAimingVectorOffset = 0x214;
+
+enum class ReachAimFeedbackSource : uint8_t
+{
+    OnFootCompact = 0,
+    SeatedUnitAim,
+    SeatedCompactFallback,
+};
+
+// View follow is deliberately an input here and deliberately does not select
+// the aim source. Both view modes close on the same native unit aim; the option
+// controls only how the rendered view follows the carrier.
+inline constexpr ReachAimFeedbackSource ReachSelectAimFeedbackSource(
+    bool seated, bool unitAimValid, bool /*viewFollowEnabled*/)
+{
+    if (!seated)
+        return ReachAimFeedbackSource::OnFootCompact;
+    return unitAimValid ? ReachAimFeedbackSource::SeatedUnitAim
+                        : ReachAimFeedbackSource::SeatedCompactFallback;
+}
+
+inline bool ReachNormalizeUnitAimingVector(
+    const float input[3], float output[3])
+{
+    if (!input || !output)
+        return false;
+    float lengthSquared = 0.0f;
+    for (int i = 0; i < 3; ++i)
+    {
+        if (!std::isfinite(input[i]))
+            return false;
+        lengthSquared += input[i] * input[i];
+    }
+    if (!std::isfinite(lengthSquared) ||
+        lengthSquared < 0.25f || lengthSquared > 4.0f)
+    {
+        return false;
+    }
+    const float inverseLength = 1.0f / std::sqrt(lengthSquared);
+    for (int i = 0; i < 3; ++i)
+    {
+        output[i] = input[i] * inverseLength;
+        if (!std::isfinite(output[i]))
+            return false;
+    }
+    return true;
+}
+
 // HREK's generic datum collection and tag-block layouts, matched to the pinned
 // retail homologs. These bounds are consumed only from Reach's proven render
 // thread; any failed validation leaves the optional vehicle frame stock.

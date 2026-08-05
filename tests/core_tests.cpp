@@ -1203,36 +1203,33 @@ int main()
               ReachVehicleUsesWheel(ReachVehicleId::Forklift) &&
               !ReachVehicleUsesWheel(ReachVehicleId::Banshee),
             "Reach view-follow and steering ownership remain seat-explicit");
-        // R-V16: the seats whose hull the hand steers with view follow off are
-        // exactly the look-steered ground drivers, and they are the same seats
-        // that take the stick with follow on. Aircraft, turrets, passengers and
-        // the independently-aimed Wraith/Scorpion are excluded from both.
+        // R-V18: entering a Reach seat selects the same native aim feedback
+        // under BOTH view-follow settings.
         {
-            const auto handSteers = [](ReachVehicleId id, int seat) {
-                return !ReachVehicleSeatAuthorsSteering(id, seat, false) &&
-                    ReachVehicleSeatIsDriver(id, seat) &&
-                    ReachVehicleUsesWheel(id);
-            };
-            const auto stickSteers = [](ReachVehicleId id, int seat) {
-                return ReachVehicleSeatIsDriver(id, seat) &&
-                    ReachVehicleUsesWheel(id);
-            };
-            Check(handSteers(ReachVehicleId::Warthog, 0) &&
-                  handSteers(ReachVehicleId::Ghost, 0) &&
-                  handSteers(ReachVehicleId::Mongoose, 0) &&
-                  handSteers(ReachVehicleId::Revenant, 0) &&
-                  !handSteers(ReachVehicleId::Warthog, 1) &&
-                  !handSteers(ReachVehicleId::Banshee, 0) &&
-                  !handSteers(ReachVehicleId::Falcon, 0) &&
-                  !handSteers(ReachVehicleId::Wraith, 0) &&
-                  !handSteers(ReachVehicleId::Scorpion, 0) &&
-                  !handSteers(ReachVehicleId::Machinegun, 0) &&
-                  !handSteers(ReachVehicleId::Unknown, 0) &&
-                  stickSteers(ReachVehicleId::Warthog, 0) ==
-                      handSteers(ReachVehicleId::Warthog, 0) &&
-                  stickSteers(ReachVehicleId::Wraith, 0) ==
-                      handSteers(ReachVehicleId::Wraith, 0),
-                "Reach follow-off hand steering covers exactly the look-steered ground drivers");
+            float nativeAim[3] = {0.3f, 0.4f, 0.0f};
+            float normalizedAim[3] = {};
+            const float invalidAim[3] = {
+                std::numeric_limits<float>::quiet_NaN(), 0.0f, 1.0f};
+            Check(
+                ReachNormalizeUnitAimingVector(nativeAim, normalizedAim) &&
+                std::fabs(normalizedAim[0] - 0.6f) < 1.0e-6f &&
+                std::fabs(normalizedAim[1] - 0.8f) < 1.0e-6f &&
+                normalizedAim[2] == 0.0f &&
+                !ReachNormalizeUnitAimingVector(
+                    invalidAim, normalizedAim) &&
+                ReachSelectAimFeedbackSource(true, true, false) ==
+                    ReachAimFeedbackSource::SeatedUnitAim &&
+                ReachSelectAimFeedbackSource(true, true, true) ==
+                    ReachAimFeedbackSource::SeatedUnitAim &&
+                ReachSelectAimFeedbackSource(true, false, false) ==
+                    ReachAimFeedbackSource::SeatedCompactFallback &&
+                ReachSelectAimFeedbackSource(false, true, true) ==
+                    ReachAimFeedbackSource::OnFootCompact &&
+                !ReachVehicleSeatAuthorsSteering(
+                    ReachVehicleId::Warthog, 0, false) &&
+                ReachVehicleSeatAuthorsSteering(
+                    ReachVehicleId::Warthog, 0, true),
+                "Reach unit-aim feedback stays active under both view-follow modes");
         }
         ReachSeatCameraBasis reachBasis{};
         reachBasis.forward[0] = 1.0f;
