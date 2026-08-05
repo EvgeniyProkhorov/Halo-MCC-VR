@@ -21129,6 +21129,22 @@ namespace
                             memcpy(frame.rawCarrierForward,
                                    carrierRoot.matrix.forward,
                                    sizeof(frame.rawCarrierForward));
+                            // The follow integrator must be fed the RAW hull
+                            // forward - the headset-accepted Halo 3 rule (its
+                            // C14 failure integrated interpolation back into
+                            // view yaw). Placement keeps the rendered bank
+                            // above; only the follow input re-resolves raw.
+                            Halo3ObjectMarker carrierRaw{};
+                            if (g_config.vehicle_view_follow && interpolate &&
+                                g_reachCamera.objectMarkers(
+                                    carrier, 0, &carrierRaw,
+                                    1, true, false) > 0 &&
+                                Halo3MatrixValid(carrierRaw.matrix))
+                            {
+                                memcpy(frame.rawCarrierForward,
+                                       carrierRaw.matrix.forward,
+                                       sizeof(frame.rawCarrierForward));
+                            }
                         }
                         else if (g_config.vehicle_view_follow &&
                                  ReachVehicleIsAttachedWeapon(identity))
@@ -21143,6 +21159,18 @@ namespace
                     memcpy(frame.rawCarrierForward,
                            rootMarker.matrix.forward,
                            sizeof(frame.rawCarrierForward));
+                    // Same RAW-forward rule for the vehicle's own hull.
+                    Halo3ObjectMarker rootRaw{};
+                    if (g_config.vehicle_view_follow && interpolate &&
+                        g_reachCamera.objectMarkers(
+                            info.directParent, 0, &rootRaw,
+                            1, true, false) > 0 &&
+                        Halo3MatrixValid(rootRaw.matrix))
+                    {
+                        memcpy(frame.rawCarrierForward,
+                               rootRaw.matrix.forward,
+                               sizeof(frame.rawCarrierForward));
+                    }
                 }
                 frame.active = g_config.vehicle_first_person;
                 complete = true;

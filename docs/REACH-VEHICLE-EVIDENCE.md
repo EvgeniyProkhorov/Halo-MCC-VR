@@ -766,6 +766,28 @@ the user's hands. If ground driving is cured but the user also wants the
 view to travel with the hull, that is vehicle_view_follow = 1, which now
 composes with this ownership rule unchanged.
 
+## R-V15 - 2026-08-04: the follow integrator eats raw hull forward only
+
+Third user report, against 83c1c84: "my camera is stuck on one spot - make it
+behave like Halo 3". Diagnosis: the accepted Halo 3 driving experience turns
+the VIEW with the hull (view follow); the user's shared config has
+vehicle_view_follow = 0, so the Reach view stays world-locked while the hull
+turns - and R-V14 correctly gave the turn stick to the steering, so the view
+cannot be stick-turned in a driver's seat either. The remedy is the existing
+switch (F1 -> Vehicles -> "View follows the vehicle"), not new machinery.
+
+Before pointing the user at that switch, one hard Halo 3 rule is applied to
+Reach's follow path: **the yaw/pitch follow integrator must be fed the RAW
+hull forward** (HALO3-VEHICLE-EVIDENCE C14: integrating the render-
+interpolated forward folds interpolation error into view yaw, headset-
+rejected; "keep that forever" per the project record). Reach filled
+frame.rawCarrierForward from the same rendered/interpolated marker bank the
+camera placement uses whenever vehicle_cam_smoothing = 1. The frame builder
+now re-resolves the hull (or carrier) root with the raw node bank purely for
+the follow input, gated on vehicle_view_follow so the extra native call costs
+nothing while follow is off. Camera placement keeps the rendered bank.
+Follow with smoothing OFF already fed raw and is unchanged.
+
 ## R-V9 - acceptance still required
 
 Nothing in this document changes the accepted pointer. Packaging, successful
