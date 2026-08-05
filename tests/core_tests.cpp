@@ -1147,16 +1147,21 @@ int main()
               ReachVehicleExpectedPhysicsType(ReachVehicleId::Seraph) == 13,
             "The census identities carry their HREK-derived policy families");
         bool reachFingerprintsUnique = true;
-        int reachPlayerSeatCount = 0;
         for (const auto& entry : kReachVehicleFingerprints)
         {
             reachFingerprintsUnique = reachFingerprintsUnique &&
                 ReachResolveVehicleFingerprint(entry.fingerprint) ==
                     entry.identity;
-            for (int seat = 0; seat < kReachVehicleSeatLimit; ++seat)
-                if (ReachVehicleSeatIsPlayer(entry.identity, seat))
-                    ++reachPlayerSeatCount;
         }
+        // The player-seat census counts each IDENTITY once; the fingerprint
+        // table is larger than the identity list because retail maps alias
+        // the Warthog and Mongoose one ULP away from their HREK tuples.
+        int reachPlayerSeatCount = 0;
+        for (int id = 1; id <= kReachVehicleIdentityCount; ++id)
+            for (int seat = 0; seat < kReachVehicleSeatLimit; ++seat)
+                if (ReachVehicleSeatIsPlayer(
+                        static_cast<ReachVehicleId>(id), seat))
+                    ++reachPlayerSeatCount;
         ReachVehicleFingerprint alteredReachFingerprint =
             kReachVehicleFingerprints[0].fingerprint;
         alteredReachFingerprint.offsetZ ^= 1u;
@@ -1164,6 +1169,19 @@ int main()
               ReachResolveVehicleFingerprint(alteredReachFingerprint) ==
                   ReachVehicleId::Unknown,
             "Reach HREK fingerprints resolve 34 identities/50 player seats and fail closed on mutation");
+        // R-V17: the retail 1-ULP aliases resolve to their vehicles, and the
+        // fingerprint table is exactly the identity list plus those two rows.
+        Check(kReachVehicleFingerprintCount == kReachVehicleIdentityCount + 2 &&
+              ReachResolveVehicleFingerprint(
+                  {0x3F978071, 0xBD406A82, 0xBAD03632, 0x3EC25783}) ==
+                  ReachVehicleId::Warthog &&
+              ReachResolveVehicleFingerprint(
+                  {0x3F2ABABB, 0x39815C02, 0x39CE6FFD, 0x3E7776E0}) ==
+                  ReachVehicleId::Mongoose &&
+              ReachResolveVehicleFingerprint(
+                  {0x3F978072, 0xBD406A82, 0xBAD03632, 0x3EC25783}) ==
+                  ReachVehicleId::Warthog,
+            "Retail Warthog/Mongoose 1-ULP fingerprint aliases resolve to their identities");
         Check(ReachVehicleSeatIsDriver(ReachVehicleId::Warthog, 0) &&
               !ReachVehicleSeatIsDriver(ReachVehicleId::Warthog, 1) &&
               !ReachVehicleSeatIsDriver(
@@ -1185,6 +1203,37 @@ int main()
               ReachVehicleUsesWheel(ReachVehicleId::Forklift) &&
               !ReachVehicleUsesWheel(ReachVehicleId::Banshee),
             "Reach view-follow and steering ownership remain seat-explicit");
+        // R-V16: the seats whose hull the hand steers with view follow off are
+        // exactly the look-steered ground drivers, and they are the same seats
+        // that take the stick with follow on. Aircraft, turrets, passengers and
+        // the independently-aimed Wraith/Scorpion are excluded from both.
+        {
+            const auto handSteers = [](ReachVehicleId id, int seat) {
+                return !ReachVehicleSeatAuthorsSteering(id, seat, false) &&
+                    ReachVehicleSeatIsDriver(id, seat) &&
+                    ReachVehicleUsesWheel(id);
+            };
+            const auto stickSteers = [](ReachVehicleId id, int seat) {
+                return ReachVehicleSeatIsDriver(id, seat) &&
+                    ReachVehicleUsesWheel(id);
+            };
+            Check(handSteers(ReachVehicleId::Warthog, 0) &&
+                  handSteers(ReachVehicleId::Ghost, 0) &&
+                  handSteers(ReachVehicleId::Mongoose, 0) &&
+                  handSteers(ReachVehicleId::Revenant, 0) &&
+                  !handSteers(ReachVehicleId::Warthog, 1) &&
+                  !handSteers(ReachVehicleId::Banshee, 0) &&
+                  !handSteers(ReachVehicleId::Falcon, 0) &&
+                  !handSteers(ReachVehicleId::Wraith, 0) &&
+                  !handSteers(ReachVehicleId::Scorpion, 0) &&
+                  !handSteers(ReachVehicleId::Machinegun, 0) &&
+                  !handSteers(ReachVehicleId::Unknown, 0) &&
+                  stickSteers(ReachVehicleId::Warthog, 0) ==
+                      handSteers(ReachVehicleId::Warthog, 0) &&
+                  stickSteers(ReachVehicleId::Wraith, 0) ==
+                      handSteers(ReachVehicleId::Wraith, 0),
+                "Reach follow-off hand steering covers exactly the look-steered ground drivers");
+        }
         ReachSeatCameraBasis reachBasis{};
         reachBasis.forward[0] = 1.0f;
         reachBasis.left[1] = 1.0f;

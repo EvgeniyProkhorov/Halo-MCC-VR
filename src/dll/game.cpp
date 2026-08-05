@@ -21132,10 +21132,12 @@ namespace
                             // The follow integrator must be fed the RAW hull
                             // forward - the headset-accepted Halo 3 rule (its
                             // C14 failure integrated interpolation back into
-                            // view yaw). Placement keeps the rendered bank
-                            // above; only the follow input re-resolves raw.
+                            // view yaw). R-V16 gives the same raw forward to
+                            // the follow-off hand steering, so the re-resolve
+                            // is no longer gated on follow. Placement keeps
+                            // the rendered bank above.
                             Halo3ObjectMarker carrierRaw{};
-                            if (g_config.vehicle_view_follow && interpolate &&
+                            if (interpolate &&
                                 g_reachCamera.objectMarkers(
                                     carrier, 0, &carrierRaw,
                                     1, true, false) > 0 &&
@@ -21161,7 +21163,7 @@ namespace
                            sizeof(frame.rawCarrierForward));
                     // Same RAW-forward rule for the vehicle's own hull.
                     Halo3ObjectMarker rootRaw{};
-                    if (g_config.vehicle_view_follow && interpolate &&
+                    if (interpolate &&
                         g_reachCamera.objectMarkers(
                             info.directParent, 0, &rootRaw,
                             1, true, false) > 0 &&
@@ -21333,6 +21335,119 @@ namespace
             ReachVehicleFpActive();
     }
 
+    // R-V16: where the CAR is actually pointing, published from the same raw
+    // hull forward the follow integrator eats, for every proven ground-driver
+    // frame regardless of view follow. The follow-off hand steering closes its
+    // loop on this instead of on a camera facing: a hand held still names one
+    // fixed world heading, the vehicle turns onto it, and the command decays
+    // to nothing, so a resting controller drives dead straight. Same
+    // torn-write discipline as the roll-stable follow publication.
+    struct ReachHullHeadingPublication
+    {
+        std::atomic<uint32_t> sequence{0};
+        std::atomic<uint32_t> generation{0};
+        std::atomic<uint64_t> sampleMs{0};
+        std::atomic<float> yaw{0.0f};
+        bool writerHasValue = false; // camera-thread writer only
+    };
+    ReachHullHeadingPublication g_reachHullHeading;
+
+    void ReachPublishHullHeading(uint32_t generation, float hullYaw)
+    {
+        if (!generation || !std::isfinite(hullYaw))
+            return;
+        auto& published = g_reachHullHeading;
+        published.sequence.fetch_add(1, std::memory_order_acq_rel);
+        published.generation.store(generation, std::memory_order_relaxed);
+        published.sampleMs.store(GetTickCount64(), std::memory_order_relaxed);
+        published.yaw.store(hullYaw, std::memory_order_relaxed);
+        published.sequence.fetch_add(1, std::memory_order_release);
+        published.writerHasValue = true;
+    }
+
+    void ReachClearHullHeading()
+    {
+        auto& published = g_reachHullHeading;
+        if (!published.writerHasValue)
+            return;
+        published.sequence.fetch_add(1, std::memory_order_acq_rel);
+        published.writerHasValue = false;
+        published.generation.store(0, std::memory_order_relaxed);
+        published.sampleMs.store(0, std::memory_order_relaxed);
+        published.yaw.store(0.0f, std::memory_order_relaxed);
+        published.sequence.fetch_add(1, std::memory_order_release);
+    }
+
+    // Full stick deflection ~19 degrees off the wanted heading, and nothing at
+    // all inside 3 degrees, so the hand does not have to be perfectly still to
+    // hold a straight line. The vehicle's own turn rate is the real ceiling.
+    inline constexpr float kReachHandSteerDeadbandRadians = 0.052f;
+    inline constexpr float kReachHandSteerGain = 3.0f;
+    // Names what owns the hull in this seat, so a driving report can be read
+    // straight off the log instead of inferred from the config.
+    const char* ReachSteeringModeName()
+    {
+        if (g_reachSeatAuthorsSteering.load(std::memory_order_relaxed) != 0)
+            return "steering by stick/wheel (view follows the hull)";
+        ReachVehicleId identity = ReachVehicleId::Unknown;
+        int seatIndex = -1;
+        if (ReachCurrentSeat(identity, seatIndex) &&
+            ReachVehicleSeatIsDriver(identity, seatIndex) &&
+            ReachVehicleUsesWheel(identity))
+        {
+            return "steering by hand heading (stick turns the view)";
+        }
+        return "seat does not steer";
+    }
+
+    // True only for the seat class this steering belongs to: a look-steered
+    // Reach GROUND driver that is not authoring the stick this frame, with a
+    // fresh hull sample from the live camera generation.
+    bool ReachGroundDriverHandSteers(float& outHullYaw)
+    {
+        if (!g_config.vehicle_first_person || !ReachVehicleFpActive() ||
+            ReachSeatAuthorsSteeringNow())
+        {
+            return false;
+        }
+        ReachVehicleId identity = ReachVehicleId::Unknown;
+        int seatIndex = -1;
+        if (!ReachCurrentSeat(identity, seatIndex) ||
+            !ReachVehicleSeatIsDriver(identity, seatIndex) ||
+            !ReachVehicleUsesWheel(identity))
+        {
+            return false;
+        }
+        uint32_t generation = 0;
+        if (!ReachFollowContextValid(generation) || !generation)
+            return false;
+        const uint64_t nowMs = GetTickCount64();
+        auto& published = g_reachHullHeading;
+        for (int attempt = 0; attempt < 2; ++attempt)
+        {
+            const uint32_t before =
+                published.sequence.load(std::memory_order_acquire);
+            if (!before || (before & 1u))
+                continue;
+            const uint32_t sampleGeneration =
+                published.generation.load(std::memory_order_relaxed);
+            const uint64_t sampleMs =
+                published.sampleMs.load(std::memory_order_relaxed);
+            const float sampleYaw =
+                published.yaw.load(std::memory_order_relaxed);
+            if (published.sequence.load(std::memory_order_acquire) != before)
+                continue;
+            if (sampleGeneration != generation || !sampleMs ||
+                nowMs < sampleMs ||
+                nowMs - sampleMs > kHalo3RollStableFollowFreshMs ||
+                !std::isfinite(sampleYaw))
+                return false;
+            outHullYaw = sampleYaw;
+            return true;
+        }
+        return false;
+    }
+
     bool ReachSeatUsesWheel()
     {
         if (!ReachSeatAuthorsSteeringNow())
@@ -21347,19 +21462,42 @@ namespace
     {
         const uint32_t generation = g_reachCamera.generation.load(
             std::memory_order_relaxed);
-        // R-V14: a look-steered GROUND driver's hull must never chase the
-        // resting hand. In these seats steering ownership no longer requires
-        // view follow: Halo's own turn stick (or the wheel) steers the hull,
-        // ApplyVrTurn releases the stick, and the closed-loop hand aim keeps
-        // only the gun. With the closed loop steering, any hand offset - a
-        // controller resting in the lap - became a standing hull turn, the
-        // reported "sliding everywhere / cannot drive in a straight line".
-        // Aircraft keep their accepted hand-aim climb/dive flying, and the
-        // Halo 3 title keeps its own accepted follow-coupled ownership.
+        // R-V16: ownership is follow-coupled again, exactly as the accepted
+        // Halo 3 title does it. R-V14 handed a ground driver's stick to the
+        // hull unconditionally, which cured the resting-hand slide but left
+        // follow-off driving with nothing to turn the view: the fourth headset
+        // report, "the camera gets stuck to one spot... the whole mechanism is
+        // not like Halo 3". Halo 3's accepted follow-off seat gives the stick
+        // back to the VR view and steers the hull with the hand as a
+        // CONVERGING heading target; R-V16 gives Reach the same two halves.
+        // Follow ON keeps R-V14's authored stick steering, which is also what
+        // Halo 3 does with the switch on.
         const bool groundDriverAuthors = frame.active &&
+            g_config.vehicle_view_follow &&
             ReachVehicleSeatIsDriver(frame.identity, frame.seatIndex) &&
             ReachVehicleUsesWheel(frame.identity) &&
             ReachVehicleFpActive();
+        // The hull heading the follow-off hand steering converges onto. It is
+        // published from the raw hull forward for every proven ground-driver
+        // frame, so it stays live in exactly the seats that steer by hand.
+        const bool publishHullHeading = frame.active &&
+            ReachVehicleFpActive() && frame.carrierBasisValid &&
+            !groundDriverAuthors &&
+            ReachVehicleSeatIsDriver(frame.identity, frame.seatIndex) &&
+            ReachVehicleUsesWheel(frame.identity);
+        if (publishHullHeading &&
+            (frame.rawCarrierForward[0] * frame.rawCarrierForward[0] +
+             frame.rawCarrierForward[1] * frame.rawCarrierForward[1]) > 1e-8f)
+        {
+            ReachPublishHullHeading(
+                generation,
+                atan2f(frame.rawCarrierForward[1],
+                       frame.rawCarrierForward[0]));
+        }
+        else
+        {
+            ReachClearHullHeading();
+        }
         // A walk-up turret riding a real carrier (falcon side guns resolve to
         // plasma_turret's tuple) earned a carrier basis in the frame builder;
         // it follows that carrier's yaw exactly like an attached weapon.
@@ -22339,6 +22477,7 @@ namespace
         g_reachVehicleTrimSnapshot.store(0, std::memory_order_release);
         g_reachSeatAuthorsSteering.store(0, std::memory_order_release);
         Halo3ClearRollStableFollow();
+        ReachClearHullHeading();
         g_reachCamera.teardownRequested.store(
             true, std::memory_order_release);
         g_reachCamera.armed.store(false, std::memory_order_release);
@@ -24182,6 +24321,7 @@ namespace
         g_reachVehicleSeatPatchFailures.store(0, std::memory_order_relaxed);
         g_reachVehicleSeatRecenters.store(0, std::memory_order_relaxed);
         g_reachSeatAuthorsSteering.store(0, std::memory_order_relaxed);
+        ReachClearHullHeading();
         g_reachVehicleFpDebounce = {};
         g_reachHeadReference = {};
         g_reachSeatAnchorLatch = {};
@@ -24823,12 +24963,15 @@ namespace
                 seat >= 0 && slot >= 0)
             {
                 LOG("Reach first-person vehicles: active %s raw seat %d; "
-                    "marker smoothing=%d trims F/R/U=%.3f/%.3f/%.3f m",
+                    "marker smoothing=%d trims F/R/U=%.3f/%.3f/%.3f m; "
+                    "view follow %s, %s",
                     kReachVehicleTrimNames[identity - 1], seat,
                     static_cast<int>(g_config.vehicle_cam_smoothing),
                     ConfigReachSeatCamForward(g_config, slot),
                     ConfigReachSeatCamRight(g_config, slot),
-                    ConfigReachSeatCamUp(g_config, slot));
+                    ConfigReachSeatCamUp(g_config, slot),
+                    g_config.vehicle_view_follow ? "ON" : "OFF",
+                    ReachSteeringModeName());
             }
             else if (identity == kReachVehicleGenericIdentityCode && seat >= 0)
             {
@@ -27853,6 +27996,30 @@ bool Game_ComputeAimStick(float& outRx, float& outRy)
         }
         return true;
     }
+#if HALOMCCVR_EXPERIMENTAL_REACH_RENDER_CANDIDATE
+    // R-V16: a follow-off Reach ground driver steers exactly the way the
+    // accepted Halo 3 seat does - the hand names a heading and the vehicle
+    // converges onto it - but the loop closes on the hull's own published
+    // forward instead of the engine camera facing. Reach drove that camera
+    // loop in R-V13 and the headset verdict was "sliding everywhere, cannot
+    // drive in a straight line"; the hull matrix is the car itself, so the
+    // error genuinely reaches zero and a resting hand holds one heading.
+    // Deflection is continuous out of the deadband, so a small hand tremor
+    // never becomes a steering step.
+    float reachHullYaw = 0.0f;
+    if (ReachGroundDriverHandSteers(reachHullYaw))
+    {
+        const float hullErr = WrapPi(desiredYaw - reachHullYaw);
+        const float magnitude = fabsf(hullErr);
+        outRx = magnitude > kReachHandSteerDeadbandRadians
+            ? Clamp((hullErr > 0.0f ? -1.0f : 1.0f) *
+                        (magnitude - kReachHandSteerDeadbandRadians) *
+                        kReachHandSteerGain,
+                    -1.0f, 1.0f)
+            : 0.0f;
+        return true;
+    }
+#endif
     outRx = Clamp(-errYaw * k, -1.0f, 1.0f);
     return true;
 }

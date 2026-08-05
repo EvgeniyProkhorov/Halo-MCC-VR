@@ -788,6 +788,109 @@ the follow input, gated on vehicle_view_follow so the extra native call costs
 nothing while follow is off. Camera placement keeps the rendered bank.
 Follow with smoothing OFF already fed raw and is unchanged.
 
+**R-V16 overturns this section's diagnosis.** The remedy named above (tick the
+F1 switch) rests on the claim that the accepted Halo 3 driving experience is
+view-follow ON. The repository's own record says the opposite - see R-V16.
+
+## R-V16 - 2026-08-05: Halo 3's follow-off mechanism, ported whole
+
+Fourth user report, against 83c1c84 (the log's source stamp for the 22:46-22:49
+session; the R-V15 DLL was installed at 22:52 and has never been driven):
+"THE CAMERA GETS STUCK TO ONE SPOT IT NEEDS TO BE ORIENTED FOWARD ... i am NOT
+TALKING ABOUT VIEW FOLLOW OPTION IM TALKING ABOUT THE WHOLE MECHANISM IN
+ACTION IS NOT LIKE HALO 3".
+
+### The checkbox diagnosis was wrong
+
+efe8bdb (C24), the accepted Halo 3 vehicle baseline, states in its own commit
+text: "vehicle_view_follow now defaults to false; the maintainer drove every
+[seat] ... the follow ships off." src/common/config.h keeps that default. The
+preserved deploy-backup configuration trail agrees: follow was 1 through the
+Jul-31/Aug-1-morning Halo 3 candidates, flipped to 0 during the C23 tuning
+session that produced C24's shipped defaults, and has read 0 in every session
+since. Every Halo 3 seat the user accepted, they accepted with follow OFF. The
+user is not describing a missing checkbox; they are describing a different
+mechanism, and they are right.
+
+### What the two titles actually did under the same setting
+
+Halo 3, follow = 0 (accepted): Halo3SeatAuthorsSteering requires followEnabled
+(src/common/halo3_vehicle_logic.h), so no seat authors steering, ApplyVrTurn
+keeps the right stick and the stick turns the VR view exactly as on foot. The
+hull is steered by the closed-loop hand aim - a CONVERGING direction target:
+the error shrinks as the vehicle turns onto the hand's heading and the
+deflection decays to nothing, so a steady hand drives a steady line.
+
+Reach at 83c1c84/1acb1f6, follow = 0: R-V14's groundDriverAuthors was
+unconditional, so ApplyVrTurn released the stick to native hull steering and
+the follow integrator never ran. Nothing stick-driven could rotate view yaw:
+the camera was pinned to the world while the hull turned underneath it. That
+is the reported "stuck on one spot", and it is Halo 3's follow-ON stick
+ownership fused to Halo 3's follow-OFF view - a combination neither title ever
+shipped.
+
+### The change
+
+1. Ownership is follow-coupled again (game.cpp ReachApplySeatYawFollow), so a
+   follow-off ground driver's stick returns to ApplyVrTurn and the view turns.
+   Follow ON is unchanged and keeps R-V14's authored stick steering, matching
+   Halo 3 with the switch on.
+2. The hand steers the hull through a converging heading servo, but the loop
+   closes on **the hull's own raw forward**, not on a camera facing. R-V13's
+   headset verdict against the camera-fed loop was "sliding everywhere, cannot
+   drive in a straight line"; the hull node matrix is the car itself, so the
+   error genuinely reaches zero. A resting controller names one fixed world
+   heading, the vehicle settles onto it and the command goes to zero -
+   straight by construction, which was R-V14's requirement.
+   Deflection is continuous out of a 3-degree deadband and saturates about 19
+   degrees off the wanted heading (kReachHandSteerDeadbandRadians /
+   kReachHandSteerGain); the vehicle's own turn rate remains the real ceiling.
+3. The raw hull forward re-resolve is no longer gated on vehicle_view_follow,
+   because the steering servo needs it in exactly the seats follow does not
+   cover. R-V15's rule (the follow integrator eats raw forward only) is intact
+   and now also protects the steering loop from interpolation noise.
+4. The seat activation log names the mechanism in force ("view follow OFF,
+   steering by hand heading (stick turns the view)"), so the next driving
+   report can be read off the log instead of inferred from the config.
+
+Scope: look-steered GROUND drivers only (warthog, ghost, mongoose, revenant,
+forklift, cart, civilian line). Aircraft keep their accepted hand-aim
+climb/dive; Wraith and Scorpion keep independent turret aim with the hull on
+the move stick; passengers and gunners keep hand aim; Halo 3 and ODST are
+untouched.
+
+Headset-unverified: whether the ported mechanism reads as Halo 3 in the user's
+hands, and whether the deadband and gain suit Reach's heavier vehicles.
+
+## R-V17 - 2026-08-05: retail maps are one ULP off the HREK tuples
+
+The 2026-08-04 session logged "unmatched vehicle tuple
+3F978071/BD406A82/BAD03632/3EC25783 type 1 raw seat 0 (of 4 authored)" while
+the user drove a Warthog. That is the Warthog row
+(src/common/reach_vehicle_logic.h) in every word except the bounding-sphere
+radius, which is exactly one ULP lower than HREK's 0x3F978072 (1.18360722 vs
+1.18360734). The 2026-08-04 09:28 session logged the same one-ULP miss for the
+Mongoose in offsetX (39815C02 vs the table's 39815C03) - and HREK's own
+test_fbx_mongoose, a re-import of identical geometry, authors bit-for-bit the
+retail value. The retail maps were compiled from a different model-import
+generation than the shipped source tags, and the last mantissa bit moved.
+
+Consequence: "active warthog" and "active mongoose" appear in no session log
+ever recorded. Both vehicles have always fallen to the unmatched path, whose
+deliberate fail-closed policy is no follow, no steering authorship, no wheel
+and universal trims - so the two most-driven vehicles in the game were the two
+that could never behave. Ghost, revenant, forklift, wraith, banshee, falcon
+and pickup all match retail, so this is not a general fingerprint failure.
+
+Fix: both retail tuples are added as full-tuple ALIAS rows of their existing
+identities (kReachVehicleFingerprintCount = identities + 2). The resolver
+already supported many tuples per identity and still rejects a tuple claimed
+by two identities; the physics-type gate still has to agree. No identity,
+seat census, trim slot or config key changes. Any model-derived row not yet
+observed at retail carries the same latent risk; a tolerant radius compare
+would immunize all of them and is deliberately NOT done here, because a
+bit-exact table is what makes the match provable.
+
 ## R-V9 - acceptance still required
 
 Nothing in this document changes the accepted pointer. Packaging, successful

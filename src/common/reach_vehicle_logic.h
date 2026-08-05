@@ -59,6 +59,17 @@ enum class ReachVehicleId : uint8_t
 inline constexpr int kReachVehicleIdentityCount =
     static_cast<int>(ReachVehicleId::SquadDropPod);
 
+// The fingerprint table carries MORE rows than identities: retail-compiled
+// maps hold model bounding spheres from a different HREK import generation
+// than the shipped source tags, and for the Warthog (radius) and Mongoose
+// (offsetX) the recomputed sphere landed exactly one ULP away. HREK's own
+// test_fbx_mongoose re-import of identical geometry authors the retail
+// Mongoose word bit-for-bit, proving the last bit is import rounding noise,
+// not different content. Each retail tuple is a full-tuple alias of its
+// identity row; the physics-type gate still has to agree.
+inline constexpr int kReachVehicleFingerprintCount =
+    kReachVehicleIdentityCount + 2;
+
 // Reach's vehicle postprocess retains a positive vehicle-authored bounding
 // sphere, otherwise it copies the referenced model's exact runtime sphere into
 // these four early vehicle-definition fields. The values below follow that
@@ -79,7 +90,7 @@ struct ReachVehicleFingerprintEntry
 };
 
 inline constexpr std::array<ReachVehicleFingerprintEntry,
-                            kReachVehicleIdentityCount>
+                            kReachVehicleFingerprintCount>
     kReachVehicleFingerprints{{
         {ReachVehicleId::Banshee,
          {0x3FE3DDB8, 0xBEAA6EFF, 0xBAE51357, 0x3F13532A}},
@@ -149,6 +160,14 @@ inline constexpr std::array<ReachVehicleFingerprintEntry,
          {0x3FE2557B, 0xBD4C676F, 0x3ACF7265, 0x3F6831B4}},
         {ReachVehicleId::SquadDropPod,
          {0x3FDAB04B, 0xBD31519F, 0x390792C5, 0x3F912A02}},
+        // Retail-map aliases (see kReachVehicleFingerprintCount): the same
+        // vehicles as their HREK rows above, one mantissa bit adrift. Logged
+        // unmatched in every retail session ever recorded — 'active warthog'
+        // and 'active mongoose' appear in no log before these rows existed.
+        {ReachVehicleId::Warthog,
+         {0x3F978071, 0xBD406A82, 0xBAD03632, 0x3EC25783}},
+        {ReachVehicleId::Mongoose,
+         {0x3F2ABABB, 0x39815C02, 0x39CE6FFD, 0x3E7776E0}},
     }};
 
 inline constexpr bool ReachVehicleFingerprintEqual(
