@@ -1282,8 +1282,14 @@ The implementation is therefore direction-truthful and origin-conservative:
    covered by the Reach active-callback counter; teardown disables it, proves
    detour/trampoline quiescence, and retains pointers on removal failure.
    Drivers, mounted gunners, attached turrets and walk-up turrets retain their
-   native barrel origin; the sight reports their true angle, but close-range
-   eye-to-barrel parallax remains stock and is not misrepresented as solved.
+   native barrel origin. The 2026-08-05 headset result disproved the additional
+   inference that the occupant unit's +0x214 vector was those barrels' true
+   firing angle: Warthog turrets and every tested vehicle missed the VR sight.
+   The correction therefore restricts the exact-pair unit-aim sight (and its
+   clamped fallback) to authored allows-weapons seats, where HREK proves that
+   unit vector is the personal projectile direction. Vehicle-barrel seats keep
+   the controller sight and existing closed-loop steering; no unproven barrel
+   origin or direction is substituted.
 5. No vehicle-barrel origin, evaluator-call census, steering policy, seat
    limits, camera trim, authored tag, or Workshop content changes in this
    transaction. The new runtime branch is gated to Halo Reach. Halo 3 and ODST

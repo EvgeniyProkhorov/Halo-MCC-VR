@@ -1619,6 +1619,17 @@ int main()
                 "Reach reticle publication preserves a prior pair across failure and replaces it on every later completed same-serial pair");
         }
 
+        Check(
+            ReachSeatAimCanDriveReticle(
+                ReachAimFeedbackSource::SeatedUnitAim,
+                kReachSeatAllowsWeaponsBit) &&
+            !ReachSeatAimCanDriveReticle(
+                ReachAimFeedbackSource::SeatedUnitAim, 0) &&
+            !ReachSeatAimCanDriveReticle(
+                ReachAimFeedbackSource::SeatedCompactFallback,
+                kReachSeatAllowsWeaponsBit),
+            "Reach unit aim drives only personal-weapon seat reticles, never vehicle barrels");
+
         // Personal-weapon origin substitution requires one fresh, matching
         // full-salt seat/eye pair. The 100 ms boundary is admitted exactly;
         // every stale, mismatched or vehicle-barrel case remains stock.

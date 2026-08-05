@@ -628,6 +628,19 @@ inline constexpr bool ReachAimFeedbackCanDriveReticle(
     return source == ReachAimFeedbackSource::SeatedUnitAim;
 }
 
+// unit+0x214 is the seated UNIT's aim. HREK proves it as the projectile
+// direction only when the seat's authored allows-weapons bit makes that unit
+// fire its personal weapon. A driver, mounted gunner, attached turret or
+// walk-up turret fires from a separate vehicle barrel; using the occupant's
+// unit aim as that barrel's reticle line is an unsupported (and headset-
+// disproven) substitution.
+inline constexpr bool ReachSeatAimCanDriveReticle(
+    ReachAimFeedbackSource source, uint32_t seatFlags)
+{
+    return ReachAimFeedbackCanDriveReticle(source) &&
+        (seatFlags & kReachSeatAllowsWeaponsBit) != 0;
+}
+
 inline bool ReachNormalizeUnitAimingVector(
     const float input[3], float output[3])
 {

@@ -19506,8 +19506,17 @@ namespace
                 owner.vehicle.directParent,
                 owner.vehicle.definitionDatum,
                 owner.vehicle.seatIndex};
-            reticle.source = owner.vehicle.unitAimValid
-                ? ReachAimFeedbackSource::SeatedUnitAim
+            const ReachAimFeedbackSource candidateSource =
+                owner.vehicle.unitAimValid
+                    ? ReachAimFeedbackSource::SeatedUnitAim
+                    : ReachAimFeedbackSource::SeatedCompactFallback;
+            // The occupant unit's +0x214 vector is the proven firing direction
+            // only for an authored allows-weapons seat. Mounted weapons fire
+            // from a vehicle barrel whose line we do not own; publishing the
+            // occupant vector for those seats made every turret sight lie.
+            reticle.source = ReachSeatAimCanDriveReticle(
+                    candidateSource, owner.vehicle.seatFlags)
+                ? candidateSource
                 : ReachAimFeedbackSource::SeatedCompactFallback;
             const float* cameraForward =
                 reinterpret_cast<const float*>(owner.headCenter + 0x0C);
@@ -28874,6 +28883,23 @@ bool Game_GetClampedAimDirection(float outDir[3])
 {
     if (!outDir || !g_aimClampedValid.load(std::memory_order_acquire))
         return false;
+#if HALOMCCVR_EXPERIMENTAL_REACH_RENDER_CANDIDATE
+    if (TitleAdapter_GetActiveTitle() == GameTitle::HaloReach &&
+        ReachVehicleFpActive())
+    {
+        ReachShotOccupationSnapshot occupation{};
+        // The clamped publication is also derived from the occupant unit's
+        // +0x214 vector. Never let it re-enter as a fallback for a vehicle-
+        // barrel seat after the exact-pair reticle correctly declines it.
+        if (!ReachReadShotOccupation(occupation) || !occupation.active ||
+            !occupation.allowsWeapons ||
+            occupation.generation !=
+                g_reachCamera.generation.load(std::memory_order_acquire))
+        {
+            return false;
+        }
+    }
+#endif
     const float yaw = g_aimClampedVrYaw.load(std::memory_order_relaxed);
     const float pitch = g_aimClampedVrPitch.load(std::memory_order_relaxed);
     if (!std::isfinite(yaw) || !std::isfinite(pitch))
