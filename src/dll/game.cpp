@@ -7061,25 +7061,32 @@ namespace
                     g_halo3SeatRecenters.fetch_add(
                         1, std::memory_order_relaxed);
                 }
-                if (g_config.vehicle_view_follow)
+                // C10: a plain recenter takes its heading from the ENGINE
+                // camera, which at seat entry is mid-swing around the
+                // vehicle — the user's "the angle in which you enter
+                // overrides the direction the camera is supposed to be
+                // facing". Ask instead for a rebase onto the hull's own
+                // nose. Only on the way IN: on the way out the player is
+                // already facing the hull's final heading and a snap there
+                // would throw that away.
+                //
+                // C27: this used to be gated on vehicle_view_follow, and the
+                // OFF branch asked for the plain mid-swing recenter instead.
+                // But the shipped default IS off, so in practice every seat
+                // entry took its facing from wherever the entry animation
+                // happened to be pointing - the user's "I need the playspace
+                // to reset when entering the vehicle so it faces the right
+                // default direction". The hull's nose is the right default
+                // either way: with the follow ON it is the frame the view will
+                // then track, and with it OFF it is the direction the vehicle
+                // is actually pointing when you sit down. The rate limit and
+                // expiry below are unchanged, so a debounce flap still cannot
+                // re-snap mid-drive.
+                if (g_halo3VehicleFpDebounce.stable ==
+                    Halo3VehicleState::Vehicle)
                 {
-                    // C10: a plain recenter takes its heading from the ENGINE
-                    // camera, which at seat entry is mid-swing around the
-                    // vehicle — the user's "the angle in which you enter
-                    // overrides the direction the camera is supposed to be
-                    // facing". Ask instead for a rebase onto the hull's own
-                    // nose, which is only meaningful now that the view follows
-                    // the hull. Only on the way IN: on the way out the follow
-                    // has already left the player facing the hull's final
-                    // heading, and a recenter there would snap that away.
-                    if (g_halo3VehicleFpDebounce.stable ==
-                        Halo3VehicleState::Vehicle)
-                        g_halo3SeatEntryMs.store(nowMs,
-                                                 std::memory_order_release);
-                }
-                else
-                {
-                    g_needRecenter.store(true);
+                    g_halo3SeatEntryMs.store(nowMs,
+                                             std::memory_order_release);
                 }
             }
         }
@@ -7501,7 +7508,10 @@ namespace
             {
                 g_halo3SeatEntryMs.store(0, std::memory_order_relaxed);
             }
-            else if (followEnabled && active && VR_GetHeadPose(hq, hp))
+            // C27: `active` is the live seat, not the follow option. The nose
+            // align is what gives the seat its default facing, and that is
+            // wanted with View Follow off as much as on.
+            else if (active && VR_GetHeadPose(hq, hp))
             {
                 if (nowMs - lastEntryAlignMs > 1500)
                 {
@@ -30538,14 +30548,25 @@ bool Game_ComputeAimStick(float& outRx, float& outRy)
         // error means it is still converging, so neither counts as clamped.
         constexpr float kAimStallRadians = 0.12f;
         constexpr float kAimConvergingRadians = 0.005f;
-        constexpr uint64_t kAimStallMs = 250;
+        // C27: a Halo 3 seat that fires the occupant's OWN weapon reports the
+        // truth as soon as the error stalls, instead of after a further
+        // quarter second. The user's report is that the passenger's shots stay
+        // misaligned even with C26's re-origin running (the log measured
+        // 55,572 corrected aim frames), and a quarter second at 120 fps is
+        // thirty frames in which the reticle keeps promising an angle the seat
+        // will never reach. Their own instruction was that limiting the
+        // character's rotation to make the gun agree is acceptable; this is
+        // the honest half of that - the crosshair stops leading the gun. Every
+        // other seat, title and on-foot case keeps the original 250 ms.
+        const uint64_t stallMs =
+            Halo3SeatFiresPersonalWeapon(Halo3OccupiedSeatFlags()) ? 0u : 250u;
         if (!seated || errorMagnitude < kAimStallRadians ||
             errorMagnitude < previousErrorMagnitude - kAimConvergingRadians)
             stalledSinceMs = 0;
         else if (!stalledSinceMs)
             stalledSinceMs = nowMs;
         previousErrorMagnitude = errorMagnitude;
-        if (stalledSinceMs && nowMs - stalledSinceMs >= kAimStallMs)
+        if (stalledSinceMs && nowMs - stalledSinceMs >= stallMs)
         {
             // Invert the same mapping the desired angles came through, so the
             // published direction is the engine's aim expressed in VR space.

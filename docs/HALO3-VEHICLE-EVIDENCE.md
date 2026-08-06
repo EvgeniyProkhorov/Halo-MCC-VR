@@ -2037,3 +2037,53 @@ Release x64 builds, `ctest --preset release` passes 1/1, and the Reach parity
 gate passes. Headset acceptance requires a Halo 3 Warthog or Hornet passenger
 landing shots on the crosshair at close range AND at distance, with the driver
 and a mounted gunner unchanged.
+
+## C27 - 2026-08-06: seat entry faces the nose, and the crosshair stops leading the gun
+
+User report against 206f25a, both items Halo 3 only: "halo 3 passenger shooting
+still is off and misaligned, if you want to limit the rotation of the character
+to have the gun sync up that is fine, also i need the playspace to reset when
+entering the vehicle so it faces the right default direction."
+
+### Seat entry facing
+
+C10 built the nose-align for exactly this and gated it on `vehicle_view_follow`,
+with the OFF branch asking for a plain full recenter instead. C10's own text
+says why that branch is wrong: "a plain recenter takes its heading from the
+ENGINE camera, which at seat entry is mid-swing around the vehicle". C24 then
+shipped `vehicle_view_follow = false` as the default and the user drives with it
+off, so in practice **every** seat entry has been taking its facing from
+wherever the entry animation happened to be pointing.
+
+The align now runs on the entry edge whichever way the option is set, and the
+consumer's gate changes from `followEnabled && active` to `active` - the live
+seat, not the option. The hull's nose is the right default either way: with the
+follow on it is the frame the view will track, and with it off it is simply the
+direction the vehicle is pointing when you sit down. The 1.5 s rate limit, the
+2 s expiry and the exit behaviour are untouched, so a debounce flap still cannot
+re-snap mid-drive and leaving a seat still keeps the heading the player earned.
+
+### Passenger aim
+
+C26's re-origin is confirmed running: the accepted-source log records
+`Seat flags 00001070 (allows-weapons=1)` on the Warthog passenger with 55,572
+re-origined aim frames, so the gate and the correction both execute. The
+residual is the seat's aim CONE, which is a different failure. A passenger's
+weapon is bounded to yaw -90..+90 and pitch -45..+45 around the hull; point the
+hand outside it and the engine simply refuses, the closed loop holds full
+deflection, and the reticle keeps promising a shot that cannot happen.
+
+The honest-crosshair path for that already exists and publishes the engine's
+REAL aim once the tracking error has stalled - but only after a further 250 ms,
+which at 120 fps is thirty frames of the crosshair leading the gun. For a Halo 3
+seat whose tag sets `allows weapons`, that wait is now zero: the moment the
+error stops converging, the reticle sits on the gun. This is the user's own
+"limiting the rotation of the character to have the gun sync up is fine",
+implemented as the reticle telling the truth rather than the aim promising more
+than the seat allows. Every other seat, every other title and all on-foot play
+keep the original 250 ms.
+
+Release x64 builds, `ctest --preset release` passes 1/1, and the Reach parity
+gate passes. Headset acceptance: a Halo 3 passenger's shots land on the
+crosshair including while turned near the edge of the seat's cone, and every
+seat entry starts facing the vehicle's nose with View Follow off.
