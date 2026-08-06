@@ -608,6 +608,15 @@ namespace
             m_lastLogMs = 0;
         }
 
+        // Read-only view of the last sampled decision. AllowsInstall must be
+        // called exactly ONCE per worker tick (each call consumes a sample);
+        // every other consumer in that tick asks this instead. An unprovable
+        // array reports open, matching AllowsInstall's fail-open behavior.
+        bool IsOpen() const
+        {
+            return !kLevelLoadGateEnabled || !m_array || m_logic.IsOpen();
+        }
+
     private:
         // FREEZE, THEN TICK. A plain "has it changed?" test is not enough, and
         // the user's own observation is what exposed the hole: the bug happens
@@ -695,6 +704,7 @@ namespace
             return false;
         }
 
+    private:
         const char* m_titleName = nullptr;
         uint32_t m_generation = 0;
         uintptr_t m_base = 0;
@@ -711,6 +721,27 @@ namespace
     PlayerViewLivenessGate g_halo3LevelLoadGate;
     PlayerViewLivenessGate g_odstLevelLoadGate;
     PlayerViewLivenessGate g_reachLevelLoadGate;
+
+    // TOUCH NOTHING WHILE A LEVEL LOADS (2026-08-06). The gate stopped us
+    // INSTALLING into a loading screen, and the user still had to load twice.
+    // The decisive capture (08:54:16-18, build 382e4eb) shows why: the bounced
+    // load ran with zero hooks installed, and at the bounce `haloreach.dll` is
+    // ABSENT from the module list - the module was pulled, then all six
+    // reloaded 50 ms later. In that 2 s window the mod had already run a whole
+    // 74 MB preflight signature scan that takes a REFCOUNT PIN on the module
+    // (GetModuleHandleExW without UNCHANGED_REFCOUNT, reach_render_preflight
+    // .cpp), plus a pause-flag scan, plus the draw-distance debug-var scan and
+    // write - all against the module MCC was loading. A pin held across MCC's
+    // own unload defers that unload to OUR FreeLibrary instead of MCC's, which
+    // is a real race with the loader and fits the user's whole-history report
+    // exactly: the FIRST load into a module we previously hooked bounces, the
+    // reload that the bounce provokes then works.
+    //
+    // So the gate's invariant is widened from "do not install" to "do not
+    // touch": while a title's level is loading we take no pin, run no module
+    // scan and write nothing into it. Nothing deferred is usable before the
+    // level runs anyway, so this costs no capability.
+    std::atomic<bool> g_activeTitleLevelRunning{false};
 
 #if HALOMCCVR_EXPERIMENTAL_ODST_BRINGUP
     struct CameraRuntimeLayout
@@ -2972,6 +3003,14 @@ namespace
             g_hudLayoutLastAttemptMs.load(
                 std::memory_order_relaxed);
         if (now - lastAttempt < attemptCooldownMs)
+            return;
+        // A process-wide scan of every readable private+mapped page (measured
+        // 11.3 s in the 2026-08-06 capture) is the largest thing we do to a
+        // loading title, and it WRITES the safe-frame slots it accepts. Hold
+        // it for the same gate as everything else; the level's tag data is not
+        // resident during a loading screen anyway, so a scan launched there
+        // was already the one most likely to find nothing.
+        if (!g_activeTitleLevelRunning.load(std::memory_order_acquire))
             return;
         g_hudLayoutLastAttemptMs.store(
             now, std::memory_order_relaxed);
@@ -28870,11 +28909,17 @@ namespace
     }
 
     void ReachCameraCore_Poll(
-        uintptr_t base, size_t size, uint32_t generation, bool soleReachTitle)
+        uintptr_t base, size_t size, uint32_t generation, bool soleReachTitle,
+        bool levelRunning)
     {
-        ReachCineProbeColdPoll(base, size, generation, soleReachTitle);
-        ReachPauseColdPoll(base, size, generation, soleReachTitle);
-        ReachMuzzleRetargetTick(base, size, generation, soleReachTitle);
+        // Each of these resolves by scanning haloreach.dll. They are module
+        // touches with no use before the level runs, so they wait for the gate
+        // exactly like the hooks do; teardown handling below still runs every
+        // tick on soleReachTitle alone.
+        const bool coldWorkAllowed = soleReachTitle && levelRunning;
+        ReachCineProbeColdPoll(base, size, generation, coldWorkAllowed);
+        ReachPauseColdPoll(base, size, generation, coldWorkAllowed);
+        ReachMuzzleRetargetTick(base, size, generation, coldWorkAllowed);
         ReachLightmapShadowLogTick();
         ReachWeatherLogTick();
         ReachSsaoLogTick();
@@ -28957,23 +29002,17 @@ namespace
 
         if (!installed)
         {
-            // Sample the level-load gate every tick from title detection, NOT
-            // only once the display proof passes. The proof's engine-fields
-            // often settle only when the level is already rendering, and a
-            // gate that begins observing there has missed the loading
-            // screen's freeze - it then pays the full 6 s already-running
-            // proof while the level and its opening cinematic show flat.
-            // Captured 2026-08-06: proof PASS 08:54:38, gate open
-            // (already-running, 6078 ms) 08:54:44, 3D ~9 s after the level
-            // appeared - against the same session's 08:52:31 where an early
-            // proof let the gate witness frozen-then-ticking and 3D arrived
-            // ~2 s in. Sampling is a read-only fingerprint of engine memory;
-            // installing still requires the proof AND the open gate.
-            const bool gateOpen = g_reachLevelLoadGate.AllowsInstall(
-                generation, base, kReachRetailImageSize,
-                kReachPlayerViewArray, "Reach");
-            // Never hook into a loading screen; see PlayerViewLivenessGate.
-            if (ready && gateOpen)
+            // The gate was sampled once for the active title at the top of the
+            // worker tick, BEFORE anything touched this module; levelRunning
+            // carries that decision here. Sampling from title detection rather
+            // than from proof-pass also fixed the slow entry into 3D: the
+            // display proof's engine-fields often settle only once the level
+            // is already rendering, so a gate that began observing there had
+            // missed the loading screen's freeze and paid the full 6 s
+            // already-running proof (captured 2026-08-06: proof PASS
+            // 08:54:38, gate open 6078 ms later, ~9 s of flat cinematic;
+            // versus ~2 s on the same session's early-proof load).
+            if (ready && levelRunning)
                 InstallReachCameraCore(base, size, generation);
             return;
         }
@@ -29038,15 +29077,55 @@ namespace
             // Game_ApplyDrawDistance caches by module, so this is a cheap
             // per-tick reassert of the user's scaled render far-clip (survives
             // level/tag loads), not a per-tick whole-module scan.
+            // Sample the ACTIVE title's level-load gate exactly once per tick,
+            // before anything else may touch its module. Every other consumer
+            // this tick reads IsOpen()/g_activeTitleLevelRunning instead, so no
+            // path double-consumes a sample. See the gate declaration for why
+            // the invariant is "touch nothing", not merely "install nothing".
+            bool activeLevelRunning = true;
             if (activeTitle)
             {
-                uintptr_t ddBase = 0;
-                size_t ddSize = 0;
-                if (sig::ModuleRange(activeTitle->moduleName, ddBase, ddSize))
-                    Game_ApplyDrawDistance(
-                        ddBase, ddSize,
-                        TitleAdapter_GetGeneration(activeTitle->title));
+                uintptr_t gateBase = 0;
+                size_t gateSize = 0;
+                if (sig::ModuleRange(
+                        activeTitle->moduleName, gateBase, gateSize))
+                {
+                    const uint32_t gateGeneration =
+                        TitleAdapter_GetGeneration(activeTitle->title);
+                    switch (activeTitle->title)
+                    {
+                    case GameTitle::Halo3:
+                        activeLevelRunning =
+                            g_halo3LevelLoadGate.AllowsInstall(
+                                gateGeneration, gateBase, gateSize,
+                                kHalo3PlayerViewArray, "Halo 3");
+                        break;
+                    case GameTitle::Halo3ODST:
+                        activeLevelRunning =
+                            g_odstLevelLoadGate.AllowsInstall(
+                                gateGeneration, gateBase, gateSize,
+                                kOdstPlayerViewArray, "ODST");
+                        break;
+                    case GameTitle::HaloReach:
+                        activeLevelRunning =
+                            g_reachLevelLoadGate.AllowsInstall(
+                                gateGeneration, gateBase,
+                                kReachRetailImageSize,
+                                kReachPlayerViewArray, "Reach");
+                        break;
+                    default:
+                        break;
+                    }
+                    // The draw-distance reassert resolves a debug var by a
+                    // whole-module name scan and WRITES it. Both are module
+                    // touches, so they wait for the level exactly like hooks.
+                    if (activeLevelRunning)
+                        Game_ApplyDrawDistance(
+                            gateBase, gateSize, gateGeneration);
+                }
             }
+            g_activeTitleLevelRunning.store(
+                activeLevelRunning, std::memory_order_release);
 #if HALOMCCVR_EXPERIMENTAL_REACH_RENDER_CANDIDATE
             {
                 const bool soleReachTitle = activeTitle &&
@@ -29060,15 +29139,24 @@ namespace
                 const bool haveReachRange = soleReachTitle &&
                     sig::ModuleRange(
                         activeTitle->moduleName, reachBase, reachSize);
+                // The preflight takes a REFCOUNT PIN on haloreach.dll and
+                // scans the whole 74 MB image. Holding a pin across MCC's own
+                // unload defers that unload to our FreeLibrary - a real race
+                // with the loader during a level load, and the leading
+                // explanation for the bounced first load. Withhold it (and so
+                // the pin) until the gate proves the level is running.
+                const bool reachLevelRunning =
+                    haveReachRange && activeLevelRunning;
                 ReachRenderCandidate_ColdPoll(
                     reachBase, reachSize, reachGeneration,
-                    haveReachRange);
+                    reachLevelRunning);
                 VR_ReachRenderCandidate_ColdPoll();
                 // Install/arm/remove the permanent Reach per-eye camera core.
                 // It never installs until loaded-image preflight and VR
                 // eye-capture proof pass, and never touches Halo 3/ODST.
                 ReachCameraCore_Poll(
-                    reachBase, reachSize, reachGeneration, haveReachRange);
+                    reachBase, reachSize, reachGeneration, haveReachRange,
+                    reachLevelRunning);
             }
 #endif
             // Snapshot resolution is deliberately side-effect free so render
@@ -29329,11 +29417,13 @@ namespace
                 // generation would never be retried. Halo 3 had no readiness
                 // check of any kind before this - it hooked the instant
                 // halo3.dll appeared, loading screen or not.
+                // IsOpen(), not AllowsInstall(): the gate was already sampled
+                // once this tick at the top of the worker. Sampling again here
+                // would consume two fingerprints per tick and halve the
+                // observation the decision rests on.
                 if (generation && generation != haloAttemptedGeneration &&
                     sig::ModuleRange(activeTitle->moduleName, base, size) &&
-                    g_halo3LevelLoadGate.AllowsInstall(
-                        generation, base, size, kHalo3PlayerViewArray,
-                        "Halo 3"))
+                    g_halo3LevelLoadGate.IsOpen())
                 {
                     haloAttemptedGeneration = generation;
                     if (hookRefreshPending)
@@ -29364,10 +29454,9 @@ namespace
             {
                 uintptr_t base = 0;
                 size_t size = 0;
+                // IsOpen(): already sampled once this tick; see the Halo 3 site.
                 if (sig::ModuleRange(activeTitle->moduleName, base, size) &&
-                    g_odstLevelLoadGate.AllowsInstall(
-                        TitleAdapter_GetGeneration(GameTitle::Halo3ODST),
-                        base, size, kOdstPlayerViewArray, "ODST"))
+                    g_odstLevelLoadGate.IsOpen())
                 {
                     const uint32_t generation =
                         TitleAdapter_GetGeneration(GameTitle::Halo3ODST);
