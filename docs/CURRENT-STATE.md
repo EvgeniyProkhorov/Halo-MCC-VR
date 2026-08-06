@@ -5,12 +5,14 @@ pointer. Detailed pre-cleanup experiments remain available in Git history; they
 are evidence, not instructions.
 
 > **Start here: "PUBLIC RELEASE: MCC VR Alpha 0.3.1 - 2026-07-30" below is the
-> current published state, and "DEVELOPMENT BASELINE: ODST first-person
-> vehicles - 2026-08-04" is the current development baseline that the next
-> hotfix/feature update builds on. Read its headset-UNVERIFIED list before
-> relying on anything in it. It descends from the Halo 3
-> animated CHUD crosshair baseline recorded under it, which in turn descends
-> from the Halo 3 first-person vehicle baseline.**
+> current published state, and "DEVELOPMENT BASELINE: Reach first-person
+> vehicles - 2026-08-06" is the current development baseline that the next
+> hotfix/feature update builds on. Read its open list before relying on
+> anything in it - it was set by a "good enough for now" directive, not a
+> per-item acceptance, and it still owes a Halo 3/ODST regression. It descends
+> from the ODST first-person vehicle baseline, which descends from the Halo 3
+> animated CHUD crosshair baseline, which descends from the Halo 3
+> first-person vehicle baseline.**
 > Everything dated earlier is history.
 > Several older sections describe Reach features as impossible, mandatory, or
 > not yet built that have since been built and headset-confirmed - in
@@ -24,14 +26,94 @@ are evidence, not instructions.
 > instead of checked. If a comment or doc says a title cannot do something,
 > verify it against the code before building on it.
 
-## DEVELOPMENT BASELINE: ODST first-person vehicles - 2026-08-04
+## DEVELOPMENT BASELINE: Reach first-person vehicles - 2026-08-06
 
-**The development baseline is now source `118b8bde850d17a147e99ecff7f9d9214b6ca380`
-(`halo3xr.dll` SHA-256 `7CB49B543A9D70B3AF2B60847A4618980A5D7E0E24B5A4DC24726FCEBC2B9690`).**
-The user directed this on 2026-08-04: "lets push forward this is our new
-baseline". Installed and hash-verified in both the Steam and Microsoft Store
-`Halo_MCC_VR` folders. Development of Halo: Reach first-person vehicles builds
-on this.
+**The development baseline is now source
+`558d0bf1ffec148ffe9b6088df52b00c05381bea` (`halo3xr.dll` SHA-256
+`F1DA4FA2FE34D20977C90342674DC7E4D81AF001801CF65F9C5A59613D95490F`).**
+The user directed this after running that exact build: "alright that's great,
+this will be our new baseline going forward, not perfect but good enough for
+now." It supersedes the ODST vehicle baseline `118b8bde` recorded below,
+whose own results carry forward unchanged.
+Read the open list before relying on anything here.
+
+| Identity | Value |
+| --- | --- |
+| Runtime source | `558d0bf1ffec148ffe9b6088df52b00c05381bea` |
+| Build | Release x64, preset `release`, ODST ON, Reach ON, ReachRender ON |
+| Candidate package | `out/candidates/558d0bf-reach-fp-parity-20260806-070420272Z` |
+| `halo3xr.dll` SHA-256 | `F1DA4FA2FE34D20977C90342674DC7E4D81AF001801CF65F9C5A59613D95490F` |
+| `halo3xr_launcher.exe` SHA-256 | `E412F4003C46DD2D76AECEFAB411AEFA42593057027D508A3245BD6D871F081A` |
+| Title coverage | Halo 3, Halo 3: ODST, Halo: Reach |
+| Installed editions | Steam and Microsoft Store; DLL hashes verified independently in both `Halo_MCC_VR` folders |
+| Accepted run | Steam edition, VirtualDesktopXR 1.0.10, Meta Quest 3 at 90 Hz, session `02:06:50`-`02:17:26` on this exact source |
+
+**This is a "good enough for now" directive, not a per-item acceptance.** The
+user did not enumerate which behaviors they checked. Treat every item below as
+either directly evidenced by that session's log or as open.
+
+**What this line fixed, over three candidates (R-V25, R-V26, R-V27):**
+
+1. **Seat trims can no longer be destroyed from the F1 menu.** An unidentified
+   Reach vehicle used to decode to trim slot -1, which meant the *universal*
+   trim shared by Halo 3, ODST and every unadjusted Reach seat - so tuning that
+   seat rewrote the base for all three titles. Unmatched vehicles now key their
+   own row. The panel also offers a one-click reset for the universal trim,
+   which earlier sessions had walked from 0.10/0.05 to -1.00/+1.02.
+2. **Sliders behave like Halo 3's in all three titles.** The -1 mm/+1 mm
+   buttons, the `Edit universal trim` / `Return to occupied seat` buttons and
+   the three-decimal display are gone; Reach's slider now travels Halo 3's own
+   distance either side of the seat's authored Blender base instead of spanning
+   128 m.
+3. **Mounted weapons resolve their identity.** Every HREK type-16 mounted
+   weapon now also resolves at retail's turret physics type 6; the rocket
+   Warthog turret used to log `unmatched vehicle tuple` despite its tuple being
+   in the table bit for bit.
+4. **A Reach seat's reset returns it to its authored Blender row**, not to the
+   shared universal trim.
+5. **The passenger seat reports first person.** The occupied seat's
+   `third person camera` bit is cleared once per occupation with Halo 3 C20's
+   lifetime, scoped to seats that author `allows weapons`. The accepted log
+   shows `warthog raw seat 1` at `seat flags 00000860 (third-person=0
+   allows-weapons=1)` while every driver, turret and gunner seat keeps its own
+   flags untouched (`04020014`, `0404001C`, `00080818`, ...).
+6. **A passenger's shots leave the sight ray they aim down.** The origin is the
+   presented controller ray's own origin rather than the rendered eye, so the
+   shot line and the crosshair are one line at every range instead of crossing
+   at `crosshair_distance_m`.
+
+**Open on this line - do not treat as working:**
+
+- **Passenger floating hands are still not visible.** The user's last words on
+  it were "the floaty hands aren't working". **The accepted session's own log
+  now narrows this decisively:** the engine's first-person arms/weapon
+  transaction ran **658 times during the ~6 s Warthog passenger occupation**
+  (`2346` at entry `02:16:16`, `3004` at exit `02:16:21`). The engine *is*
+  building the occupant's first-person models in that seat. The remaining fault
+  is therefore on our side - placement, or the palette collapse in
+  `ReachProcessFpPalette` that scales everything except the wrist descendants
+  and the held object to 0.0001 - and **not** engine admission. Three
+  candidates were spent on admission theories before this number existed; start
+  from the palette, not from the render gate.
+- **The passenger shot line is unconfirmed.** R-V27's change shipped in this
+  build but the user reported no result for it.
+- **Regression debt.** R-V25 changed shared code the other two titles use: the
+  F1 seat-trim slider block and the universal-trim defaults. No Halo 3 or ODST
+  headset result has been recorded against this line, and `AGENTS.md` requires
+  one for a shared-code change before release.
+- Everything still open on the ODST baseline below carries forward, including
+  the ODST/Halo 3 level-load lockout.
+
+## SUPERSEDED BASELINE: ODST first-person vehicles - 2026-08-04
+
+**Superseded on 2026-08-06 by the Reach first-person vehicle baseline at the
+top of this file.** It was source `118b8bde850d17a147e99ecff7f9d9214b6ca380`
+(`halo3xr.dll` SHA-256
+`7CB49B543A9D70B3AF2B60847A4618980A5D7E0E24B5A4DC24726FCEBC2B9690`), directed
+by the user on 2026-08-04 with "lets push forward this is our new baseline".
+Its ODST results and its two headset-UNVERIFIED items below still stand and
+carry forward, because the Reach line descends from it and changed no ODST
+behavior.
 
 | Identity | Value |
 | --- | --- |
@@ -69,110 +151,11 @@ alternating eyes).
 choice; see `docs/ODST-LEVEL-LOAD-LOCKOUT.md`. Its undone decisive test is a
 no-mod control run.
 
-## PENDING HEADSET CANDIDATE: Reach passenger sight line + turret repair - 2026-08-06
+## SUPERSEDED CANDIDATE: complete Reach vehicle repair - 2026-08-05
 
-The accepted pointer remains 118b8bde. The 7235d8d headset run (Steam /
-VirtualDesktopXR / Quest 3) reported: "we're in a better state now but turrets
-are broken and even though the floaty hands aren't working the shots aren't
-following my crosshair." Full evidence is `docs/REACH-VEHICLE-EVIDENCE.md`
-R-V27.
-
-1. **Turret regression fixed.** R-V26 cleared the seat's `third person camera`
-   bit on every occupied seat, including Shade, Scorpion and both Warthog
-   turrets. Halo 3's C20 result only ever promised the first-person weapon in
-   `allows weapons` passenger seats, so the clear is now gated on that HREK
-   flag. Turrets, drivers and gunners return bit-for-bit to the R-V25
-   behaviour the user had just called "a better state".
-2. **The passenger shot line was leaving the wrong point.** The log proves the
-   origin substitution finally reached a passenger at `01:52:57`, and the shots
-   still missed the crosshair - because it substituted the rendered **eye**
-   while the sight we present is the floating **controller** reticle. Those are
-   two different rays that cross only at `crosshair_distance_m`. The presented
-   ray's own origin is now published beside its target, through one shared
-   transform, and the shot leaves from there, so the shot line and the sight
-   line are one line at every range. A shot without a fresh exact-key sight ray
-   stays completely stock.
-3. **Two diagnostics that were lying are fixed**, because the hands have now
-   cost three candidates for want of one number. The seat-flags line read a
-   render-scope global from the worker thread and printed `00000000` for every
-   seat; it is now published by the engine thread that reads it. And
-   `ReachProcessFpPalette` now counts its invocations while a seat is occupied,
-   which separates "the engine never built the occupant's arms and weapon" from
-   "it built them and we placed or collapsed them wrong" - a distinction no
-   previous report could make.
-
-Release x64 builds, `ctest --preset release` passes 1/1, and the Reach parity
-gate passes.
-
-## PENDING HEADSET CANDIDATE: Reach vehicle trim + identity repair - 2026-08-06
-
-The accepted pointer remains 118b8bde. This candidate repairs what the
-2026-08-06 session broke and does not advance any pointer.
-
-The rejected build was source `12a7ee4b085c803689a22c65e61b00f88f0ca6f4`,
-DLL SHA-256
-`E2E869F00C807AF3A8D3EDB729E461C0813E50CD80D7925DD8D2089F7FF3E85E`,
-Steam / VirtualDesktopXR 1.0.10 / Quest 3 / 90 Hz. The user reported sliders
-that made no sense ("ridiculously strong and then super weak"), extra F1
-buttons that do nothing useful in Halo 3 or ODST, wrong seats on some vehicles,
-and a passenger with no floating hands and broken shots.
-
-Four causes are measured in that session's preserved log and config, and fixed
-here; the fifth is measured and explicitly NOT fixed. Full evidence is in
-`docs/REACH-VEHICLE-EVIDENCE.md` R-V25.
-
-1. **The universal trim was editable from inside a seat.** An unidentified
-   Reach vehicle decoded to trim slot -1, which means the universal trim shared
-   by Halo 3, ODST and every unadjusted Reach seat. The log shows the F1 menu
-   open at `01:02:51` while seated in one, and the config's
-   `vehicle_cam_forward_m` moving `0.188 -> -0.765` across exactly that window.
-   Unmatched vehicles now key their own `unmatched` trim row, and the panel
-   offers a one-click reset for the universal trim, which had already been
-   walked to -1.00/+1.02 over earlier sessions.
-2. **That vehicle was not unmatched.** Its tuple is the canonical HREK
-   `WarthogRocket` row bit for bit; it failed only because retail reports
-   physics type 6 where HREK authors 16. Every HREK type-16 mounted weapon now
-   resolves at either type, with the tuple still the identity proof.
-3. **The sliders are Halo 3's sliders again.** The -1 mm/+1 mm buttons, the
-   `Edit universal trim` / `Return to occupied seat` buttons and the
-   three-decimal display are gone. Reach's storage clamps stay wide so no
-   authored row is truncated, but the slider now travels Halo 3's own distance
-   either side of the seat's authored Blender base.
-4. **The Warthog driver seat is repaired without touching the user's config.**
-   Its `use_universal` tombstone now returns the seat to its authored Blender
-   row instead of to the polluted universal trim.
-5. **Passenger hands, ported from Halo 3's accepted C20 (R-V26).** R-V24's
-   render admission detour finished the whole session - including a Warthog
-   passenger seat - with zero admissions, so it is not the mechanism and is
-   disabled rather than deleted. The mechanism Halo 3 actually uses is
-   recorded in its own accepted C20 result: clearing the occupied seat's
-   `third person camera` bit puts the engine in first-person perspective, and
-   the first-person model cache builds the occupant's arms and weapon only in
-   that perspective. Reach authors the same bit, and the HREK census confirms
-   a Reach passenger seat is authored `third person camera, allows weapons`.
-   R-V20 used this bit and was rejected - but as a one-frame-interval lease
-   that restored and re-cleared the word twice per frame, which is the
-   reported shaking. Halo 3 never toggles it: it clears once on entry and
-   restores on seat change, exit, config disable or teardown. R-V26 ports that
-   lifetime exactly, keeping R-V20's pointer-free key and re-resolve-before-
-   restore safety. Gated by "Sit in the seat (first person)", not by the body
-   checkbox, because R-V20 proved this bit does not hide the Reach body.
-   **Because this is the bit R-V20 was rejected over, the headset test must
-   re-check driver seats, both View Follow settings and the Scorpion, Wraith
-   and Covenant turrets for any return of the vehicle shaking.**
-6. **Passenger shot origin is measured, not yet fixed.** The session never
-   logged a single personal shot-origin substitution. The skip line now names
-   which of five conditions rejected each shot, and the seat line prints the
-   live seat-flags word with bit 4 and bit 5 decoded. If R-V26 brings the
-   hands up and shots still miss, those two lines identify the cause without
-   another probe build.
-
-Release x64 builds, `ctest --preset release` passes 1/1, and the Reach parity
-gate passes. A build and a passing gate prove nothing about the headset.
-
-## PENDING HEADSET CANDIDATE: complete Reach vehicle repair - 2026-08-05
-
-The accepted pointer above remains 118b8bde. Implementation commit f370185 is
+Superseded by the 2026-08-06 Reach baseline at the top of this file, which
+contains this work plus the R-V25/R-V26/R-V27 repairs on top of it. Kept for
+its per-behavior evidence. When written, the accepted pointer was 118b8bde. Implementation commit f370185 is
 the new unaccepted Reach vehicle repair bundle; the documentation/packaging-only
 descendant packaged from it must be identified by its candidate manifest. A
 passing build or install does not advance this pointer.
