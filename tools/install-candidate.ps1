@@ -155,6 +155,10 @@ if ([int]$manifest.schema_version -ne 7 -or
         $manifest.reach_vehicle_native_fp_body_seated_legs_enabled -ne $true -or
         $manifest.reach_vehicle_fp_body_centered_authored_pose -ne $true -or
         $manifest.reach_vehicle_fp_body_failure_isolated -ne $true -or
+        $manifest.reach_passenger_personal_weapon_presentation_enabled -ne $true -or
+        [string]$manifest.reach_passenger_personal_weapon_presentation_scope -cne
+            'render-scoped-allows-weapons-seat-only' -or
+        $manifest.reach_vehicle_trim_fine_step_m -ne 0.001 -or
         [string]$manifest.reach_vehicle_fp_body_identity_policy -cne
             'hrek-checksum-count-exact-tag-next-pair' -or
         [string]$manifest.reach_vehicle_fp_body_spartan_identity -cne
