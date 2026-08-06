@@ -417,6 +417,227 @@ namespace
     using OdstHudTargetCopyFn = uint32_t(__fastcall*)(
         int sourceTargetId, int destinationTargetId);
 
+    // ---------------------------------------------------------------------
+    // LEVEL-LOAD GATE (2026-08-06). Long-standing bug: after the first level
+    // of a session, loading another one sometimes bounces straight back to the
+    // main menu. The preserved capture
+    // `out/analysis/odst-level-load-lockout/halo3xr-50ddf56-steam-20260806-
+    // stale-camera-discriminator.log` contains one successful load and three
+    // failures and settles what separates them.
+    //
+    // On the FIRST load of a session the engine's four-slot player-view array
+    // is genuinely zeroed, so ODST's readiness check correctly reported
+    // `waiting for the proven slot-0/user-0 ordinary camera mode` and held for
+    // 7.6 s before installing. On EVERY later load that same array still holds
+    // the PREVIOUS level's values - the failing loads read back
+    // `fov=1.641310 near=0.007812 far=10240`, the exact numbers from the level
+    // just exited - so the check passed 0.6 s in and hooks went into the title
+    // 1.5 s after it appeared, while the loading screen was still up. All three
+    // such loads died without the engine's camera ever ticking; because the
+    // `ODST camera WAIT` line logs on CHANGE, its single appearance followed by
+    // 1.3 s of silence proves the camera state was frozen, not merely unread.
+    //
+    // "Non-zero" is therefore not liveness. This gate requires the engine's own
+    // camera memory to be observed CHANGING before any title installs hooks.
+    // It cannot alter behavior after arming - it can only delay installation -
+    // and it deliberately interprets nothing about the camera, so one
+    // implementation serves all three titles.
+    //
+    // All three engines build their four player views with the same
+    // constructor shape; only the per-title view stride differs, and the array
+    // base is the constructor's own `lea rbx,[rip+disp]`. Decoding ODST's that
+    // way yields +0x2D73590, which is exactly the `array=2D73590` the accepted
+    // runtime log already reports - the method is validated against a
+    // known-good result before being applied to the other two titles.
+    struct PlayerViewArrayEvidence
+    {
+        const char* constructorPattern;
+        size_t expectedStride;
+    };
+
+    // Halo 3: stride 0x2820, array +0x2D2F680. ODST: stride 0x2810, array
+    // +0x2D73590 (log-confirmed). Reach: stride 0xA40, array +0x29F2B90 - and
+    // 0xA40 is the same four-player-view stride already documented in
+    // docs/REACH-SIGNATURE-EVIDENCE.md. Each module also contains one unrelated
+    // four-slot constructor of identical shape, so the stride bytes are part of
+    // the pattern; with them pinned every title matches exactly once.
+    const PlayerViewArrayEvidence kHalo3PlayerViewArray = {
+        "48 89 5C 24 08 57 48 83 EC 20 48 8D 1D ?? ?? ?? ?? "
+        "BF 04 00 00 00 48 8B CB E8 ?? ?? ?? ?? 48 81 C3 20 28 00 00 "
+        "48 83 EF 01 75 ?? 48 8B 5C 24 30", 0x2820};
+    const PlayerViewArrayEvidence kOdstPlayerViewArray = {
+        "48 89 5C 24 08 57 48 83 EC 20 48 8D 1D ?? ?? ?? ?? "
+        "BF 04 00 00 00 48 8B CB E8 ?? ?? ?? ?? 48 81 C3 10 28 00 00 "
+        "48 83 EF 01 75 ?? 48 8B 5C 24 30", 0x2810};
+    const PlayerViewArrayEvidence kReachPlayerViewArray = {
+        "48 89 5C 24 08 57 48 83 EC 20 48 8D 1D ?? ?? ?? ?? "
+        "BF 04 00 00 00 48 8B CB E8 ?? ?? ?? ?? 48 81 C3 40 0A 00 00 "
+        "48 83 EF 01 75 ?? 48 8B 5C 24 30", 0x0A40};
+
+    uintptr_t ResolvePlayerViewArray(
+        uintptr_t base, size_t size, const PlayerViewArrayEvidence& evidence)
+    {
+        if (!base || !size)
+            return 0;
+        const uintptr_t hit = sig::Find(base, size, evidence.constructorPattern);
+        if (!hit ||
+            sig::Find(hit + 1, base + size - hit - 1,
+                      evidence.constructorPattern))
+        {
+            return 0;
+        }
+        // `lea rbx, [rip+disp32]` is the fifth instruction, 7 bytes at +0x0A.
+        const int32_t displacement =
+            *reinterpret_cast<const int32_t*>(hit + 0x0D);
+        const uintptr_t array = hit + 0x11 + displacement;
+        const size_t span = 4 * evidence.expectedStride;
+        if (array < base || array >= base + size || span > base + size - array)
+            return 0;
+        return array;
+    }
+
+    // Never deny VR forever on an unforeseen case. If the engine's camera has
+    // not moved this long the gate opens anyway and says so loudly, which
+    // restores exactly the pre-2026-08-06 behavior instead of a silent failure.
+    // Sized above the 7.6 s a cold first load took in the preserved capture.
+    constexpr uint64_t kPlayerViewLivenessTimeoutMs = 12000;
+
+    // Fingerprint the WHOLE of player view 0, not a prefix. A prefix would
+    // cover only the compact camera (position/forward/fov/clips), which a
+    // perfectly still player does not change; the per-frame counters that
+    // always move live near the end of the view - ODST's own readiness log
+    // watches a boolean at +0x2810-ish. Hashing the full stride cannot miss
+    // them. ~10 KB of FNV-1a on a 50 ms worker poll is a rounding error.
+    bool ReadPlayerViewFingerprint(
+        uintptr_t array, size_t stride, uint64_t& fingerprint)
+    {
+        if (!array || !stride)
+            return false;
+        uint64_t hash = 1469598103934665603ull;
+        __try
+        {
+            const uint8_t* bytes = reinterpret_cast<const uint8_t*>(array);
+            for (size_t i = 0; i < stride; ++i)
+            {
+                hash ^= bytes[i];
+                hash *= 1099511628211ull;
+            }
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            return false;
+        }
+        fingerprint = hash;
+        return true;
+    }
+
+    // One per title. Not thread-safe by design: every caller is the 50 ms title
+    // worker, which is the only thread that decides to install.
+    class PlayerViewLivenessGate
+    {
+    public:
+        // The whole gate. Returns true when installing is safe: the engine's
+        // camera has been seen to change, the array could not be proven (fail
+        // open to the pre-gate behavior), or the timeout expired. The
+        // signature scan runs once per title generation, not once per poll.
+        bool AllowsInstall(uint32_t generation, uintptr_t base, size_t size,
+                           const PlayerViewArrayEvidence& evidence,
+                           const char* titleName)
+        {
+            if (generation != m_generation || base != m_base)
+            {
+                m_generation = generation;
+                m_base = base;
+                m_array = ResolvePlayerViewArray(base, size, evidence);
+                m_stride = evidence.expectedStride;
+                m_haveSample = false;
+                m_live = false;
+                m_firstSampleMs = 0;
+                m_lastLogMs = 0;
+                m_resolveLogged = false;
+            }
+            if (!m_array)
+            {
+                if (!m_resolveLogged)
+                {
+                    m_resolveLogged = true;
+                    LOG("%s level-load gate: the four-slot player-view array "
+                        "could not be proven in this module; install proceeds "
+                        "immediately, exactly as it did before this gate "
+                        "existed", titleName);
+                }
+                return true;
+            }
+            return Observe(titleName);
+        }
+
+    private:
+        // True once the engine's camera has been seen to change, or once the
+        // timeout has expired. `titleName` only labels the log.
+        bool Observe(const char* titleName)
+        {
+            if (m_live)
+                return true;
+            uint64_t fingerprint = 0;
+            if (!ReadPlayerViewFingerprint(m_array, m_stride, fingerprint))
+                return false;
+            const uint64_t now = GetTickCount64();
+            if (!m_haveSample)
+            {
+                m_haveSample = true;
+                m_fingerprint = fingerprint;
+                m_firstSampleMs = now;
+                return false;
+            }
+            if (fingerprint != m_fingerprint)
+            {
+                m_live = true;
+                LOG("%s level-load gate: the engine's own camera is ticking "
+                    "after %llu ms; installing now that the level is running "
+                    "rather than during its loading screen",
+                    titleName,
+                    static_cast<unsigned long long>(now - m_firstSampleMs));
+                return true;
+            }
+            if (now - m_firstSampleMs >= kPlayerViewLivenessTimeoutMs)
+            {
+                m_live = true;
+                LOG("%s level-load gate: the engine's camera has NOT changed "
+                    "in %llu ms. Opening the gate anyway so VR is never denied "
+                    "outright - this is the pre-gate behavior and is worth "
+                    "reporting if the level then bounces to the menu",
+                    titleName,
+                    static_cast<unsigned long long>(now - m_firstSampleMs));
+                return true;
+            }
+            if (now - m_lastLogMs >= 2000)
+            {
+                m_lastLogMs = now;
+                LOG("%s level-load gate: holding install - the engine's camera "
+                    "still holds the previous level's contents, so this is a "
+                    "loading screen and not a running level (%llu ms)",
+                    titleName,
+                    static_cast<unsigned long long>(now - m_firstSampleMs));
+            }
+            return false;
+        }
+
+        uint32_t m_generation = 0;
+        uintptr_t m_base = 0;
+        uintptr_t m_array = 0;
+        size_t m_stride = 0;
+        uint64_t m_fingerprint = 0;
+        uint64_t m_firstSampleMs = 0;
+        uint64_t m_lastLogMs = 0;
+        bool m_haveSample = false;
+        bool m_live = false;
+        bool m_resolveLogged = false;
+    };
+
+    PlayerViewLivenessGate g_halo3LevelLoadGate;
+    PlayerViewLivenessGate g_odstLevelLoadGate;
+    PlayerViewLivenessGate g_reachLevelLoadGate;
+
 #if HALOMCCVR_EXPERIMENTAL_ODST_BRINGUP
     struct CameraRuntimeLayout
     {
@@ -28634,8 +28855,14 @@ namespace
 
         if (!installed)
         {
-            if (ready)
+            // Never hook into a loading screen; see PlayerViewLivenessGate.
+            if (ready &&
+                g_reachLevelLoadGate.AllowsInstall(
+                    generation, base, kReachRetailImageSize,
+                    kReachPlayerViewArray, "Reach"))
+            {
                 InstallReachCameraCore(base, size, generation);
+            }
             return;
         }
         if (!g_reachCamera.armed.load(std::memory_order_acquire) && ready &&
@@ -28981,8 +29208,16 @@ namespace
                     TitleAdapter_GetGeneration(GameTitle::Halo3);
                 uintptr_t base = 0;
                 size_t size = 0;
+                // The gate is the last condition on purpose: until it opens,
+                // haloAttemptedGeneration must stay untouched or this
+                // generation would never be retried. Halo 3 had no readiness
+                // check of any kind before this - it hooked the instant
+                // halo3.dll appeared, loading screen or not.
                 if (generation && generation != haloAttemptedGeneration &&
-                    sig::ModuleRange(activeTitle->moduleName, base, size))
+                    sig::ModuleRange(activeTitle->moduleName, base, size) &&
+                    g_halo3LevelLoadGate.AllowsInstall(
+                        generation, base, size, kHalo3PlayerViewArray,
+                        "Halo 3"))
                 {
                     haloAttemptedGeneration = generation;
                     if (hookRefreshPending)
@@ -29013,7 +29248,10 @@ namespace
             {
                 uintptr_t base = 0;
                 size_t size = 0;
-                if (sig::ModuleRange(activeTitle->moduleName, base, size))
+                if (sig::ModuleRange(activeTitle->moduleName, base, size) &&
+                    g_odstLevelLoadGate.AllowsInstall(
+                        TitleAdapter_GetGeneration(GameTitle::Halo3ODST),
+                        base, size, kOdstPlayerViewArray, "ODST"))
                 {
                     const uint32_t generation =
                         TitleAdapter_GetGeneration(GameTitle::Halo3ODST);

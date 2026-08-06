@@ -50,6 +50,95 @@ completely silent for the whole window.
 (Theories 1-4 - Reach preflight, SAFEFRAME copy-on-write, per-generation
 leaks, and a stranded module pin - were refuted earlier; see the memory note.)
 
+## SECOND CAPTURE (2026-08-06): the discriminator is a STALE CAMERA
+
+Build `50ddf56`, Steam, VirtualDesktopXR 1.0.10, Quest 3 at 90 Hz. Preserved as
+`out/analysis/odst-level-load-lockout/halo3xr-50ddf56-steam-20260806-stale-camera-discriminator.log`
+(SHA-256 `AA172A4D1265146B2ADE4C9E22D8F7C69040CA7612AA5672ABEA55D017D31A47`)
+with its configuration beside it. **The user also states the bug is not
+ODST-specific**, which the finding below explains.
+
+This session contains one SUCCESSFUL load and three FAILURES, and the readiness
+data separates them cleanly.
+
+**Successful load, 06:27:13 - the FIRST level of the session.** The camera
+readiness probe reads the four-slot player-view array and finds it genuinely
+empty: `tail=[0,0,0,0,0,0,0,0] mode=0x00000000 blend=0.000000 fov=0.000000
+ref=0.000000 offset=0.000000 near=0.000000 far=0.000`. The core correctly logs
+`ODST camera preflight passed; waiting for the proven slot-0/user-0 ordinary
+camera mode` and holds for **7.6 s** (06:27:13.901 -> 06:27:21.532) before
+installing at 06:27:22.478. It arms normally and plays.
+
+**Failing loads, 06:29:08, 06:29:24, 06:29:41.** The same probe reads
+`fov=1.641310 ref=1.345714 near=0.007812 far=10240.000` - the exact values of
+the level just exited. The readiness check is satisfied **0.6 s** after the
+title appears, install completes **1.5 s** after it, i.e. during the loading
+screen, and then the engine's camera never ticks. All six modules reload
+1.3-1.5 s later, which is the bounce to the menu.
+
+**Why "one WAIT line then silence" is proof, not absence of data.** The
+`ODST camera WAIT` line is logged on CHANGE of its four-bit state signature, or
+at most every 2000 ms (`game.cpp`, `sig == lastSig && now - lastLogMs < 2000`).
+In the successful load that signature changes every 50-250 ms. In each failing
+load it produced exactly one line and the level died 1.3-1.5 s later - inside
+the 2 s re-log floor, so the only way a second line could have been suppressed
+is if the state never changed. **The engine's camera was frozen.**
+
+**The defect this exposes.** "Non-zero" was being used as a proxy for "alive".
+The player-view array is module-global data that survives a level unload, so
+after the first level of a session it always looks populated. The check can
+therefore only ever work on the very first load.
+
+**Not ODST-specific, confirmed in code.** `InstallHook` (Halo 3) has no
+readiness check at all - it installs the moment `halo3.dll` is detected and its
+signature resolves. Reach's "one-second fresh-camera interval" is an ARMING
+debounce applied after installation, not an install gate. ODST was the only
+title with any install-time check, and that check reads stale data. All three
+titles could therefore hook into a loading screen.
+
+**Still not proven.** This is a strong measured correlation from one session,
+not causation. The mod remains passive in the log during the failures, so
+"we hooked early and broke the load" and "the load was already dying, and a
+dying load looks exactly like this" both still fit. The no-mod control run
+below remains the only test that settles blame outright.
+
+## The fix under test (2026-08-06)
+
+`PlayerViewLivenessGate` in `src/dll/game.cpp`. No title installs any hook until
+the engine's own player-view memory has been observed to **change** since the
+current title generation began. It interprets nothing about the camera - it
+fingerprints the whole of player view 0 and waits for the fingerprint to move -
+so one implementation serves all three titles.
+
+All three engines build their four player views with the same constructor
+shape; only the view stride differs, and the array base is that constructor's
+own `lea rbx,[rip+disp32]`:
+
+| Title | Constructor | View stride | Player-view array |
+| --- | --- | --- | --- |
+| Halo 3 | `halo3.dll+0x68BC` | `0x2820` | `+0x2D2F680` |
+| ODST | `halo3odst.dll+0x6B60` | `0x2810` | `+0x2D73590` |
+| Reach | `haloreach.dll+0x6210` | `0x0A40` | `+0x29F2B90` |
+
+Each module contains one unrelated four-slot constructor of the identical
+shape, so the stride bytes are part of the signature; with them pinned each
+title matches exactly once. **The method is validated against a known-good
+result**: decoding ODST's array this way yields `+0x2D73590`, which is exactly
+the `array=2D73590` the accepted runtime logs already report. Reach's `0xA40`
+is the same four-player-view stride already documented in
+`docs/REACH-SIGNATURE-EVIDENCE.md`.
+
+Failure modes are deliberate and loud. If the array cannot be proven the gate
+opens immediately and logs that it did - identical to pre-gate behavior. If the
+camera has not moved after 12 s (comfortably above the 7.6 s a cold first load
+took) the gate opens anyway and logs that it did, so VR can never be denied
+outright by an unforeseen case.
+
+What the next headset session settles: if the load/quit/load cycle stops
+bouncing, the early install was the cause and this is the fix. If it still
+bounces, early installation is exonerated and the no-mod control run below is
+the remaining test.
+
 ## What is still unsettled
 
 The mod's hooks ARE installed into `halo3odst.dll` during the failing load, so
