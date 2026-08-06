@@ -1487,6 +1487,79 @@ the reset; that a seat or vehicle change earns one new reset; and that settled
 exit remains position-only. Record edition, runtime, headset, and a refresh
 rate in the supported 72-144 Hz range. Nothing here advances CURRENT-STATE.
 
+## R-V24 rejected / R-V25 - native passenger weapon lifecycle and fine sliders
+
+The rejected R-V24 source was d344dd406250e006d48229ec038a82f5e0e50a06
+(packaging descendant eb5800977bfc3d6e86fa887a5654e8f88deb4494,
+DLL SHA-256
+677FF443CFB58017ED7B7F991E8B40ABFCB1BBAFD6D7F296CE90FC1C5B403ECA).
+Its preserved Steam / VirtualDesktopXR / Quest 3 headset log is
+out/test-runs/eb58009-reach-passenger-hands-and-sliders-rejected-20260806-001200/halo3xr.log,
+SHA-256
+82E581A7AA1B8F6BFFB7BCAA0CB75716D516AA4FD6D21F2E96BB9AA0705BD132.
+The log proves its render-scoped seat-bit write executed
+(set=3, already-native=0, restored=3), while the user saw no floating hands.
+It changed camera mode only while rendering and never created Reach's native
+first-person weapon graph. Its DragFloat replacement also made the VR seat
+controls unusable. Both changes were reverted before R-V25.
+
+Halo 3's reference behavior is functional: an allows-weapons passenger receives
+the native first-person weapon model, the world biped is hidden independently,
+and the existing VR controller solver owns the resulting hands and gun. Reach
+must create its own native graph without changing the accepted Reach camera,
+steering, view-follow, selected vehicle barrel, or body-hide paths.
+
+Official HREK interface/first_person_weapons.cpp establishes that lifecycle:
+
+- HREK 0x8CB7A0 is the two-argument show transaction. For each of the two
+  first-person weapon slots it tests native state 0x28, then writes either
+  pending bit 4 or active bit 6 in the output-user 0x53A8 record. It returns
+  true only when it started that transition. A false return while another
+  active/pending/hide state exists is deliberately retried; it does not consume
+  the exact-seat latch.
+- The first-person update at HREK 0x8D13C6 consumes pending bit 4, replaces it
+  with active bit 6, and calls 0x8CBB90. That function creates/updates both
+  0x2978-byte weapon slots. This is the graph R-V24 never requested.
+- HREK 0x8CB8F0 is the matching hide transaction. R-V25 calls it only when a
+  committed personal-weapon passenger moves to a non-personal vehicle seat or
+  disables vehicle FP. A real on-foot exit stays entirely on Reach's stock
+  first-person lifecycle.
+
+Retail is used only to match those understood HREK constructs. The show homolog
+is 0x2B5474..0x2B5595 (0x121 bytes, SHA-256
+5EAF60900CF9989B18CF7D7B6DF130F72D1ABD8A08C790E52B4364497817A4B6);
+the hide homolog is 0x2B5598..0x2B5736 (0x19E bytes, SHA-256
+3D06034B5C1D24A9B99F5A78161DE68850825C0C2F52662420E69B9646B603C9).
+Production requires each unique entry signature at that exact pinned RVA and
+also uniquely verifies the show's pending/active state-transition sequence at
++0xF0. Failure leaves only passenger weapon presentation stock and never
+disarms Reach VR.
+
+The exact full-salt seat key admits only HREK-authored allows-weapons bit 5.
+View Follow is not an input. The show request uses output user 0 and Reach's
+native immediate transition value 0, matching its own unit-state caller. Once
+the graph exists, the already-proven Reach interpolation and final-palette
+hooks apply the same separate right/left controller wrist ownership used
+on-foot. The independent unit-camera bit 0x0004 continues hiding the world
+player model, and the checksum/count/tag-qualified native fp_body path continues
+preserving seated legs.
+
+Reach seat adjustment is restored to ImGui::SliderFloat. A seated Reach row
+uses a fixed +/-0.10 m window around the current value, three decimal places,
+no round-to-format, and an explicit Recenter fine range button. Thus the full
+-64..64 / -16..16 authored storage remains reachable without mapping that huge
+range onto one controller-width slider. Halo 3, ODST, and the universal on-foot
+sliders are unchanged.
+
+This is headset-unverified. The decisive check is a Warthog allows-weapons
+passenger: the log must report Reach passenger floating hands ACTIVE, the
+personal gun and both floating hands must track the controllers, the world
+Spartan/Elite must be absent while the seated legs remain, and passenger fire
+must align with the VR crosshair. Then move passenger -> driver -> passenger,
+exit on foot, test both View Follow values, and verify the fine sliders can make
+and save small adjustments. Record edition, runtime, headset, and 72-144 Hz
+refresh rate. Halo 3 and ODST regressions remain required.
+
 ## R-V9 - acceptance still required
 
 Nothing in this document changes the accepted pointer. Packaging, successful

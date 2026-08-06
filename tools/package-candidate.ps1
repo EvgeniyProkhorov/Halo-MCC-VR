@@ -211,6 +211,10 @@ try {
         reach_fp_nested_camera_workspace = $true
         reach_fp_world_projection_execution_status = $true
         reach_forced_floating_hands = $true
+        reach_passenger_native_fp_weapon_graph = $true
+        reach_passenger_native_fp_weapon_show_rva = '0x002B5474'
+        reach_passenger_native_fp_weapon_hide_rva = '0x002B5598'
+        reach_seat_fine_slider_half_range_m = 0.10
         reach_copyresource_enabled = $true
         reach_engine_memory_writes_enabled = $true
         reach_runtime_hooks_enabled = $true
@@ -225,7 +229,7 @@ try {
                 sha256 = $launcherHash
             }
         }
-        note = 'Cumulative Reach vehicle repair: headset-reported-good View Follow OFF is preserved; View Follow ON uses the render-matched carrier basis with no refresh-rate filter; all 25 user-authored Blender camera placements plus exact retail aliases remain embedded. Each exact occupied-seat entry performs one full play-space recenter against the render-matched root/carrier heading in both View Follow modes; settled exit remains position-only. The rejected between-frame seat camera-mode lease is dormant. A render-scoped unit-camera hide-player bit hides only the controlling player world body, while the exact checksum/count/tag-qualified native fp_body palette retains Halo 3/ODST-style seated legs and the separate controller-owned hands/gun stay unchanged. The floating controller crosshair remains authoritative; the native selected vehicle barrel keeps its stock origin while its exact local central pre-spread direction passes through the presented stabilized sight, with stock spread, ballistics, aim assist and tracking retained. Both firing records have a 50 ms bound for 72-144 Hz. No Workshop content is required, activated, copied or redistributed. Not accepted until this exact DLL hash passes both View Follow options, entry orientation, passenger legs/hands, camera placement, body hide, visible crosshair, Warthog/Scorpion/Covenant turret firing, lifecycle, and required Halo 3/ODST regression tests.'
+        note = 'Cumulative Reach vehicle repair: headset-reported-good View Follow OFF is preserved; View Follow ON uses the render-matched carrier basis with no refresh-rate filter; all 25 user-authored Blender camera placements plus exact retail aliases remain embedded. Each exact occupied-seat entry performs one full play-space recenter against the render-matched root/carrier heading in both View Follow modes; settled exit remains position-only. The rejected between-frame seat camera-mode lease is dormant. A render-scoped unit-camera hide-player bit hides only the controlling player world body, while the exact checksum/count/tag-qualified native fp_body palette retains Halo 3/ODST-style seated legs. Exact allows-weapons passenger seats now request Reach first_person_weapons.cpp native show/hide state so a real personal-weapon graph exists for the separate controller-owned hands/gun. Reach seat controls remain real SliderFloat widgets with a recenterable +/-0.10 m fine window and millimetre display precision. The floating controller crosshair remains authoritative; the native selected vehicle barrel keeps its stock origin while its exact local central pre-spread direction passes through the presented stabilized sight, with stock spread, ballistics, aim assist and tracking retained. Both firing records have a 50 ms bound for 72-144 Hz. No Workshop content is required, activated, copied or redistributed. Not accepted until this exact DLL hash passes both View Follow options, entry orientation, passenger legs/hands/gun tracking, fine slider persistence, camera placement, body hide, visible crosshair, Warthog/Scorpion/Covenant turret firing, lifecycle, and required Halo 3/ODST regression tests.'
     }
 
     $manifestPath = Join-Path $packageDir 'CANDIDATE-MANIFEST.json'
