@@ -549,6 +549,7 @@ namespace
                            const PlayerViewArrayEvidence& evidence,
                            const char* titleName)
         {
+            m_titleName = titleName;
             if (generation != m_generation || base != m_base)
             {
                 m_generation = generation;
@@ -576,6 +577,31 @@ namespace
                 return true;
             }
             return Observe(titleName);
+        }
+
+        // Close the gate again after a teardown. WITHOUT THIS THE GATE IS A
+        // ONE-SHOT AND THE WHOLE FEATURE IS INERT for the case that actually
+        // matters. Measured in the b934b61 headset run: the gate correctly held
+        // ODST's first load for 7.2 s, but the title generation does NOT change
+        // across a Save & Quit -> menu -> load cycle, so `m_live` stayed set
+        // and the two loads that then bounced installed 1.5 s in with no gate
+        // line logged at all. Every install must re-earn the proof, so this is
+        // called wherever a title's hooks come out.
+        void Rearm()
+        {
+            // Logged so a future session can prove the gate re-armed instead of
+            // inferring it from absent lines, which is how the one-shot defect
+            // hid: the failing loads simply had no gate output at all.
+            if (m_live && m_titleName)
+                LOG("%s level-load gate: re-armed after teardown; the next "
+                    "install must prove the level is running again",
+                    m_titleName);
+            m_haveSample = false;
+            m_sawFrozen = false;
+            m_changeRun = 0;
+            m_live = false;
+            m_firstSampleMs = 0;
+            m_lastLogMs = 0;
         }
 
     private:
@@ -660,17 +686,19 @@ namespace
             if (now - m_lastLogMs >= 2000)
             {
                 m_lastLogMs = now;
-                LOG("%s level-load gate: holding install after %llu ms - camera "
-                    "still=%d, consecutive changes=%u. A loading screen leaves "
-                    "the previous level's camera untouched; installing into "
-                    "that is what bounces the load to the menu",
+                LOG("%s level-load gate: holding install after %llu ms "
+                    "(generation %u) - camera still=%d, consecutive "
+                    "changes=%u. A loading screen leaves the previous level's "
+                    "camera untouched; installing into that is what bounces "
+                    "the load to the menu",
                     titleName,
                     static_cast<unsigned long long>(now - m_firstSampleMs),
-                    m_sawFrozen ? 1 : 0, m_changeRun);
+                    m_generation, m_sawFrozen ? 1 : 0, m_changeRun);
             }
             return false;
         }
 
+        const char* m_titleName = nullptr;
         uint32_t m_generation = 0;
         uintptr_t m_base = 0;
         uintptr_t m_array = 0;
@@ -25143,6 +25171,8 @@ namespace
         g_reachCamera.teardownRequested.store(
             false, std::memory_order_release);
         g_reachCamera.installed.store(false, std::memory_order_release);
+        // The next install must prove the level is running again.
+        g_reachLevelLoadGate.Rearm();
         LOG("Reach camera core removed; stock Reach owns the title");
         return true;
     }
@@ -29059,6 +29089,8 @@ namespace
                 gameHooked = false;
                 hookRefreshPending = true;
                 g_hooked = false;
+                // The next install must prove the level is running again.
+                g_halo3LevelLoadGate.Rearm();
                 // CamCopyHook can start executing again (a lingering detour,
                 // or a fresh InstallHook() re-enabling it) before a resolve
                 // pass republishes these pointers for the next halo3.dll
@@ -29172,6 +29204,8 @@ namespace
                 if (RemoveOdstCameraCore())
                 {
                     odstHooked = false;
+                    // The next install must prove the level is running again.
+                    g_odstLevelLoadGate.Rearm();
                     if (reason == OdstFallbackReason::UnsupportedCameraMode)
                     {
                         // A menu is a temporary camera mode, not the end of the

@@ -177,6 +177,48 @@ bouncing, the early install was the cause and this is the fix. If it still
 bounces, early installation is exonerated and the no-mod control run below is
 the remaining test.
 
+## THE GATE WAS A ONE-SHOT (2026-08-06, build `b934b61`)
+
+The user tested `b934b61` and reported it unfixed, adding the crucial detail
+that it "happens on every game if you save and quit and try to load a new
+level" and that switching to another game clears it - so the main menu should
+have nothing of ours loaded.
+
+Preserved:
+`out/analysis/odst-level-load-lockout/halo3xr-b934b61-steam-20260806-gate-was-one-shot.log`
+(SHA-256 `6CF2C52E74FB3C2962C099EE5A7B7A97466A40BD5F377A28BDB2866D2C1DE9E1`).
+
+**The gate works, and it never ran for the failures.** On ODST's first load it
+behaved exactly as designed: held for 7.2 s across four `holding install` lines
+and then logged `the engine's camera was frozen and has now started ticking
+(7172 ms)` at 07:03:51.555. After that:
+
+| Time | Event | Gate output |
+| --- | --- | --- |
+| 07:03:44 | first ODST load | 4 holds, then opened at 7172 ms |
+| 07:04:07 | Save & Quit teardown | - |
+| 07:04:09 | install (1.7 s later) | **none** |
+| 07:04:27 | load attempt -> BOUNCED | **none**, install at 1.56 s |
+| 07:04:46 | load attempt -> BOUNCED | **none**, install at 1.55 s |
+
+`AllowsInstall` only reset its observation when the title generation or module
+base changed. **The ODST generation does not change across a Save & Quit ->
+menu -> load cycle**, so `m_live` stayed set from the first load and every later
+install went straight through - at the same 1.5 s as before the gate existed.
+
+So the 2026-08-06 stale-camera theory is **not refuted by this run; it was
+never tested**. The failing loads were never gated. The defect is in the gate's
+own lifetime, not in its mechanism, and the mechanism is proven to work when it
+runs.
+
+**Fix:** `PlayerViewLivenessGate::Rearm()`, called wherever a title's hooks come
+out - Halo 3 at the title-boundary reset, ODST after `RemoveOdstCameraCore()`,
+Reach in `RemoveReachCameraCore()`. Every install must now re-earn the
+frozen-then-ticking proof, which is the user's own requirement expressed in
+code: on the main menu nothing of ours is installed and the gate is shut. The
+re-arm and the live generation number are both logged, so absent gate output
+can never again be mistaken for a gate that passed.
+
 ## What is still unsettled
 
 The mod's hooks ARE installed into `halo3odst.dll` during the failing load, so
