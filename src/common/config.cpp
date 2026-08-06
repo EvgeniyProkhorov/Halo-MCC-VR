@@ -993,9 +993,9 @@ void ConfigSave()
             d.vehicle_cam_forward_m, d.vehicle_cam_up_m,
             d.vehicle_cam_right_m);
     fprintf(f, "# right range -1 to 1; negative right moves left)\n");
-    fprintf(f, "vehicle_cam_forward_m = %.2f\n", g_config.vehicle_cam_forward_m);
-    fprintf(f, "vehicle_cam_up_m = %.2f\n", g_config.vehicle_cam_up_m);
-    fprintf(f, "vehicle_cam_right_m = %.2f\n\n", g_config.vehicle_cam_right_m);
+    fprintf(f, "vehicle_cam_forward_m = %.3f\n", g_config.vehicle_cam_forward_m);
+    fprintf(f, "vehicle_cam_up_m = %.3f\n", g_config.vehicle_cam_up_m);
+    fprintf(f, "vehicle_cam_right_m = %.3f\n\n", g_config.vehicle_cam_right_m);
     fprintf(f, "# Per-SEAT trim. A line appears here when you adjust the three\n");
     fprintf(f, "# seat sliders while SITTING IN that seat; every seat without\n");
     fprintf(f, "# a line keeps using the universal trim above. Delete a line\n");
@@ -1070,15 +1070,15 @@ void ConfigSave()
                 continue;
             }
             if (g_config.reach_vehicle_cam_forward_set[i])
-                fprintf(f, "vehicle_cam_forward_m_reach_%s_%s = %.2f\n",
+                fprintf(f, "vehicle_cam_forward_m_reach_%s_%s = %.3f\n",
                     kReachVehicleTrimNames[v], kReachVehicleSeatNames[s],
                     g_config.reach_vehicle_cam_forward_v[i]);
             if (g_config.reach_vehicle_cam_up_set[i])
-                fprintf(f, "vehicle_cam_up_m_reach_%s_%s = %.2f\n",
+                fprintf(f, "vehicle_cam_up_m_reach_%s_%s = %.3f\n",
                     kReachVehicleTrimNames[v], kReachVehicleSeatNames[s],
                     g_config.reach_vehicle_cam_up_v[i]);
             if (g_config.reach_vehicle_cam_right_set[i])
-                fprintf(f, "vehicle_cam_right_m_reach_%s_%s = %.2f\n",
+                fprintf(f, "vehicle_cam_right_m_reach_%s_%s = %.3f\n",
                     kReachVehicleTrimNames[v], kReachVehicleSeatNames[s],
                     g_config.reach_vehicle_cam_right_v[i]);
         }

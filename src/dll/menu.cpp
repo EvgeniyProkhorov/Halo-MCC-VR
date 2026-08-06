@@ -779,16 +779,17 @@ namespace
         static int s_seatBind = -1;
         static VehicleTrimBank s_seatBank = VehicleTrimBank::Halo3;
         static int s_seatMissFrames = 0;
+        static bool s_forceUniversalTrim = false;
         VehicleTrimBank liveBank = VehicleTrimBank::Halo3;
         const int liveSlot = Game_VehicleSeatTrimSlotEx(&liveBank);
-        if (liveSlot >= 0)
+        if (liveSlot >= 0 && !s_forceUniversalTrim)
         {
             s_seatBind = liveSlot;
             s_seatBank = liveBank;
             s_seatMissFrames = 0;
         }
-        else if (++s_seatMissFrames > 30)
-            s_seatBind = -1;
+        else
+            ++s_seatMissFrames;
         const int seatSlot = s_seatBind;
         int seatSlotLimit = kVehicleTrimSlots;
         float* trimForwardV = g_config.vehicle_cam_forward_v;
@@ -839,8 +840,20 @@ namespace
             seatFwd = ConfigOdstSeatCamForward(g_config, seatSlot);
         else if (s_seatBank == VehicleTrimBank::Reach)
             seatFwd = ConfigReachSeatCamForward(g_config, seatSlot);
-        if (ImGui::SliderFloat("Seat forward (m)", &seatFwd,
-                               forwardMin, forwardMax, "%.2f"))
+        bool seatFwdChanged = ImGui::SliderFloat(
+            "Seat forward (m)", &seatFwd, forwardMin, forwardMax, "%.3f");
+        if (ImGui::SmallButton("-1 mm##seatfwd"))
+        {
+            seatFwd = std::max(forwardMin, seatFwd - 0.001f);
+            seatFwdChanged = true;
+        }
+        ImGui::SameLine();
+        if (ImGui::SmallButton("+1 mm##seatfwd"))
+        {
+            seatFwd = std::min(forwardMax, seatFwd + 0.001f);
+            seatFwdChanged = true;
+        }
+        if (seatFwdChanged)
         {
             if (perSeat)
             {
@@ -858,8 +871,20 @@ namespace
             seatUp = ConfigOdstSeatCamUp(g_config, seatSlot);
         else if (s_seatBank == VehicleTrimBank::Reach)
             seatUp = ConfigReachSeatCamUp(g_config, seatSlot);
-        if (ImGui::SliderFloat("Seat height (m)", &seatUp,
-                               upMin, upMax, "%.2f"))
+        bool seatUpChanged = ImGui::SliderFloat(
+            "Seat height (m)", &seatUp, upMin, upMax, "%.3f");
+        if (ImGui::SmallButton("-1 mm##seatup"))
+        {
+            seatUp = std::max(upMin, seatUp - 0.001f);
+            seatUpChanged = true;
+        }
+        ImGui::SameLine();
+        if (ImGui::SmallButton("+1 mm##seatup"))
+        {
+            seatUp = std::min(upMax, seatUp + 0.001f);
+            seatUpChanged = true;
+        }
+        if (seatUpChanged)
         {
             if (perSeat)
             {
@@ -877,8 +902,21 @@ namespace
             seatRight = ConfigOdstSeatCamRight(g_config, seatSlot);
         else if (s_seatBank == VehicleTrimBank::Reach)
             seatRight = ConfigReachSeatCamRight(g_config, seatSlot);
-        if (ImGui::SliderFloat("Seat left / right (m)", &seatRight,
-                               rightMin, rightMax, "%.2f"))
+        bool seatRightChanged = ImGui::SliderFloat(
+            "Seat left / right (m)", &seatRight,
+            rightMin, rightMax, "%.3f");
+        if (ImGui::SmallButton("-1 mm##seatright"))
+        {
+            seatRight = std::max(rightMin, seatRight - 0.001f);
+            seatRightChanged = true;
+        }
+        ImGui::SameLine();
+        if (ImGui::SmallButton("+1 mm##seatright"))
+        {
+            seatRight = std::min(rightMax, seatRight + 0.001f);
+            seatRightChanged = true;
+        }
+        if (seatRightChanged)
         {
             if (perSeat)
             {
@@ -907,12 +945,34 @@ namespace
                 changed = true;
             }
         }
+        if (perSeat)
+        {
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Edit universal trim##seattrim"))
+            {
+                s_forceUniversalTrim = true;
+                s_seatBind = -1;
+                s_seatMissFrames = 31;
+            }
+        }
+        else if (liveSlot >= 0 && s_forceUniversalTrim)
+        {
+            if (ImGui::SmallButton("Return to occupied seat##seattrim"))
+            {
+                s_forceUniversalTrim = false;
+                s_seatBind = liveSlot;
+                s_seatBank = liveBank;
+                s_seatMissFrames = 0;
+            }
+        }
         ImGui::TextDisabled(
             "Sit in a seat and these sliders adjust that seat alone —\n"
             "a vehicle's driver, passengers and gunner each remember their\n"
             "own. On foot they set the shared base every unadjusted seat\n"
             "follows. The base is your Blender-authored point for that seat;\n"
             "vehicle and occupant motion are parented around that baseline.\n"
+            "The occupied seat stays selected while this menu is open; use\n"
+            "Edit universal trim explicitly. +/- buttons move one millimeter.\n"
             "Left/right: negative moves left, positive moves right.");
         ImGui::Spacing();
         ImGui::Separator();

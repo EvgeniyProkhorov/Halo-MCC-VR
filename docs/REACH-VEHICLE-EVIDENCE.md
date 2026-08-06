@@ -1487,6 +1487,68 @@ the reset; that a seat or vehicle change earns one new reset; and that settled
 exit remains position-only. Record edition, runtime, headset, and a refresh
 rate in the supported 72-144 Hz range. Nothing here advances CURRENT-STATE.
 
+## R-V24 - passenger render admission and non-destructive millimetre trim
+
+The rejected c4163e7 headset run is preserved at
+`out/test-runs/c4163e7-reach-passenger-hands-aim-trim-rejected-20260806-003652`
+(log SHA-256
+`75397D9F3B57A5652E4898BB905DE4984A656F146F46CB7E3E93F5C7A1784304`).
+It identifies Steam, VirtualDesktopXR 1.0.10, Quest 3, and 90 Hz.  Its native
+show/hide experiment logged an ACTIVE transition, but the later REACHFX report
+still recorded `live-graph weapon writes 0`; no passenger hands or weapon
+were drawn.  The same run recorded both a personal firing-origin substitution
+and the central shot-direction redirect, while the user observed that shots
+did not follow a visible passenger gun.  That mechanism and its narrow
+plus/minus-0.10 m slider were reverted intact by 33cc330 before this design.
+The preserved pre-candidate Steam log under
+`out/deploy-backups/677ff44-steam-before-c4163e7-20260806-053249758Z`
+shows the earlier render-scoped seat-bit experiment also executed without
+creating the hands graph.  Neither rejected mechanism is reused.
+
+Official HREK supplies the missing boundary.  Its
+`render_first_person_view.cpp` wrapper is 0x8362F0.  Before camera rebuild,
+interpolation, palette, and either native first-person pass, call
+0x83639D -> 0x1E6960 reads the per-output-user word at TLS record +0x6C6 and
+the wrapper skips all first-person rendering when that result is not NONE.
+The pinned optimized retail homolog is 0x26EA78; its corresponding sole call
+inside that body is 0x26EAD9 -> 0x6527C.  Retail 0x6527C has the same
+output-user stride 0xB0 and final +0x6C6 word read as HREK.  Production requires
+the exact 55-byte accessor signature, the exact 40-byte render-wrapper entry,
+and that exact rel32 call edge.
+
+The optional detour first calls the stock accessor.  It substitutes NONE only
+when the return address is exactly 0x26EADE and the current synchronous outer
+owner is an active, structurally proven Reach first-person vehicle frame whose
+live seat flags retain HREK's independent bit-5 `allows weapons`.  Stock NONE
+is never altered.  Drivers, mounted guns, walk-up guns, on-foot rendering,
+simulation, camera evaluation, steering, and the accessor's other eight retail
+callers remain stock.  No seat definition, camera flag, or between-frame state
+is written.  The admitted native graph then reaches the existing exact
+interpolation/palette transaction, which places both hands and the personal
+weapon on the prepared VR controller targets.  The already-installed personal
+eye-origin and same presented-reticle central-direction transactions remain
+the shot truth; their 50 ms samples cover 72-144 Hz and are not changed here.
+
+The trim failure had a separate concrete cause.  The rejected run's live config
+contains universal Reach trim -1.00 m forward and +1.02 m up.  The menu's
+30-frame stale-seat expiry could rebind a paused F1 menu from the occupied
+passenger row to that universal row while the user was adjusting it, producing
+the reported metre-scale jump.  The occupied positive seat binding is now
+sticky until another positive seat replaces it or the user explicitly selects
+`Edit universal trim`; an explicit return button restores the occupied seat.
+All three sliders retain their complete original title-specific range and add
+independent -1 mm/+1 mm buttons, three-decimal display, and three-decimal
+config persistence.  There is no narrow dynamic window and no automatic clamp
+around the current value.
+
+Core policy tests pin admission to the exact active VR-owned allows-weapons
+case and reject drivers, stock-admitted frames, inactive ownership, and
+first-person-off frames.  Build and unit tests are supporting evidence only.
+Headset acceptance requires visible independently tracked passenger hands and
+personal gun, shots following the same gun/crosshair, no world-player body in
+the owned eye, stable driver/passenger camera in both View Follow modes, and
+safe full-range plus millimetre trim editing without a universal jump.
+
 ## R-V9 - acceptance still required
 
 Nothing in this document changes the accepted pointer. Packaging, successful

@@ -773,6 +773,19 @@ inline constexpr bool ReachSeatAimCanDriveReticle(
         (seatFlags & kReachSeatAllowsWeaponsBit) != 0;
 }
 
+// Reach's render_first_person_view wrapper skips both native first-person
+// passes when its output-user predicate is not NONE.  A VR-owned
+// allows-weapons passenger needs that rendering, but no driver, mounted gun,
+// on-foot frame, camera/control consumer, or already-admitted stock frame does.
+inline constexpr bool ReachPassengerNeedsFirstPersonRenderAdmission(
+    bool ownerActive, bool vehicleViewApplied, bool vehicleFrameActive,
+    bool vehicleFirstPerson, uint32_t seatFlags, uint16_t stockGate)
+{
+    return ownerActive && vehicleViewApplied && vehicleFrameActive &&
+        vehicleFirstPerson && stockGate != 0xFFFFu &&
+        (seatFlags & kReachSeatAllowsWeaponsBit) != 0;
+}
+
 // R-V22 deliberately keeps the floating controller reticle for every Reach
 // vehicle seat. The occupant's +0x214 aim is not the selected vehicle barrel's
 // line; the native unit-adjust transaction redirects the local barrel's

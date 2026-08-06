@@ -1903,6 +1903,20 @@ int main()
                 kReachSeatAllowsWeaponsBit),
             "Reach unit aim drives only personal-weapon seat reticles, never vehicle barrels");
 
+        Check(
+            ReachPassengerNeedsFirstPersonRenderAdmission(
+                true, true, true, true, kReachSeatAllowsWeaponsBit, 0) &&
+            !ReachPassengerNeedsFirstPersonRenderAdmission(
+                true, true, true, true, 0, 0) &&
+            !ReachPassengerNeedsFirstPersonRenderAdmission(
+                true, true, true, true, kReachSeatAllowsWeaponsBit,
+                0xFFFFu) &&
+            !ReachPassengerNeedsFirstPersonRenderAdmission(
+                true, false, true, true, kReachSeatAllowsWeaponsBit, 0) &&
+            !ReachPassengerNeedsFirstPersonRenderAdmission(
+                true, true, true, false, kReachSeatAllowsWeaponsBit, 0),
+            "Reach passenger first-person render admission is exact to an active VR-owned allows-weapons seat and never overrides stock admission");
+
         // R-V22 leaves the visible controller reticle in charge and admits a
         // native selected-barrel direction redirect only for one fresh exact
         // local occupation/target pair. Fifty milliseconds covers three

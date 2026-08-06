@@ -16648,6 +16648,67 @@ namespace
     std::atomic<uint32_t> g_reachVehicleShotRedirects{0};
     std::atomic<uint32_t> g_reachVehicleShotRedirectMisses{0};
 
+    // HREK render_first_person_view.cpp has one output-user predicate before
+    // either first-person render pass.  Reach's vehicle passenger camera leaves
+    // that predicate non-NONE even when the seat independently allows personal
+    // weapons, so the already-built weapon state never reaches interpolation or
+    // the visible palette.  Override only that exact render caller while the
+    // admitted outer owner is an allows-weapons passenger.  Simulation, camera,
+    // steering and firing consumers of the same accessor remain stock.
+    using ReachFirstPersonRenderGateFn = int32_t(__fastcall*)(int32_t);
+    ReachFirstPersonRenderGateFn g_origReachFirstPersonRenderGate = nullptr;
+    void* g_reachFirstPersonRenderGateTarget = nullptr;
+    std::atomic<uintptr_t> g_reachFirstPersonRenderGateReturn{0};
+    std::atomic<uint32_t> g_reachPassengerFirstPersonAdmissions{0};
+
+    int32_t ReachFirstPersonRenderGateBody(
+        int32_t outputUserIndex, uintptr_t caller)
+    {
+        ReachFirstPersonRenderGateFn original =
+            g_origReachFirstPersonRenderGate;
+        if (!original)
+            return -1;
+        const int32_t stock = original(outputUserIndex);
+        if (static_cast<uint16_t>(stock) == 0xFFFFu ||
+            caller != g_reachFirstPersonRenderGateReturn.load(
+                std::memory_order_acquire))
+        {
+            return stock;
+        }
+        const ReachOwnerScope& owner = g_reachOwnerScope;
+        if (!ReachPassengerNeedsFirstPersonRenderAdmission(
+                owner.active, owner.vehicleViewApplied, owner.vehicle.active,
+                g_config.vehicle_first_person, owner.vehicle.seatFlags,
+                static_cast<uint16_t>(stock)))
+        {
+            return stock;
+        }
+        g_reachPassengerFirstPersonAdmissions.fetch_add(
+            1, std::memory_order_relaxed);
+        return -1;
+    }
+
+    __declspec(noinline) int32_t __fastcall ReachFirstPersonRenderGateHook(
+        int32_t outputUserIndex)
+    {
+        const uintptr_t caller =
+            reinterpret_cast<uintptr_t>(_ReturnAddress());
+        int32_t result = -1;
+        g_reachCamera.activeCallbacks.fetch_add(
+            1, std::memory_order_acq_rel);
+        __try
+        {
+            result = ReachFirstPersonRenderGateBody(
+                outputUserIndex, caller);
+        }
+        __finally
+        {
+            g_reachCamera.activeCallbacks.fetch_sub(
+                1, std::memory_order_acq_rel);
+        }
+        return result;
+    }
+
     void ReachUnitAdjustBody(
         int32_t unitIndex, float* origin, float* direction,
         const float* basisForward, const float* barrelOffset,
@@ -23720,7 +23781,7 @@ namespace
     bool ScanForReachDetourIngress(bool& busy)
     {
         static bool rangesResolved = false;
-        static ReachDetourCodeRange ranges[12]{};
+        static ReachDetourCodeRange ranges[13]{};
         if (!rangesResolved)
         {
             const void* functions[] = {
@@ -23736,6 +23797,7 @@ namespace
                 reinterpret_cast<const void*>(&ReachRainRenderDetour),
                 reinterpret_cast<const void*>(&ReachUnitCameraPositionHook),
                 reinterpret_cast<const void*>(&ReachUnitAdjustHook),
+                reinterpret_cast<const void*>(&ReachFirstPersonRenderGateHook),
             };
             static_assert(_countof(functions) == _countof(ranges));
             bool resolved = true;
@@ -23761,6 +23823,7 @@ namespace
             g_reachCamera.rainRenderTarget,
             g_reachUnitCameraPositionTarget,
             g_reachUnitAdjustTarget,
+            g_reachFirstPersonRenderGateTarget,
         };
         void* const trampolines[] = {
             reinterpret_cast<void*>(g_reachOrigMainRenderView),
@@ -23775,6 +23838,7 @@ namespace
             reinterpret_cast<void*>(g_reachOrigRainRender),
             reinterpret_cast<void*>(g_origReachUnitCameraPosition),
             reinterpret_cast<void*>(g_origReachUnitAdjust),
+            reinterpret_cast<void*>(g_origReachFirstPersonRenderGate),
         };
         static_assert(_countof(targets) == _countof(ranges));
         static_assert(_countof(trampolines) == _countof(ranges));
@@ -23872,9 +23936,12 @@ namespace
         // the title DLL, so both remain in the shared verified lifecycle.
         g_reachVehicleShotRedirectEnabled.store(
             false, std::memory_order_release);
+        g_reachFirstPersonRenderGateReturn.store(
+            0, std::memory_order_release);
         RevokeReachFiringOriginFeature();
         bool disabledAll = true;
         void* const targets[] = {
+            g_reachFirstPersonRenderGateTarget,
             g_reachUnitAdjustTarget,
             g_reachUnitCameraPositionTarget,
             g_reachCamera.rainRenderTarget,
@@ -23904,6 +23971,22 @@ namespace
             return false;
 
         bool removedAll = true;
+        if (g_reachFirstPersonRenderGateTarget)
+        {
+            const MH_STATUS status =
+                MH_RemoveHook(g_reachFirstPersonRenderGateTarget);
+            if (status == MH_OK || status == MH_ERROR_NOT_CREATED)
+            {
+                g_reachFirstPersonRenderGateTarget = nullptr;
+                g_origReachFirstPersonRenderGate = nullptr;
+            }
+            else
+            {
+                removedAll = false;
+                LOG("Reach passenger first-person cleanup: render-gate hook "
+                    "remove failed");
+            }
+        }
         if (g_reachUnitAdjustTarget)
         {
             const MH_STATUS status =
@@ -24479,6 +24562,40 @@ namespace
             return false;
         }
         outUnitAdjust = base + kUnitAdjustRva;
+        return true;
+    }
+
+    // Official HREK render_first_person_view.cpp 0x8362F0 tests the result of
+    // HREK 0x1E6960 at 0x83639D and skips the complete first-person render when
+    // it is not NONE.  The pinned optimized retail homolog is 0x26EA78; its
+    // single corresponding call is 0x26EAD9 -> 0x6527C.  Retail is used only to
+    // match this HREK-understood render boundary.
+    bool ResolveReachFirstPersonRenderGateBinding(
+        uintptr_t base, size_t size, uintptr_t& outGate,
+        uintptr_t& outRenderReturn)
+    {
+        outGate = 0;
+        outRenderReturn = 0;
+        static constexpr char kGateAob[] =
+            "83 C8 FF 3B C8 74 2F 65 48 8B 04 25 58 00 00 00 "
+            "8B 15 ?? ?? ?? ?? 41 B9 D8 00 00 00 4C 8B 04 D0 "
+            "48 63 C1 48 69 C8 B0 00 00 00 4B 8B 04 08 "
+            "0F B7 84 08 C6 06 00 00 C3";
+        static constexpr char kRenderAob[] =
+            "48 8B C4 48 89 58 08 48 89 70 10 48 89 78 18 "
+            "4C 89 60 20 41 56 48 83 EC 30 41 BE 01 00 00 00 "
+            "40 8A F2 41 8A DE 48 8B F9";
+        constexpr uintptr_t kGateRva = 0x0006527C;
+        constexpr uintptr_t kRenderRva = 0x0026EA78;
+        constexpr uintptr_t kGateCallRva = 0x0026EAD9;
+        if (!ReachColdExactSignatureAt(base, size, kGateRva, kGateAob) ||
+            !ReachColdExactSignatureAt(base, size, kRenderRva, kRenderAob) ||
+            !ReachVerifyRel32Call(base, kGateCallRva, kGateRva))
+        {
+            return false;
+        }
+        outGate = base + kGateRva;
+        outRenderReturn = base + kGateCallRva + 5;
         return true;
     }
 
@@ -26077,6 +26194,79 @@ namespace
                 kReachVehicleIdentityCount);
         }
 
+        g_reachFirstPersonRenderGateReturn.store(
+            0, std::memory_order_release);
+        g_reachPassengerFirstPersonAdmissions.store(
+            0, std::memory_order_relaxed);
+        {
+            uintptr_t renderGate = 0;
+            uintptr_t renderReturn = 0;
+            const bool renderGateResolved = reachVehicleCameraResolved &&
+                ResolveReachFirstPersonRenderGateBinding(
+                    base, size, renderGate, renderReturn);
+            if (renderGateResolved)
+            {
+                g_reachFirstPersonRenderGateTarget =
+                    reinterpret_cast<void*>(renderGate);
+                const MH_STATUS created = MH_CreateHook(
+                    g_reachFirstPersonRenderGateTarget,
+                    reinterpret_cast<void*>(
+                        &ReachFirstPersonRenderGateHook),
+                    reinterpret_cast<void**>(
+                        &g_origReachFirstPersonRenderGate));
+                const bool enabled = created == MH_OK &&
+                    MH_EnableHook(
+                        g_reachFirstPersonRenderGateTarget) == MH_OK;
+                if (enabled)
+                {
+                    g_reachFirstPersonRenderGateReturn.store(
+                        renderReturn, std::memory_order_release);
+                    LOG("Reach passenger first-person presentation: Installed "
+                        "at the exact render_first_person_view admission "
+                        "predicate (+0x%llX, caller +0x%llX); only the current "
+                        "allows-weapons passenger admits native hands/gun "
+                        "rendering",
+                        (unsigned long long)(renderGate - base),
+                        (unsigned long long)(renderReturn - base));
+                }
+                else
+                {
+                    bool retained = created == MH_OK;
+                    if (retained)
+                    {
+                        const MH_STATUS disabled = MH_DisableHook(
+                            g_reachFirstPersonRenderGateTarget);
+                        if (ReachDisableStatusIsSafe(disabled))
+                        {
+                            const MH_STATUS removed = MH_RemoveHook(
+                                g_reachFirstPersonRenderGateTarget);
+                            retained = removed != MH_OK &&
+                                removed != MH_ERROR_NOT_CREATED;
+                        }
+                    }
+                    if (!retained)
+                    {
+                        g_reachFirstPersonRenderGateTarget = nullptr;
+                        g_origReachFirstPersonRenderGate = nullptr;
+                    }
+                    LOG("Reach passenger first-person presentation: FAILED to "
+                        "install the exact render admission hook (create=%d, "
+                        "cleanup=%s); passenger hands/gun remain stock while "
+                        "the vehicle camera stays active",
+                        (int)created, retained
+                            ? "retained for verified teardown"
+                            : "complete");
+                }
+            }
+            else if (reachVehicleCameraResolved)
+            {
+                LOG("Reach passenger first-person presentation: exact HREK-"
+                    "homologous render admission binding is missing or "
+                    "ambiguous; passenger hands/gun remain stock while the "
+                    "vehicle camera stays active");
+            }
+        }
+
         // The shot line (R-V10). Resolve the camera-position evaluator and
         // its two firing call sites; their return addresses are what tell the
         // hook it is on the firing path rather than one of the evaluator's 32
@@ -26680,6 +26870,7 @@ namespace
         static bool loggedShotSkip = false;
         static bool loggedVehicleShotRedirect = false;
         static bool loggedVehicleShotMiss = false;
+        static bool loggedPassengerFirstPersonAdmission = false;
         static bool loggedAnchorFallback = false;
         static bool loggedNativeAim = false;
         static bool loggedAimFallback = false;
@@ -26712,6 +26903,7 @@ namespace
             loggedShotSkip = false;
             loggedVehicleShotRedirect = false;
             loggedVehicleShotMiss = false;
+            loggedPassengerFirstPersonAdmission = false;
             loggedAnchorFallback = false;
             loggedNativeAim = false;
             loggedAimFallback = false;
@@ -26783,6 +26975,16 @@ namespace
             loggedVehicleShotMiss = true;
             LOG("Reach vehicle shot line: a local seated shot lacked a fresh "
                 "exact-key presented-reticle target; that shot remained stock");
+        }
+        if (!loggedPassengerFirstPersonAdmission &&
+            g_reachPassengerFirstPersonAdmissions.load(
+                std::memory_order_relaxed) != 0)
+        {
+            loggedPassengerFirstPersonAdmission = true;
+            LOG("Reach passenger floating hands ACTIVE: the exact "
+                "render_first_person_view predicate admitted the native "
+                "personal hands/gun before interpolation and palette; no seat "
+                "flag, camera, steering or simulation state was changed");
         }
         if (!loggedCameraFault &&
             g_reachVehicleCameraFaults.load(std::memory_order_relaxed) != 0)
