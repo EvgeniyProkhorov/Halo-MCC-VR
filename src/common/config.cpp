@@ -279,6 +279,25 @@ static void Clamp()
     g_config.vehicle_cam_right_m =
         std::clamp(g_config.vehicle_cam_right_m,
                    kVehicleCamRightMin, kVehicleCamRightMax);
+    // This one triplet is the base for EVERY seat in all three titles that has
+    // no line of its own. On 2026-08-06 it was walked from the accepted
+    // 0.10/0.05/0.00 to -0.76/+0.89 by a Reach vehicle the mod could not
+    // identify, which silently moved Halo 3 and ODST seats for days. R-V25
+    // removed the mechanism; this makes the state itself impossible to miss,
+    // because nothing else in the log distinguishes "the user tuned this" from
+    // "something else wrote it".
+    if (g_config.vehicle_cam_forward_m != kVehicleCamForwardDefault ||
+        g_config.vehicle_cam_up_m != kVehicleCamUpDefault ||
+        g_config.vehicle_cam_right_m != kVehicleCamRightDefault)
+    {
+        LOG("config: the SHARED universal seat trim is %.2f/%.2f/%.2f, not the "
+            "shipped %.2f/%.2f/%.2f. Every seat in Halo 3, ODST and Reach "
+            "without its own line follows this. If a seat feels wrong in a "
+            "title you were not tuning, reset it in F1 > Vehicles.",
+            g_config.vehicle_cam_forward_m, g_config.vehicle_cam_up_m,
+            g_config.vehicle_cam_right_m, kVehicleCamForwardDefault,
+            kVehicleCamUpDefault, kVehicleCamRightDefault);
+    }
     for (int i = 0; i < kVehicleTrimSlots; ++i)
     {
         g_config.vehicle_cam_forward_v[i] =
