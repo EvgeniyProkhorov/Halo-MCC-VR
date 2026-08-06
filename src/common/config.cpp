@@ -993,9 +993,9 @@ void ConfigSave()
             d.vehicle_cam_forward_m, d.vehicle_cam_up_m,
             d.vehicle_cam_right_m);
     fprintf(f, "# right range -1 to 1; negative right moves left)\n");
-    fprintf(f, "vehicle_cam_forward_m = %.3f\n", g_config.vehicle_cam_forward_m);
-    fprintf(f, "vehicle_cam_up_m = %.3f\n", g_config.vehicle_cam_up_m);
-    fprintf(f, "vehicle_cam_right_m = %.3f\n\n", g_config.vehicle_cam_right_m);
+    fprintf(f, "vehicle_cam_forward_m = %.2f\n", g_config.vehicle_cam_forward_m);
+    fprintf(f, "vehicle_cam_up_m = %.2f\n", g_config.vehicle_cam_up_m);
+    fprintf(f, "vehicle_cam_right_m = %.2f\n\n", g_config.vehicle_cam_right_m);
     fprintf(f, "# Per-SEAT trim. A line appears here when you adjust the three\n");
     fprintf(f, "# seat sliders while SITTING IN that seat; every seat without\n");
     fprintf(f, "# a line keeps using the universal trim above. Delete a line\n");
@@ -1055,9 +1055,15 @@ void ConfigSave()
     fprintf(f, "#             mongoose warthog warthog_chaingun warthog_gauss\n");
     fprintf(f, "#             warthog_rocket falcon sabre scorpion forklift cart\n");
     fprintf(f, "#             shade_plasma shade_flak plasma_turret machinegun\n");
+    fprintf(f, "#             plus the full census rows and 'unmatched',\n");
+    fprintf(f, "#             which every vehicle this build cannot identify\n");
+    fprintf(f, "#             shares so a seated F1 edit never rewrites the\n");
+    fprintf(f, "#             universal trim above.\n");
     fprintf(f, "#   seats: seat0 through seat15 (only authored seats are used)\n");
-    fprintf(f, "# F1's Back to universal trim persists as:\n");
+    fprintf(f, "# F1's Back to this seat's authored point persists as:\n");
     fprintf(f, "#   vehicle_cam_use_universal_reach_<vehicle>_<seat> = 1\n");
+    fprintf(f, "#   (the seat returns to its built-in Blender row; only a seat\n");
+    fprintf(f, "#    that never had one follows the universal trim)\n");
     for (int v = 0; v < kReachVehicleTrimCount; ++v)
         for (int s = 0; s < kReachVehicleSeatSlots; ++s)
         {
@@ -1070,15 +1076,15 @@ void ConfigSave()
                 continue;
             }
             if (g_config.reach_vehicle_cam_forward_set[i])
-                fprintf(f, "vehicle_cam_forward_m_reach_%s_%s = %.3f\n",
+                fprintf(f, "vehicle_cam_forward_m_reach_%s_%s = %.2f\n",
                     kReachVehicleTrimNames[v], kReachVehicleSeatNames[s],
                     g_config.reach_vehicle_cam_forward_v[i]);
             if (g_config.reach_vehicle_cam_up_set[i])
-                fprintf(f, "vehicle_cam_up_m_reach_%s_%s = %.3f\n",
+                fprintf(f, "vehicle_cam_up_m_reach_%s_%s = %.2f\n",
                     kReachVehicleTrimNames[v], kReachVehicleSeatNames[s],
                     g_config.reach_vehicle_cam_up_v[i]);
             if (g_config.reach_vehicle_cam_right_set[i])
-                fprintf(f, "vehicle_cam_right_m_reach_%s_%s = %.3f\n",
+                fprintf(f, "vehicle_cam_right_m_reach_%s_%s = %.2f\n",
                     kReachVehicleTrimNames[v], kReachVehicleSeatNames[s],
                     g_config.reach_vehicle_cam_right_v[i]);
         }

@@ -16406,6 +16406,13 @@ namespace
     std::atomic<uint32_t> g_reachCinematicLocked{0};
     std::atomic<uint32_t> g_reachFiringOriginMoves{0};
     std::atomic<uint32_t> g_reachFiringOriginSkips{0};
+    // Why a personal seated shot kept its stock origin. Exactly one of these
+    // advances per skipped firing call; the worker prints them together.
+    std::atomic<uint32_t> g_reachFiringOriginSkipTorn{0};
+    std::atomic<uint32_t> g_reachFiringOriginSkipNotSeated{0};
+    std::atomic<uint32_t> g_reachFiringOriginSkipNoWeaponSeat{0};
+    std::atomic<uint32_t> g_reachFiringOriginSkipKeyMismatch{0};
+    std::atomic<uint32_t> g_reachFiringOriginSkipStaleEye{0};
 
     struct ReachShotOccupationSnapshot
     {
@@ -16588,6 +16595,23 @@ namespace
         if (!coherent || !ReachShotOriginSampleAdmitted(sample))
         {
             g_reachFiringOriginSkips.fetch_add(1, std::memory_order_relaxed);
+            // R-V25: the 12a7ee4 session skipped every personal shot and moved
+            // none, and the single "SKIPPED" line could not say whether the
+            // seat refused weapons, the keys disagreed or the eye was stale.
+            // One lock-free increment on an already-rare firing call names it.
+            std::atomic<uint32_t>* reason = &g_reachFiringOriginSkipTorn;
+            if (!coherent)
+                reason = &g_reachFiringOriginSkipTorn;
+            else if (!sample.active)
+                reason = &g_reachFiringOriginSkipNotSeated;
+            else if (!sample.allowsWeapons)
+                reason = &g_reachFiringOriginSkipNoWeaponSeat;
+            else if (!ReachSeatLeaseKeyEqual(
+                         sample.occupation, sample.renderedEye))
+                reason = &g_reachFiringOriginSkipKeyMismatch;
+            else
+                reason = &g_reachFiringOriginSkipStaleEye;
+            reason->fetch_add(1, std::memory_order_relaxed);
             return stockResult;
         }
         out[0] = renderedEye.eye[0];
@@ -22491,10 +22515,16 @@ namespace
                     anchorMarker = rootMarker;
                     anchorValid = true;
                 }
-                const int trimSlot = identity != ReachVehicleId::Unknown
-                    ? ConfigReachSeatTrimSlot(
-                          static_cast<int>(identity), info.seatIndex)
-                    : -1;
+                // R-V25: an unmatched vehicle keys the dedicated unmatched row
+                // rather than -1. -1 meant "the universal trim", so both the
+                // camera AND the F1 sliders bound to the base every other seat
+                // in all three titles follows, and tuning that seat moved them
+                // all.
+                const int trimSlot = ConfigReachSeatTrimSlot(
+                    identity != ReachVehicleId::Unknown
+                        ? static_cast<int>(identity)
+                        : kReachUnmatchedVehicleTrimId,
+                    info.seatIndex);
                 if (identity != ReachVehicleId::Unknown && trimSlot < 0)
                 {
                     identityMiss = true;
@@ -26201,7 +26231,9 @@ namespace
         {
             uintptr_t renderGate = 0;
             uintptr_t renderReturn = 0;
-            const bool renderGateResolved = reachVehicleCameraResolved &&
+            const bool renderGateResolved =
+                kReachR_V24PassengerRenderAdmissionEnabled &&
+                reachVehicleCameraResolved &&
                 ResolveReachFirstPersonRenderGateBinding(
                     base, size, renderGate, renderReturn);
             if (renderGateResolved)
@@ -26258,12 +26290,24 @@ namespace
                             : "complete");
                 }
             }
-            else if (reachVehicleCameraResolved)
+            else if (reachVehicleCameraResolved &&
+                     kReachR_V24PassengerRenderAdmissionEnabled)
             {
                 LOG("Reach passenger first-person presentation: exact HREK-"
                     "homologous render admission binding is missing or "
                     "ambiguous; passenger hands/gun remain stock while the "
                     "vehicle camera stays active");
+            }
+            else if (reachVehicleCameraResolved)
+            {
+                LOG("Reach passenger first-person presentation: the R-V24 "
+                    "render admission detour is DISABLED - it ran a whole "
+                    "12a7ee4 session, including a Warthog passenger seat, "
+                    "with zero admissions, so it is not the mechanism that "
+                    "suppresses the seated first-person hands/gun. Passenger "
+                    "hands remain stock; the seat log now names the live seat "
+                    "flags and the shot line names why a personal shot kept "
+                    "its stock origin");
             }
         }
 
@@ -26867,7 +26911,7 @@ namespace
         static bool loggedPatchActivity = false;
         static bool loggedPatchFailure = false;
         static bool loggedShotMove = false;
-        static bool loggedShotSkip = false;
+        static uint32_t loggedShotSkip = 0;
         static bool loggedVehicleShotRedirect = false;
         static bool loggedVehicleShotMiss = false;
         static bool loggedPassengerFirstPersonAdmission = false;
@@ -26900,7 +26944,7 @@ namespace
             loggedExitRecenters = 0;
             loggedSeat = 0;
             loggedShotMove = false;
-            loggedShotSkip = false;
+            loggedShotSkip = 0;
             loggedVehicleShotRedirect = false;
             loggedVehicleShotMiss = false;
             loggedPassengerFirstPersonAdmission = false;
@@ -26950,14 +26994,38 @@ namespace
             LOG("Reach seat aim: seated personal-weapon shots are leaving the "
                 "rendered eye (first substitution observed)");
         }
-        if (!loggedShotSkip &&
+        // Re-logged whenever a NEW reason first appears, not once per
+        // generation: the breakdown is the whole point and the first skip
+        // alone would report four zeroes forever. At most five lines.
+        const uint32_t shotSkipMask =
+            (g_reachFiringOriginSkipTorn.load(std::memory_order_relaxed) ? 1u
+                                                                        : 0u) |
+            (g_reachFiringOriginSkipNotSeated.load(std::memory_order_relaxed)
+                 ? 2u : 0u) |
+            (g_reachFiringOriginSkipNoWeaponSeat.load(
+                 std::memory_order_relaxed) ? 4u : 0u) |
+            (g_reachFiringOriginSkipKeyMismatch.load(
+                 std::memory_order_relaxed) ? 8u : 0u) |
+            (g_reachFiringOriginSkipStaleEye.load(std::memory_order_relaxed)
+                 ? 16u : 0u);
+        if (shotSkipMask != loggedShotSkip &&
             g_reachFiringOriginSkips.load(std::memory_order_relaxed) != 0)
         {
-            loggedShotSkip = true;
-            LOG("Reach seat aim: a firing-path substitution was SKIPPED "
-                "(not a current allows-weapons personal seat, key mismatch, "
-                "or stale/invalid completed eye); those shots kept the stock "
-                "origin");
+            loggedShotSkip = shotSkipMask;
+            LOG("Reach seat aim: %u firing-path substitutions were SKIPPED and "
+                "kept the stock origin - torn read %u, not seated %u, seat "
+                "does not allow a personal weapon %u, occupation/eye key "
+                "mismatch %u, stale or invalid rendered eye %u",
+                g_reachFiringOriginSkips.load(std::memory_order_relaxed),
+                g_reachFiringOriginSkipTorn.load(std::memory_order_relaxed),
+                g_reachFiringOriginSkipNotSeated.load(
+                    std::memory_order_relaxed),
+                g_reachFiringOriginSkipNoWeaponSeat.load(
+                    std::memory_order_relaxed),
+                g_reachFiringOriginSkipKeyMismatch.load(
+                    std::memory_order_relaxed),
+                g_reachFiringOriginSkipStaleEye.load(
+                    std::memory_order_relaxed));
         }
         if (!loggedVehicleShotRedirect &&
             g_reachVehicleShotRedirects.load(
@@ -27142,30 +27210,48 @@ namespace
             const int seat = static_cast<int>(seatSnapshot & 0xFFu) - 1;
             const int slot = ReachVehicleTrimSnapshotSlot(
                 seatSnapshot, generation, kReachVehicleSeatSlots);
-            if (identity > 0 && identity <= kReachVehicleTrimCount &&
+            // The live seat-flags word is printed because two features gate on
+            // it (bit 4 third person camera, bit 5 allows weapons) and a
+            // report of "no passenger hands" cannot be told apart from "this
+            // seat never claimed to allow weapons" without it.
+            const uint32_t seatFlagsNow =
+                g_reachOwnerScope.vehicle.active
+                    ? g_reachOwnerScope.vehicle.seatFlags
+                    : 0u;
+            if (identity > 0 && identity <= kReachVehicleIdentityTrimCount &&
                 seat >= 0 && slot >= 0)
             {
                 LOG("Reach first-person vehicles: active %s raw seat %d; "
-                    "marker smoothing=%d trims F/R/U=%.3f/%.3f/%.3f m; "
+                    "marker smoothing=%d trims F/R/U=%.2f/%.2f/%.2f m; "
+                    "seat flags %08X (third-person=%d allows-weapons=%d); "
                     "view follow %s, %s",
                     kReachVehicleTrimNames[identity - 1], seat,
                     static_cast<int>(g_config.vehicle_cam_smoothing),
                     ConfigReachSeatCamForward(g_config, slot),
                     ConfigReachSeatCamRight(g_config, slot),
                     ConfigReachSeatCamUp(g_config, slot),
+                    seatFlagsNow,
+                    (seatFlagsNow & kReachSeatThirdPersonCameraBit) ? 1 : 0,
+                    (seatFlagsNow & kReachSeatAllowsWeaponsBit) ? 1 : 0,
                     g_config.vehicle_view_follow ? "ON" : "OFF",
                     ReachSteeringModeName(
                         static_cast<ReachVehicleId>(identity), seat));
             }
-            else if (identity == kReachVehicleGenericIdentityCode && seat >= 0)
+            else if (identity == kReachVehicleGenericIdentityCode &&
+                     seat >= 0 && slot >= 0)
             {
                 LOG("Reach first-person vehicles: active unmatched vehicle raw "
-                    "seat %d; marker smoothing=%d universal trims "
-                    "F/R/U=%.3f/%.3f/%.3f m",
+                    "seat %d; marker smoothing=%d unmatched-row trims "
+                    "F/R/U=%.2f/%.2f/%.2f m; seat flags %08X "
+                    "(third-person=%d allows-weapons=%d); the F1 sliders edit "
+                    "that row, never the shared universal trim",
                     seat, static_cast<int>(g_config.vehicle_cam_smoothing),
-                    ConfigReachSeatCamForward(g_config, -1),
-                    ConfigReachSeatCamRight(g_config, -1),
-                    ConfigReachSeatCamUp(g_config, -1));
+                    ConfigReachSeatCamForward(g_config, slot),
+                    ConfigReachSeatCamRight(g_config, slot),
+                    ConfigReachSeatCamUp(g_config, slot),
+                    seatFlagsNow,
+                    (seatFlagsNow & kReachSeatThirdPersonCameraBit) ? 1 : 0,
+                    (seatFlagsNow & kReachSeatAllowsWeaponsBit) ? 1 : 0);
             }
         }
         if (g_reachVehicleInputFaults.load(std::memory_order_relaxed) != 0 &&
@@ -29962,12 +30048,22 @@ const char* Game_VehicleSeatTrimName(int slot, VehicleTrimBank bank)
             return "this seat";
         const int v = slot / kReachVehicleSeatSlots;
         const int s = slot % kReachVehicleSeatSlots;
+        // Every row must carry a name. The list stopped at 20 while the bank
+        // held 34, so the census rows named the F1 header through a null
+        // pointer; row 35 is the R-V25 unmatched row.
         static const char* const kNiceVehicle[kReachVehicleTrimCount] = {
             "Banshee", "Space Banshee", "Ghost", "Revenant", "Wraith",
             "Wraith gunner", "Mongoose", "Warthog", "Warthog chaingun",
             "Warthog gauss", "Warthog rockets", "Falcon", "Sabre",
             "Scorpion", "Forklift", "Cart", "Shade plasma", "Shade flak",
-            "Plasma turret", "Machine gun"};
+            "Plasma turret", "Machine gun", "MAC cannon",
+            "Scorpion anti-infantry", "Seraph", "Pelican", "Pelican chin gun",
+            "Corvette cannon", "Space Phantom chin gun",
+            "Space Phantom beam turret", "Cargo truck", "Military truck",
+            "ONI van", "Pickup", "Large truck cab", "Squad drop pod",
+            "Unmatched vehicle"};
+        static_assert(_countof(kNiceVehicle) == kReachVehicleTrimCount,
+                      "every Reach trim row needs a display name");
         _snprintf_s(text, sizeof(text), _TRUNCATE, "Reach %s seat %d",
                     kNiceVehicle[v], s);
         return text;

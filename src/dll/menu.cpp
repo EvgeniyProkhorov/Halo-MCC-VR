@@ -779,17 +779,16 @@ namespace
         static int s_seatBind = -1;
         static VehicleTrimBank s_seatBank = VehicleTrimBank::Halo3;
         static int s_seatMissFrames = 0;
-        static bool s_forceUniversalTrim = false;
         VehicleTrimBank liveBank = VehicleTrimBank::Halo3;
         const int liveSlot = Game_VehicleSeatTrimSlotEx(&liveBank);
-        if (liveSlot >= 0 && !s_forceUniversalTrim)
+        if (liveSlot >= 0)
         {
             s_seatBind = liveSlot;
             s_seatBank = liveBank;
             s_seatMissFrames = 0;
         }
-        else
-            ++s_seatMissFrames;
+        else if (++s_seatMissFrames > 30)
+            s_seatBind = -1;
         const int seatSlot = s_seatBind;
         int seatSlotLimit = kVehicleTrimSlots;
         float* trimForwardV = g_config.vehicle_cam_forward_v;
@@ -820,16 +819,27 @@ namespace
         }
         const bool perSeat = seatSlot >= 0 && seatSlot < seatSlotLimit;
         const bool reachSeat = perSeat && s_seatBank == VehicleTrimBank::Reach;
-        const float forwardMin = reachSeat ? kReachVehicleCamForwardMin :
-                                             kVehicleCamForwardMin;
-        const float forwardMax = reachSeat ? kReachVehicleCamForwardMax :
-                                             kVehicleCamForwardMax;
-        const float upMin = reachSeat ? kReachVehicleCamUpMin : kVehicleCamUpMin;
-        const float upMax = reachSeat ? kReachVehicleCamUpMax : kVehicleCamUpMax;
-        const float rightMin = reachSeat ? kReachVehicleCamRightMin :
-                                           kVehicleCamRightMin;
-        const float rightMax = reachSeat ? kReachVehicleCamRightMax :
-                                           kVehicleCamRightMax;
+        // R-V25: every slider is Halo 3's slider. A Reach seat may legitimately
+        // sit tens of metres from its marker (the authored Sabre eye is 42 m
+        // ahead of it), and exposing that whole span made one pixel of travel
+        // worth about a third of a metre - "ridiculously strong". The stored
+        // Reach clamps stay wide so no authored row is truncated; the slider
+        // hangs Halo 3's own travel off the seat's authored Blender base
+        // instead, so dragging feels identical in all three titles.
+        float reachBaseForward = 0.0f;
+        float reachBaseUp = 0.0f;
+        float reachBaseRight = 0.0f;
+        if (reachSeat)
+        {
+            ConfigReachSeatAuthoredBase(seatSlot, &reachBaseForward,
+                                        &reachBaseUp, &reachBaseRight);
+        }
+        const float forwardMin = reachBaseForward + kVehicleCamForwardMin;
+        const float forwardMax = reachBaseForward + kVehicleCamForwardMax;
+        const float upMin = reachBaseUp + kVehicleCamUpMin;
+        const float upMax = reachBaseUp + kVehicleCamUpMax;
+        const float rightMin = reachBaseRight + kVehicleCamRightMin;
+        const float rightMax = reachBaseRight + kVehicleCamRightMax;
         if (perSeat)
             ImGui::Text("Adjusting: %s (this seat only)",
                         Game_VehicleSeatTrimName(seatSlot, s_seatBank));
@@ -840,20 +850,8 @@ namespace
             seatFwd = ConfigOdstSeatCamForward(g_config, seatSlot);
         else if (s_seatBank == VehicleTrimBank::Reach)
             seatFwd = ConfigReachSeatCamForward(g_config, seatSlot);
-        bool seatFwdChanged = ImGui::SliderFloat(
-            "Seat forward (m)", &seatFwd, forwardMin, forwardMax, "%.3f");
-        if (ImGui::SmallButton("-1 mm##seatfwd"))
-        {
-            seatFwd = std::max(forwardMin, seatFwd - 0.001f);
-            seatFwdChanged = true;
-        }
-        ImGui::SameLine();
-        if (ImGui::SmallButton("+1 mm##seatfwd"))
-        {
-            seatFwd = std::min(forwardMax, seatFwd + 0.001f);
-            seatFwdChanged = true;
-        }
-        if (seatFwdChanged)
+        if (ImGui::SliderFloat("Seat forward (m)", &seatFwd,
+                               forwardMin, forwardMax, "%.2f"))
         {
             if (perSeat)
             {
@@ -871,20 +869,8 @@ namespace
             seatUp = ConfigOdstSeatCamUp(g_config, seatSlot);
         else if (s_seatBank == VehicleTrimBank::Reach)
             seatUp = ConfigReachSeatCamUp(g_config, seatSlot);
-        bool seatUpChanged = ImGui::SliderFloat(
-            "Seat height (m)", &seatUp, upMin, upMax, "%.3f");
-        if (ImGui::SmallButton("-1 mm##seatup"))
-        {
-            seatUp = std::max(upMin, seatUp - 0.001f);
-            seatUpChanged = true;
-        }
-        ImGui::SameLine();
-        if (ImGui::SmallButton("+1 mm##seatup"))
-        {
-            seatUp = std::min(upMax, seatUp + 0.001f);
-            seatUpChanged = true;
-        }
-        if (seatUpChanged)
+        if (ImGui::SliderFloat("Seat height (m)", &seatUp,
+                               upMin, upMax, "%.2f"))
         {
             if (perSeat)
             {
@@ -902,21 +888,8 @@ namespace
             seatRight = ConfigOdstSeatCamRight(g_config, seatSlot);
         else if (s_seatBank == VehicleTrimBank::Reach)
             seatRight = ConfigReachSeatCamRight(g_config, seatSlot);
-        bool seatRightChanged = ImGui::SliderFloat(
-            "Seat left / right (m)", &seatRight,
-            rightMin, rightMax, "%.3f");
-        if (ImGui::SmallButton("-1 mm##seatright"))
-        {
-            seatRight = std::max(rightMin, seatRight - 0.001f);
-            seatRightChanged = true;
-        }
-        ImGui::SameLine();
-        if (ImGui::SmallButton("+1 mm##seatright"))
-        {
-            seatRight = std::min(rightMax, seatRight + 0.001f);
-            seatRightChanged = true;
-        }
-        if (seatRightChanged)
+        if (ImGui::SliderFloat("Seat left / right (m)", &seatRight,
+                               rightMin, rightMax, "%.2f"))
         {
             if (perSeat)
             {
@@ -932,7 +905,9 @@ namespace
         if (perSeat && (trimForwardSet[seatSlot] || trimUpSet[seatSlot] ||
                         trimRightSet[seatSlot]))
         {
-            if (ImGui::SmallButton("Back to the universal trim##seattrim"))
+            if (ImGui::SmallButton(reachSeat
+                    ? "Back to this seat's authored point##seattrim"
+                    : "Back to the universal trim##seattrim"))
             {
                 if (reachSeat)
                     ConfigReachSeatUseUniversalTrim(g_config, seatSlot);
@@ -945,34 +920,30 @@ namespace
                 changed = true;
             }
         }
-        if (perSeat)
+        // The universal trim is shared by all three titles, so a bad value in
+        // it moves every seat that has no line of its own. One click puts it
+        // back to the shipped default instead of hunting for it on a slider.
+        if (!perSeat &&
+            (g_config.vehicle_cam_forward_m != kVehicleCamForwardDefault ||
+             g_config.vehicle_cam_up_m != kVehicleCamUpDefault ||
+             g_config.vehicle_cam_right_m != kVehicleCamRightDefault))
         {
-            ImGui::SameLine();
-            if (ImGui::SmallButton("Edit universal trim##seattrim"))
+            if (ImGui::SmallButton("Reset the universal trim##seattrim"))
             {
-                s_forceUniversalTrim = true;
-                s_seatBind = -1;
-                s_seatMissFrames = 31;
-            }
-        }
-        else if (liveSlot >= 0 && s_forceUniversalTrim)
-        {
-            if (ImGui::SmallButton("Return to occupied seat##seattrim"))
-            {
-                s_forceUniversalTrim = false;
-                s_seatBind = liveSlot;
-                s_seatBank = liveBank;
-                s_seatMissFrames = 0;
+                g_config.vehicle_cam_forward_m = kVehicleCamForwardDefault;
+                g_config.vehicle_cam_up_m = kVehicleCamUpDefault;
+                g_config.vehicle_cam_right_m = kVehicleCamRightDefault;
+                changed = true;
             }
         }
         ImGui::TextDisabled(
             "Sit in a seat and these sliders adjust that seat alone —\n"
             "a vehicle's driver, passengers and gunner each remember their\n"
             "own. On foot they set the shared base every unadjusted seat\n"
-            "follows. The base is your Blender-authored point for that seat;\n"
-            "vehicle and occupant motion are parented around that baseline.\n"
-            "The occupied seat stays selected while this menu is open; use\n"
-            "Edit universal trim explicitly. +/- buttons move one millimeter.\n"
+            "follows. In Reach the base is your Blender-authored point for\n"
+            "that seat and the slider travels the same distance either side\n"
+            "of it that Halo 3 and ODST travel; vehicle and occupant motion\n"
+            "are parented around that baseline.\n"
             "Left/right: negative moves left, positive moves right.");
         ImGui::Spacing();
         ImGui::Separator();

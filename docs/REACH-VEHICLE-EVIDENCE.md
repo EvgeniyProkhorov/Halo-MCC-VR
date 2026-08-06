@@ -1549,6 +1549,125 @@ personal gun, shots following the same gun/crosshair, no world-player body in
 the owned eye, stable driver/passenger camera in both View Follow modes, and
 safe full-range plus millimetre trim editing without a universal jump.
 
+## R-V25 - 2026-08-06: repair the trim controls and the identity miss
+
+The user's report against 12a7ee4 (DLL `E2E869F0...`) was: the sliders make no
+sense - "ridiculously strong and then super weak" - Codex's extra buttons do
+nothing useful in Halo 3 and ODST, seats on some vehicles are wrong, and a
+passenger has no floating hands and no working shots. The preserved Steam log
+for that exact source (`00:59:37` start, run to `01:03:20`, VirtualDesktopXR /
+Quest 3 / 90 Hz) and the live `halomccvr.cfg` diff against
+`out/deploy-backups/e3c495b-steam-before-12a7ee4-20260806-055844537Z` supply the
+causes. Each item below is measured, not inferred.
+
+### 1. The universal trim was being edited from inside a seat
+
+At `01:02:49` the log reads
+
+~~~text
+Reach first-person vehicles: unmatched vehicle tuple
+  3F12852A/3DC5E04F/3BE1BCFB/3EA9708D type 6 raw seat 0 (of 2 authored);
+  the universal seat camera is applied with no-follow/no-steer policy
+Reach first-person vehicles: active unmatched vehicle raw seat 0;
+  marker smoothing=1 universal trims F/R/U=0.188/-0.000/0.894 m
+~~~
+
+The F1 menu opened at `01:02:51` and closed at `01:02:57` with the player still
+in that seat, and the saved config moved from `vehicle_cam_forward_m = -1.00`
+to `-0.765` - matching the `0.188 -> -0.765` change over exactly that window.
+`ReachVehicleTrimSnapshotSlot` returned -1 for an unmatched vehicle, -1 means
+the universal trim, and the universal trim is shared by Halo 3, ODST and every
+Reach seat with no line of its own. Halo 3's own contract is that sitting in a
+seat adjusts that seat alone, so the fix is a dedicated `unmatched` trim row
+(vehicle id 35, config keys `vehicle_cam_*_m_reach_unmatched_seat<N>`) that the
+sentinel identity now decodes to. The shipped universal default is
+0.10/0.05/0.00; the F1 panel gained a one-click reset for it because the value
+had already been walked to -1.00/+1.02 over earlier sessions.
+
+### 2. That vehicle was not unmatched at all
+
+`3F12852A/3DC5E04F/3BE1BCFB/3EA9708D` is the canonical HREK `WarthogRocket`
+row in `kReachVehicleFingerprints`, bit for bit. It failed only on
+`ReachVehiclePhysicsTypeMatches`: HREK authors no physics block for a mounted
+weapon, so `ReachVehicleExpectedPhysicsType` returns 16, and retail reported 6.
+Five identities already carried that same 16-or-6 exception one at a time
+(ShadePlasma, ShadeFlak, Machinegun, PlasmaTurret, ScorpionAntiInfantry). The
+rule is now general: an identity whose HREK expected type is 16 resolves at
+either 16 or 6. The tuple remains the identity proof - it matches exactly one
+row and `ReachResolveVehicleFingerprint` still rejects any ambiguity - so this
+cannot misfile one vehicle onto another. Both Warthog turret variants, the
+Wraith gunner, the Pelican and Space Phantom guns, the MAC cannon and the squad
+drop pod were all exposed to the same miss.
+
+### 3. The slider itself
+
+Reach's per-seat bank kept the wide clamps R-V5 introduced for the authored
+Blender lineup (forward -64..+64 m, up/right -16..+16 m), and the F1 slider used
+them directly. On a 128 m span one pixel of controller travel is about a third
+of a metre, which is the reported "ridiculously strong"; the -1 mm / +1 mm
+buttons added in 12a7ee4 are the "super weak" half, and with the
+`Edit universal trim` / `Return to occupied seat` buttons they are removed.
+Storage clamps are unchanged so no authored row is truncated. The slider now
+hangs Halo 3's own travel (-1.00..+1.50 forward and height, -1.00..+1.00
+lateral) off the seat's authored Blender base, so the Sabre's 42.43 m seat
+still exists and its slider still moves the same distance per pixel as Halo 3's
+Warthog. Display and config persistence return to two decimals.
+
+### 4. The Warthog driver seat specifically
+
+The live config carries `vehicle_cam_use_universal_reach_warthog_seat0 = 1`.
+That tombstone meant "follow the universal trim", so the polluted -0.765/+0.894
+reached the seat and the log confirms it: `01:03:16 ... active warthog raw
+seat 0 ... trims F/R/U=-0.765/-0.000/0.894`. A Reach seat's Blender row is its
+BASE, so the tombstone now returns the seat to that authored row and only a
+seat that never had one follows the universal. This repairs the seat without
+editing the user's configuration file.
+
+### 5. The passenger presentation and shot line - what is measured, not fixed
+
+R-V24's render-admission detour is **disabled**, not deleted. Its log line
+proves it installed at `+0x6527C` with caller `+0x26EADE`, and the session -
+which includes `01:03:06 ... active warthog raw seat 1` - contains no
+`Reach passenger floating hands ACTIVE` line at all: zero admissions. The
+detour can only substitute when the stock word is not NONE, so either the word
+was already NONE or `render_first_person_view` is never reached for a seated
+player. Both mean the first-person models are suppressed upstream of that call,
+and one more swing at the same site would be a third guess.
+
+Two facts bound the next candidate. Halo 3's accepted C20 result is recorded in
+`docs/HALO3-VEHICLE-EVIDENCE.md`: clearing seat flag bit 4 selects the
+first-person camera, whose director perspective is 0, and the first-person
+model cache at `halo3+0x28ADDC` builds the weapon models only for perspective
+0 - which is why Halo 3 passengers have hands. Reach's homologous seat bit is
+the same bit 4, but R-V20's between-frame lease over it was headset-rejected
+(model still visible, vehicle shaking) and stays permanently disabled. The
+perspective is chosen during the game tick, not inside the render window, so
+the Halo 3 mechanism cannot simply be re-scoped to R-V22's render window; that
+is the work the next candidate owes.
+
+Separately, the HREK census settles what the seat claims. Both
+`test_fbx_mongoose` seat 1 and `warthog_troop` seat 0 read
+`third person camera, allows weapons, ...`, so a Reach passenger seat really
+does allow a personal weapon and really is authored third person. The session
+also never logged `Reach seat aim: seated personal-weapon shots are leaving the
+rendered eye`, so **no** personal shot origin was ever substituted; the single
+SKIPPED line could not say why. This candidate therefore adds two zero-cost
+engine-state reports rather than a guessed fix:
+
+- the once-per-seat line now prints the live seat-flags word with bit 4 and
+  bit 5 decoded, so "no hands" can be told apart from "this seat never claimed
+  to allow weapons";
+- the skip line now breaks down into torn read / not seated / seat does not
+  allow a personal weapon / occupation-eye key mismatch / stale rendered eye,
+  and re-logs whenever a new reason first appears.
+
+Release x64 builds, `ctest --preset release` passes 1/1, and
+`tools/check-reach-fp-parity.ps1` passes. Headset acceptance requires: the
+sliders feel like Halo 3's in all three titles; Warthog driver, passenger and
+both turret Warthogs sit correctly; a rocket/chaingun Warthog turret now logs
+its own identity instead of `unmatched vehicle tuple`; and no seat adjustment
+made while seated changes any other seat. Nothing here advances CURRENT-STATE.
+
 ## R-V9 - acceptance still required
 
 Nothing in this document changes the accepted pointer. Packaging, successful

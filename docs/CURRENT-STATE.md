@@ -69,6 +69,58 @@ alternating eyes).
 choice; see `docs/ODST-LEVEL-LOAD-LOCKOUT.md`. Its undone decisive test is a
 no-mod control run.
 
+## PENDING HEADSET CANDIDATE: Reach vehicle trim + identity repair - 2026-08-06
+
+The accepted pointer remains 118b8bde. This candidate repairs what the
+2026-08-06 session broke and does not advance any pointer.
+
+The rejected build was source `12a7ee4b085c803689a22c65e61b00f88f0ca6f4`,
+DLL SHA-256
+`E2E869F00C807AF3A8D3EDB729E461C0813E50CD80D7925DD8D2089F7FF3E85E`,
+Steam / VirtualDesktopXR 1.0.10 / Quest 3 / 90 Hz. The user reported sliders
+that made no sense ("ridiculously strong and then super weak"), extra F1
+buttons that do nothing useful in Halo 3 or ODST, wrong seats on some vehicles,
+and a passenger with no floating hands and broken shots.
+
+Four causes are measured in that session's preserved log and config, and fixed
+here; the fifth is measured and explicitly NOT fixed. Full evidence is in
+`docs/REACH-VEHICLE-EVIDENCE.md` R-V25.
+
+1. **The universal trim was editable from inside a seat.** An unidentified
+   Reach vehicle decoded to trim slot -1, which means the universal trim shared
+   by Halo 3, ODST and every unadjusted Reach seat. The log shows the F1 menu
+   open at `01:02:51` while seated in one, and the config's
+   `vehicle_cam_forward_m` moving `0.188 -> -0.765` across exactly that window.
+   Unmatched vehicles now key their own `unmatched` trim row, and the panel
+   offers a one-click reset for the universal trim, which had already been
+   walked to -1.00/+1.02 over earlier sessions.
+2. **That vehicle was not unmatched.** Its tuple is the canonical HREK
+   `WarthogRocket` row bit for bit; it failed only because retail reports
+   physics type 6 where HREK authors 16. Every HREK type-16 mounted weapon now
+   resolves at either type, with the tuple still the identity proof.
+3. **The sliders are Halo 3's sliders again.** The -1 mm/+1 mm buttons, the
+   `Edit universal trim` / `Return to occupied seat` buttons and the
+   three-decimal display are gone. Reach's storage clamps stay wide so no
+   authored row is truncated, but the slider now travels Halo 3's own distance
+   either side of the seat's authored Blender base.
+4. **The Warthog driver seat is repaired without touching the user's config.**
+   Its `use_universal` tombstone now returns the seat to its authored Blender
+   row instead of to the polluted universal trim.
+5. **Passenger hands and passenger shots are NOT fixed.** R-V24's render
+   admission detour installed and finished the whole session - including a
+   Warthog passenger seat - with zero admissions, so it is not the mechanism;
+   it is disabled rather than deleted. The session also never logged a single
+   personal shot-origin substitution. Both now report engine state: the seat
+   line prints the live seat-flags word with bit 4 (third person camera) and
+   bit 5 (allows weapons) decoded, and the skip line names which of five
+   conditions rejected each shot. Halo 3's mechanism (seat bit 4 -> first-person
+   perspective -> the first-person model cache) is recorded in R-V25 as the
+   path the next candidate owes, along with why R-V20's rejected between-frame
+   lease cannot simply be re-scoped.
+
+Release x64 builds, `ctest --preset release` passes 1/1, and the Reach parity
+gate passes. A build and a passing gate prove nothing about the headset.
+
 ## PENDING HEADSET CANDIDATE: complete Reach vehicle repair - 2026-08-05
 
 The accepted pointer above remains 118b8bde. Implementation commit f370185 is

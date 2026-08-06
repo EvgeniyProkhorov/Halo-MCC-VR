@@ -468,10 +468,27 @@ inline constexpr bool ReachVehiclePhysicsTypeMatches(
                    {0x3ED28405, 0x3DB8AD5D, 0xB8A6B78A, 0x3D8A1BD8}) &&
             (observedType == 16 || observedType == 6);
     default:
+    {
         const int expectedType = ReachVehicleExpectedPhysicsType(id);
-        return expectedType >= 0 &&
-            ReachResolveVehicleFingerprint(fingerprint) == id &&
-            observedType == expectedType;
+        if (expectedType < 0 ||
+            ReachResolveVehicleFingerprint(fingerprint) != id)
+        {
+            return false;
+        }
+        // R-V25, measured at retail: the 2026-08-06 Steam session reported
+        // `unmatched vehicle tuple 3F12852A/3DC5E04F/3BE1BCFB/3EA9708D type 6`,
+        // which is the canonical HREK WarthogRocket row above, bit for bit.
+        // Retail's compiled maps bucket a mounted weapon into the official
+        // type-turret block (6) instead of HREK's authored none (16); five
+        // identities already carried that exception one at a time. The tuple
+        // stays the identity proof - it matches exactly one row - so accepting
+        // either evidenced representation cannot misfile one vehicle onto
+        // another, and it stops the two Warthog turret variants and every other
+        // mounted gun falling to the no-follow/no-steer universal fallback.
+        if (expectedType == 16)
+            return observedType == 16 || observedType == 6;
+        return observedType == expectedType;
+    }
     }
 }
 
@@ -772,6 +789,16 @@ inline constexpr bool ReachSeatAimCanDriveReticle(
     return ReachAimFeedbackCanDriveReticle(source) &&
         (seatFlags & kReachSeatAllowsWeaponsBit) != 0;
 }
+
+// R-V25: PROVEN INERT, never armed again without new evidence. The 12a7ee4
+// headset run installed this predicate detour at the exact
+// render_first_person_view call site and finished a whole session - including
+// a Warthog passenger seat - with ZERO admissions and no passenger hands. The
+// substitution can only act when the stock word is not NONE, so either the
+// word was already NONE or the wrapper is never reached for a seated player;
+// both mean the first-person models are suppressed somewhere upstream of this
+// call. Retained as evidence, kept out of the render hot path.
+inline constexpr bool kReachR_V24PassengerRenderAdmissionEnabled = false;
 
 // Reach's render_first_person_view wrapper skips both native first-person
 // passes when its output-user predicate is not NONE.  A VR-owned
@@ -1206,9 +1233,13 @@ inline bool ReachComposeSeatCameraPoint(
 // prevents a stale Reach module from naming a seat after title teardown.
 // An unmatched (generic) vehicle publishes the sentinel identity code so the
 // consumer chain (FpActive, recenter, body hide) still sees a live seat while
-// every identity-keyed decoder fail-closes: ReachVehicleTrimSnapshotSlot and
-// ReachCurrentSeat both reject codes above kReachVehicleIdentityCount, which
-// binds the F1 sliders to the universal trim and keeps wheel/steering off.
+// every identity-keyed decoder fail-closes: ReachCurrentSeat rejects codes
+// above kReachVehicleIdentityCount, which keeps wheel/steering off.
+// R-V25: ReachVehicleTrimSnapshotSlot no longer fails closed. It maps the
+// sentinel onto one dedicated unmatched trim row, because binding the F1
+// sliders to the shared universal trim while the player was sitting in a seat
+// is what let one session's turret tuning move every other seat in all three
+// titles.
 inline constexpr uint8_t kReachVehicleGenericIdentityCode = 0xFF;
 
 inline constexpr uint64_t ReachVehicleTrimSnapshot(
@@ -1232,8 +1263,11 @@ inline constexpr int ReachVehicleTrimSnapshotSlot(
         return -1;
     const int id = static_cast<int>((snapshot >> 8) & 0xFFu);
     const int seat = static_cast<int>(snapshot & 0xFFu) - 1;
-    if (id <= 0 || id > kReachVehicleIdentityCount || seat < 0 ||
-        seat >= seatsPerVehicle)
+    if (seat < 0 || seat >= seatsPerVehicle)
+        return -1;
+    if (id == static_cast<int>(kReachVehicleGenericIdentityCode))
+        return kReachVehicleIdentityCount * seatsPerVehicle + seat;
+    if (id <= 0 || id > kReachVehicleIdentityCount)
         return -1;
     return (id - 1) * seatsPerVehicle + seat;
 }

@@ -1174,7 +1174,12 @@ int main()
               kReachTagGetRva == 0x00031AE8 &&
               kReachTagGetBodySize == 0x7B,
             "Reach native seat-camera, marker, carrier, type and tag bindings are pinned");
-        Check(kReachVehicleIdentityCount == kReachVehicleTrimCount &&
+        // R-V25: the trim bank carries one row MORE than the identity list -
+        // the unmatched row every unresolved vehicle keys instead of the
+        // shared universal trim.
+        Check(kReachVehicleIdentityCount == kReachVehicleIdentityTrimCount &&
+              kReachVehicleTrimCount == kReachVehicleIdentityCount + 1 &&
+              kReachUnmatchedVehicleTrimId == kReachVehicleTrimCount &&
               ReachVehicleSeatIsPlayer(ReachVehicleId::Falcon, 0) &&
               ReachVehicleSeatIsPlayer(ReachVehicleId::Falcon, 3) &&
               ReachVehicleSeatIsPlayer(ReachVehicleId::Falcon, 4) &&
@@ -1332,8 +1337,13 @@ int main()
                   ReachVehicleId::Scorpion, scorpionRetail, 0) &&
               ReachVehiclePhysicsTypeMatches(
                   ReachVehicleId::Warthog, warthogRetail, 1) &&
-              !ReachVehiclePhysicsTypeMatches(
+              // R-V25: the chaingun Warthog is an HREK type-16 mounted weapon,
+              // so retail's turret bucket (6) is now an accepted pairing for
+              // its canonical tuple - measured on the rocket variant.
+              ReachVehiclePhysicsTypeMatches(
                   ReachVehicleId::WarthogChaingun, warthogChaingun, 6) &&
+              !ReachVehiclePhysicsTypeMatches(
+                  ReachVehicleId::WarthogChaingun, warthogChaingun, 8) &&
               !ReachVehiclePhysicsTypeMatches(
                   ReachVehicleId::Scorpion, scorpionHrek, 6) &&
               !ReachVehiclePhysicsTypeMatches(
@@ -2161,8 +2171,9 @@ int main()
             "Reach menu trim publication is generation-bound and slot-compatible");
         // An unmatched vehicle publishes the generic sentinel: the snapshot
         // stays generation-live (so FpActive, recenter and body hide keep
-        // working) while every identity-keyed decoder fails closed to the
-        // universal trim.
+        // working) and, since R-V25, decodes to the dedicated unmatched trim
+        // row. It must never decode to -1, which meant the shared universal
+        // trim and let a seated F1 edit move every other seat in every title.
         constexpr uint64_t reachGenericSnapshot = ReachVehicleTrimSnapshot(
             reachTrimGeneration, ReachVehicleId::Unknown, 2);
         Check(reachGenericSnapshot != 0 &&
@@ -2172,11 +2183,15 @@ int main()
                   kReachVehicleGenericIdentityCode &&
               ReachVehicleTrimSnapshotSlot(
                   reachGenericSnapshot, reachTrimGeneration,
-                  kReachVehicleSeatSlots) == -1 &&
+                  kReachVehicleSeatSlots) ==
+                  ConfigReachSeatTrimSlot(kReachUnmatchedVehicleTrimId, 2) &&
+              ReachVehicleTrimSnapshotSlot(
+                  reachGenericSnapshot, reachTrimGeneration,
+                  kReachVehicleSeatSlots) >= 0 &&
               ReachVehicleTrimSnapshot(0, ReachVehicleId::Unknown, 2) == 0 &&
               ReachVehicleTrimSnapshot(
                   reachTrimGeneration, ReachVehicleId::Unknown, 16) == 0,
-            "An unmatched Reach seat stays live under the generic sentinel and binds F1 to the universal trim");
+            "An unmatched Reach seat stays live under the generic sentinel and keys its own trim row");
 
         constexpr float kReachTestIpdMeters = 0.064f;
         Check(std::isfinite(kReachWorldUnitsPerMeter) &&
@@ -5507,19 +5522,66 @@ int main()
     const int reachFalcon10 = ConfigReachSeatTrimSlot(12, 10);
     const int reachMachinegun15 = ConfigReachSeatTrimSlot(20, 15);
     const int reachDropPod15 = ConfigReachSeatTrimSlot(34, 15);
+    const int reachUnmatched0 =
+        ConfigReachSeatTrimSlot(kReachUnmatchedVehicleTrimId, 0);
+    const int reachUnmatched15 =
+        ConfigReachSeatTrimSlot(kReachUnmatchedVehicleTrimId, 15);
     Check(reachBanshee0 == 0 &&
-              reachDropPod15 == kReachVehicleTrimSlots - 1 &&
+              reachDropPod15 == 34 * kReachVehicleSeatSlots - 1 &&
+              reachUnmatched0 == 34 * kReachVehicleSeatSlots &&
+              reachUnmatched15 == kReachVehicleTrimSlots - 1 &&
               reachMachinegun15 == 20 * kReachVehicleSeatSlots - 1 &&
               reachFalcon10 != reachBanshee0 &&
               !strcmp(kReachVehicleTrimNames[0], "banshee") &&
               !strcmp(kReachVehicleTrimNames[19], "machinegun") &&
               !strcmp(kReachVehicleTrimNames[20], "mac_cannon") &&
               !strcmp(kReachVehicleTrimNames[33], "squad_drop_pod") &&
+              !strcmp(kReachVehicleTrimNames[34], "unmatched") &&
               ConfigReachSeatTrimSlot(0, 0) == -1 &&
-              ConfigReachSeatTrimSlot(35, 0) == -1 &&
+              ConfigReachSeatTrimSlot(36, 0) == -1 &&
               ConfigReachSeatTrimSlot(12, -1) == -1 &&
               ConfigReachSeatTrimSlot(12, 16) == -1,
         "Reach vehicle names and raw seat indices map to a bounded independent bank");
+    // R-V25: an unmatched vehicle's seat must key its own row, so a seated F1
+    // adjustment can never reach the universal trim shared by all three
+    // titles. This is the exact defect the 2026-08-06 session hit.
+    {
+        const uint64_t unmatchedSnapshot = ReachVehicleTrimSnapshot(
+            7u, ReachVehicleId::Unknown, 3);
+        const uint64_t knownSnapshot = ReachVehicleTrimSnapshot(
+            7u, ReachVehicleId::Warthog, 1);
+        Check(ReachVehicleTrimSnapshotSlot(
+                  unmatchedSnapshot, 7u, kReachVehicleSeatSlots) ==
+                  ConfigReachSeatTrimSlot(kReachUnmatchedVehicleTrimId, 3) &&
+              ReachVehicleTrimSnapshotSlot(
+                  knownSnapshot, 7u, kReachVehicleSeatSlots) ==
+                  ConfigReachSeatTrimSlot(
+                      static_cast<int>(ReachVehicleId::Warthog), 1) &&
+              ReachVehicleTrimSnapshotSlot(
+                  unmatchedSnapshot, 8u, kReachVehicleSeatSlots) == -1,
+            "An unmatched Reach seat keys its own trim row, never the universal trim");
+    }
+    // The retail maps report the official type-turret physics block for HREK's
+    // type-16 mounted weapons. Measured 2026-08-06: the rocket Warthog turret
+    // arrived as the canonical HREK tuple with observed type 6 and was
+    // rejected, which is what dropped it onto the universal trim.
+    {
+        const ReachVehicleFingerprint rocketHog{
+            0x3F12852A, 0x3DC5E04F, 0x3BE1BCFB, 0x3EA9708D};
+        const ReachVehicleFingerprint warthog{
+            0x3F978072, 0xBD406A82, 0xBAD03632, 0x3EC25783};
+        Check(ReachVehiclePhysicsTypeMatches(
+                  ReachVehicleId::WarthogRocket, rocketHog, 6) &&
+              ReachVehiclePhysicsTypeMatches(
+                  ReachVehicleId::WarthogRocket, rocketHog, 16) &&
+              !ReachVehiclePhysicsTypeMatches(
+                  ReachVehicleId::WarthogRocket, rocketHog, 8) &&
+              ReachVehiclePhysicsTypeMatches(
+                  ReachVehicleId::Warthog, warthog, 1) &&
+              !ReachVehiclePhysicsTypeMatches(
+                  ReachVehicleId::Warthog, warthog, 6),
+            "HREK type-16 mounted weapons also resolve at retail's turret physics type");
+    }
     // The completed Blender scene is the standalone product default, not a
     // Steam-only side effect of whichever config happened to be edited.
     {
@@ -5586,18 +5648,31 @@ int main()
         // F1's seat reset is not representable by deleting numeric keys now
         // that absence selects the shipped Blender row. The explicit
         // tombstone must survive save/load and suppress all three numeric axes.
+        // R-V25: the tombstone returns the seat to its AUTHORED row, not to
+        // the shared universal trim. The 2026-08-06 session proved why - a
+        // polluted universal reached the Warthog driver through its tombstone
+        // and moved the seat by nearly a metre. Only a seat with no authored
+        // row (the unmatched row) still follows the universal.
         g_config.vehicle_cam_forward_m = 0.34f;
         g_config.vehicle_cam_up_m = -0.27f;
         g_config.vehicle_cam_right_m = 0.19f;
         ConfigReachSeatUseUniversalTrim(g_config, scorpion0);
+        const int reachUnmatchedSeat0 =
+            ConfigReachSeatTrimSlot(kReachUnmatchedVehicleTrimId, 0);
         Check(g_config.reach_vehicle_cam_use_universal[scorpion0] &&
                   !g_config.reach_vehicle_cam_forward_set[scorpion0] &&
                   !g_config.reach_vehicle_cam_up_set[scorpion0] &&
                   !g_config.reach_vehicle_cam_right_set[scorpion0] &&
-                  ConfigReachSeatCamForward(g_config, scorpion0) == 0.34f &&
-                  ConfigReachSeatCamUp(g_config, scorpion0) == -0.27f &&
-                  ConfigReachSeatCamRight(g_config, scorpion0) == 0.19f,
-            "Reach Back to universal clears all axes and displays the universal triplet");
+                  ConfigReachSeatCamForward(g_config, scorpion0) == 0.00f &&
+                  ConfigReachSeatCamUp(g_config, scorpion0) == 2.69f &&
+                  ConfigReachSeatCamRight(g_config, scorpion0) == 0.00f &&
+                  ConfigReachSeatCamForward(
+                      g_config, reachUnmatchedSeat0) == 0.34f &&
+                  ConfigReachSeatCamUp(
+                      g_config, reachUnmatchedSeat0) == -0.27f &&
+                  ConfigReachSeatCamRight(
+                      g_config, reachUnmatchedSeat0) == 0.19f,
+            "Reach Back to authored point restores the Blender row, never the universal trim");
         ConfigSave();
         const std::string universalReachConfig = ReadTextFile(primary);
         Check(CountText(universalReachConfig,
@@ -5614,13 +5689,14 @@ int main()
                   !g_config.reach_vehicle_cam_forward_set[scorpion0] &&
                   !g_config.reach_vehicle_cam_up_set[scorpion0] &&
                   !g_config.reach_vehicle_cam_right_set[scorpion0] &&
-                  ConfigReachSeatCamForward(g_config, scorpion0) == 0.34f &&
-                  ConfigReachSeatCamUp(g_config, scorpion0) == -0.27f &&
-                  ConfigReachSeatCamRight(g_config, scorpion0) == 0.19f,
-            "Reach Back to universal survives a config reload");
+                  ConfigReachSeatCamForward(g_config, scorpion0) == 0.00f &&
+                  ConfigReachSeatCamUp(g_config, scorpion0) == 2.69f &&
+                  ConfigReachSeatCamRight(g_config, scorpion0) == 0.00f,
+            "Reach Back to authored point survives a config reload");
 
         // This is the pure state transition used immediately before any of the
-        // three F1 sliders writes its changed axis.
+        // three F1 sliders writes its changed axis. It must capture exactly
+        // what the sliders were displaying - the authored row.
         ConfigReachSeatBeginTrimEdit(g_config, scorpion0);
         g_config.reach_vehicle_cam_forward_v[scorpion0] = 0.88f;
         Check(!g_config.reach_vehicle_cam_use_universal[scorpion0] &&
@@ -5628,15 +5704,15 @@ int main()
                   g_config.reach_vehicle_cam_up_set[scorpion0] &&
                   g_config.reach_vehicle_cam_right_set[scorpion0] &&
                   ConfigReachSeatCamForward(g_config, scorpion0) == 0.88f &&
-                  ConfigReachSeatCamUp(g_config, scorpion0) == -0.27f &&
-                  ConfigReachSeatCamRight(g_config, scorpion0) == 0.19f,
-            "The first F1 move after reset preserves the other displayed universal axes");
+                  ConfigReachSeatCamUp(g_config, scorpion0) == 2.69f &&
+                  ConfigReachSeatCamRight(g_config, scorpion0) == 0.00f,
+            "The first F1 move after reset preserves the other displayed authored axes");
         ConfigSave();
         ConfigLoad(primary.c_str());
         Check(!g_config.reach_vehicle_cam_use_universal[scorpion0] &&
                   ConfigReachSeatCamForward(g_config, scorpion0) == 0.88f &&
-                  ConfigReachSeatCamUp(g_config, scorpion0) == -0.27f &&
-                  ConfigReachSeatCamRight(g_config, scorpion0) == 0.19f,
+                  ConfigReachSeatCamUp(g_config, scorpion0) == 2.69f &&
+                  ConfigReachSeatCamRight(g_config, scorpion0) == 0.00f,
             "The first post-reset Reach slider triplet survives save/load");
 
         // A hand-edited or stale file can contain both shapes. Any valid

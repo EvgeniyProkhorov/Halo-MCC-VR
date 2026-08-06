@@ -105,7 +105,17 @@ inline constexpr int kOdstVehicleTrimSlots =
 // until tuned live in F1. Rows 1-20 carry the user's completed 25-camera
 // Blender lineup through kConfigReachShippedSeatTrims below. Existing keys keep
 // their exact spelling.
-inline constexpr int kReachVehicleTrimCount = 34;
+// R-V25: row 35 is not an identity. Before it existed, sitting in a vehicle
+// whose tuple did not resolve left the F1 sliders bound to the UNIVERSAL trim,
+// so a user adjusting that seat silently rewrote the base every unadjusted
+// Halo 3, ODST and Reach seat follows. The 2026-08-06 session did exactly that
+// (universal 0.10/0.05 -> -0.765/0.894 while seated in an unmatched turret).
+// Halo 3's contract is "sitting in a seat always adjusts that seat alone", so
+// every unmatched Reach seat now shares this one row instead.
+inline constexpr int kReachVehicleIdentityTrimCount = 34;
+inline constexpr int kReachVehicleTrimCount =
+    kReachVehicleIdentityTrimCount + 1;
+inline constexpr int kReachUnmatchedVehicleTrimId = kReachVehicleTrimCount;
 inline constexpr const char* kReachVehicleTrimNames[kReachVehicleTrimCount] = {
     "banshee", "space_banshee", "ghost", "revenant", "wraith",
     "wraith_gunner", "mongoose", "warthog", "warthog_chaingun",
@@ -115,7 +125,7 @@ inline constexpr const char* kReachVehicleTrimNames[kReachVehicleTrimCount] = {
     "pelican", "pelican_chin_gun", "corvette_cannon",
     "space_phantom_chin_gun", "space_phantom_beam_turret", "cargo_truck",
     "military_truck", "oni_van", "pickup", "truck_cab_large",
-    "squad_drop_pod"};
+    "squad_drop_pod", "unmatched"};
 inline constexpr int kReachVehicleSeatSlots = 16;
 inline constexpr const char*
     kReachVehicleSeatNames[kReachVehicleSeatSlots] = {
@@ -136,6 +146,12 @@ inline constexpr float kVehicleCamUpMin = -1.00f;
 inline constexpr float kVehicleCamUpMax = 1.50f;
 inline constexpr float kVehicleCamRightMin = -1.00f;
 inline constexpr float kVehicleCamRightMax = 1.00f;
+// The shipped universal trim. Named so the F1 panel can offer a one-click
+// reset: this one triplet is shared by Halo 3, ODST and every Reach seat with
+// no line of its own, so a wrong value here moves seats in all three titles.
+inline constexpr float kVehicleCamForwardDefault = 0.10f;
+inline constexpr float kVehicleCamUpDefault = 0.05f;
+inline constexpr float kVehicleCamRightDefault = 0.0f;
 
 // Reach's HREK marker seeds are not consistently authored at the player's
 // eye. The validated 25-seat Blender lineup therefore contains legitimate
@@ -383,9 +399,10 @@ struct Config
     // Blender-authored point instead of the third-person chase position; head
     // look and leaning stay fully live. 0 restores the stock chase view.
     bool vehicle_first_person = true;
-    float vehicle_cam_forward_m = 0.10f; // + = toward the windshield
-    float vehicle_cam_up_m = 0.05f;      // + = raise out of the seat
-    float vehicle_cam_right_m = 0.0f;    // + = toward the vehicle's right
+    // + = toward the windshield / raise out of the seat / vehicle's right.
+    float vehicle_cam_forward_m = kVehicleCamForwardDefault;
+    float vehicle_cam_up_m = kVehicleCamUpDefault;
+    float vehicle_cam_right_m = kVehicleCamRightDefault;
     // Per-SEAT overrides of the three trims above. An entry only exists once the
     // user adjusts the F1 sliders while SITTING IN that seat (or writes the
     // config line by hand); every other seat keeps following the universal
@@ -843,33 +860,81 @@ inline float ConfigOdstSeatCamRight(const Config& c, int slot)
     return c.vehicle_cam_right_m;
 }
 
+// R-V25: the Blender lineup is the BASE of a Reach seat, so a slot that has an
+// authored row must never fall through to the shared universal trim. The
+// 2026-08-06 session proved why: a polluted universal (-0.765 / +0.894) reached
+// the Warthog driver through its `use_universal` tombstone and moved the seat
+// almost a metre. `outHasBase` reports whether the row exists so the F1 slider
+// can hang Halo 3's own travel off it.
+inline constexpr bool ConfigReachSeatAuthoredBase(
+    int slot, float* outForward, float* outUp, float* outRight)
+{
+    if (outForward)
+        *outForward = 0.0f;
+    if (outUp)
+        *outUp = 0.0f;
+    if (outRight)
+        *outRight = 0.0f;
+    if (slot < 0 || slot >= kReachVehicleTrimSlots)
+        return false;
+    for (const ConfigReachShippedSeatTrim& trim : kConfigReachShippedSeatTrims)
+    {
+        if (ConfigReachSeatTrimSlot(trim.vehicleId, trim.seatIndex) != slot)
+            continue;
+        if (outForward)
+            *outForward = trim.forward;
+        if (outUp)
+            *outUp = trim.up;
+        if (outRight)
+            *outRight = trim.right;
+        return true;
+    }
+    return false;
+}
+
 // Reach's bank follows the same universal fallback contract without sharing
-// storage with Halo 3 or ODST. A serialized seat tombstone wins over the
-// built-in Blender row and makes all three displayed axes universal.
+// storage with Halo 3 or ODST. A serialized seat tombstone returns the seat to
+// its authored Blender base; only a seat that never had one follows the
+// universal trim.
 inline float ConfigReachSeatCamForward(const Config& c, int slot)
 {
-    if (slot >= 0 && slot < kReachVehicleTrimSlots &&
-        !c.reach_vehicle_cam_use_universal[slot] &&
-        c.reach_vehicle_cam_forward_set[slot])
-        return c.reach_vehicle_cam_forward_v[slot];
+    if (slot >= 0 && slot < kReachVehicleTrimSlots)
+    {
+        if (!c.reach_vehicle_cam_use_universal[slot] &&
+            c.reach_vehicle_cam_forward_set[slot])
+            return c.reach_vehicle_cam_forward_v[slot];
+        float authored = 0.0f;
+        if (ConfigReachSeatAuthoredBase(slot, &authored, nullptr, nullptr))
+            return authored;
+    }
     return c.vehicle_cam_forward_m;
 }
 
 inline float ConfigReachSeatCamUp(const Config& c, int slot)
 {
-    if (slot >= 0 && slot < kReachVehicleTrimSlots &&
-        !c.reach_vehicle_cam_use_universal[slot] &&
-        c.reach_vehicle_cam_up_set[slot])
-        return c.reach_vehicle_cam_up_v[slot];
+    if (slot >= 0 && slot < kReachVehicleTrimSlots)
+    {
+        if (!c.reach_vehicle_cam_use_universal[slot] &&
+            c.reach_vehicle_cam_up_set[slot])
+            return c.reach_vehicle_cam_up_v[slot];
+        float authored = 0.0f;
+        if (ConfigReachSeatAuthoredBase(slot, nullptr, &authored, nullptr))
+            return authored;
+    }
     return c.vehicle_cam_up_m;
 }
 
 inline float ConfigReachSeatCamRight(const Config& c, int slot)
 {
-    if (slot >= 0 && slot < kReachVehicleTrimSlots &&
-        !c.reach_vehicle_cam_use_universal[slot] &&
-        c.reach_vehicle_cam_right_set[slot])
-        return c.reach_vehicle_cam_right_v[slot];
+    if (slot >= 0 && slot < kReachVehicleTrimSlots)
+    {
+        if (!c.reach_vehicle_cam_use_universal[slot] &&
+            c.reach_vehicle_cam_right_set[slot])
+            return c.reach_vehicle_cam_right_v[slot];
+        float authored = 0.0f;
+        if (ConfigReachSeatAuthoredBase(slot, nullptr, nullptr, &authored))
+            return authored;
+    }
     return c.vehicle_cam_right_m;
 }
 
@@ -883,17 +948,18 @@ inline void ConfigReachSeatUseUniversalTrim(Config& c, int slot)
     c.reach_vehicle_cam_use_universal[slot] = true;
 }
 
-// The first F1 move after an explicit universal reset converts the whole
-// displayed triplet into a seat override before changing one axis. Otherwise
-// the two untouched sliders would silently snap back to the baked Blender row.
+// The first F1 move after an explicit reset converts the whole displayed
+// triplet into a seat override before changing one axis. It must capture
+// exactly what the sliders are showing, which is the authored Blender row when
+// the seat has one and the universal trim only when it does not.
 inline void ConfigReachSeatBeginTrimEdit(Config& c, int slot)
 {
     if (slot < 0 || slot >= kReachVehicleTrimSlots ||
         !c.reach_vehicle_cam_use_universal[slot])
         return;
-    c.reach_vehicle_cam_forward_v[slot] = c.vehicle_cam_forward_m;
-    c.reach_vehicle_cam_up_v[slot] = c.vehicle_cam_up_m;
-    c.reach_vehicle_cam_right_v[slot] = c.vehicle_cam_right_m;
+    c.reach_vehicle_cam_forward_v[slot] = ConfigReachSeatCamForward(c, slot);
+    c.reach_vehicle_cam_up_v[slot] = ConfigReachSeatCamUp(c, slot);
+    c.reach_vehicle_cam_right_v[slot] = ConfigReachSeatCamRight(c, slot);
     c.reach_vehicle_cam_forward_set[slot] = true;
     c.reach_vehicle_cam_up_set[slot] = true;
     c.reach_vehicle_cam_right_set[slot] = true;
