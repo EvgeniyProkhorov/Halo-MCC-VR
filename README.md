@@ -1,17 +1,53 @@
 ### REACH/3/ODST Now Playable in VR 
-### Halo 3 first-person vehicles are here. Reach and ODST first-person vehicles are up next.
+### First-person vehicles are here — in all three games.
 
-## 🆕 What's new in 0.3.2
+> # ⚠️ Before you drive: you have to set up your own seats
+>
+> Every seat ships with a starting camera position, but that is a **starting
+> point, not a finished setting**. Everyone's height, play space and headset sit
+> differently, so a seat that looks right for me will be too low, too far
+> forward or too far back for you. **This is normal and it is a one-time job per
+> seat.**
+>
+> 1. Get into the seat you want to fix — driver, passenger, gunner or turret.
+> 2. Press **F1** and open the **Vehicles** category.
+> 3. Move **Seat forward (m)**, **Seat height (m)** and **Seat left / right (m)**
+>    until it feels right.
+> 4. Get out. It saves itself.
+>
+> While you're **in a seat**, those sliders move **that seat only** — a
+> vehicle's driver, its passengers and its gunner each remember their own spot,
+> in each game. Do the ones you actually use and ignore the rest.
+>
+> While you're **on foot**, the same sliders set the shared starting point every
+> seat you haven't adjusted follows. That one moves all three games at once, so
+> use it for a quick overall height nudge. If you push it somewhere bad, a
+> **Reset the universal trim** button appears under the sliders.
 
-1. **Halo 3 first-person vehicles** — sit in the vehicle instead of floating
-   behind it, with stable vehicle-relative hands, a hidden body, seat
-   recentering, and comfort controls in `halomccvr.cfg`.
-2. **Vehicle view follow** — optionally follow ground-vehicle yaw and pitch for
-   a more connected ride; aircraft remain yaw-only.
-3. **Halo 3 animated crosshair restored** — native authored reticle animation
-   is back without sacrificing the tested capture cadence.
-4. **Reach damage-bloom crosshair fix** — the crosshair stays visible when a
-   damage reaction would otherwise push the captured art out of frame.
+## 🆕 What's new in 0.3.3
+
+1. **First-person vehicles in ODST and Reach** — the Halo 3 vehicle mode from
+   0.3.2 now covers all three games. Sit in the seat instead of floating behind
+   the vehicle, with your hands on the wheel, your own body hidden, and every
+   seat placed: drivers, passengers, gunners and turrets.
+2. **Turrets hold still and shoot where you're pointing** — mounted turrets in
+   Halo 3 and ODST used to twitch up and down chasing the crosshair. They sit
+   still now, and the reticle rides the gun barrel, so what you see is where the
+   shot goes.
+3. **Passenger guns shoot down the sight line** — riding shotgun in a Warthog,
+   your shots now leave the line you're actually aiming down at every range,
+   instead of only lining up at one distance.
+4. **The brightness slider works in ODST and Reach** — `game_brightness` used to
+   move Halo 3 only. One slider now moves all three games.
+5. **No more loading a level twice** — the mod no longer touches a game while
+   its level is still loading, which is what used to bounce you back to the main
+   menu on the first load.
+6. **Faster into VR** — ODST reaches stereo about two seconds sooner, and the
+   startup scan every game does is roughly 7× faster.
+7. **Your seat settings can't be wiped any more** — an unrecognised vehicle used
+   to write over the shared setting that all three games fall back on. Each
+   vehicle now keeps its own line, and there's a one-click reset if the shared
+   one ever looks wrong.
 
 ## 🚧 What I'm working on RN
 | Feature                                            | Status         |
@@ -22,8 +58,10 @@
 | Complete F1 Menu UI Restructure and Reorganization | ✅ Added in 0.3.1 |
 | Reach: black-world fix on sniper                   | ✅ Fixed in 0.3.1 |
 | Halo 3 first-person vehicles                       | ✅ Added in 0.3.2 |
-| Reach first-person vehicles                        | 🟡 Up next |
-| ODST first-person vehicles                         | 🟡 Up next |
+| ODST first-person vehicles                         | ✅ Added in 0.3.3 |
+| Reach first-person vehicles                        | ✅ Added in 0.3.3 |
+| Turret aim + brightness in ODST/Reach              | ✅ Fixed in 0.3.3 |
+| Halo 4                                             | 🟡 Up next |
 | SMAA T2X Support                                   | not possilbe atm |
 | Gamepad support/Head-Aiming Mode                   | 🟡 In Progress |
 | Scopes and weapon zoom fixes                       | 🟡 In Progress |
@@ -64,13 +102,15 @@ Master Chief Collection — both the Steam edition and the Microsoft Store / Xbo
 app (Game Pass) edition.
 
 The current release is
-[Halo 3 Vehicle Update — MCC VR Alpha 0.3.2](https://github.com/pancreations/Halo-MCC-VR/releases/tag/MCC_VR_ALPHA_0.3.2).
-It adds **first-person Halo 3 vehicles** with vehicle-relative hands, body
-hiding, seat recentering, optional view follow, and comfort tuning. It also
-restores Halo 3's animated authored crosshair and fixes the Reach crosshair
-disappearing during damage bloom. It is an alpha: use it at your own risk,
-launch only without anti-cheat, and expect incomplete hardware and gameplay
-coverage.
+[FP Vehicle Update — MCC VR Alpha 0.3.3](https://github.com/pancreations/Halo-MCC-VR/releases/tag/MCC_VR_ALPHA_0.3.3).
+It brings **first-person vehicles to all three games**: ODST and Reach join
+Halo 3, with every seat placed — drivers, passengers, gunners and turrets — plus
+vehicle-relative hands, body hiding, seat recentering, optional view follow, and
+per-seat tuning in the F1 menu. It also stops turrets twitching, puts passenger
+and turret shots on the sight line, makes the brightness slider work in ODST and
+Reach, and fixes having to load a level twice. It is an alpha: use it at your
+own risk, launch only without anti-cheat, and expect incomplete hardware and
+gameplay coverage.
 
 ## What works
 
@@ -81,15 +121,24 @@ coverage.
   comfort controls, and a shared F1 configuration menu.
 - Halo 3 campaign behavior, including cutscenes, pause/resume, death/respawn,
   and mission transitions.
-- Halo 3 first-person vehicles: a cockpit-style seat view, stable
-  vehicle-relative hands, optional body hiding, seat recentering, and an
-  optional ground-vehicle view-follow mode. New in 0.3.2.
+- **First-person vehicles in all three games**: a cockpit-style seat view,
+  stable vehicle-relative hands, optional body hiding, seat recentering, an
+  optional ground-vehicle view-follow mode, and per-seat position sliders in the
+  F1 menu. Halo 3 was new in 0.3.2; ODST and Reach are new in 0.3.3. Drivers,
+  passengers, gunners and mounted turrets are all covered, including the
+  Warthog's chaingun/gauss/rocket variants, Scorpion, Wraith, Ghost, Revenant,
+  Banshee, Falcon, Mongoose, Chopper, Prowler, Hornet and the Covenant Shade
+  turrets.
+- Turret seats hold still instead of twitching, and the reticle rides the gun
+  barrel so shots go where the crosshair is. New in 0.3.3.
 - ODST stereo, controls, weapons/hands, native HUD, cutscenes, vibration,
-  death/respawn recovery, and one tested drivable car.
+  death/respawn recovery, and first-person vehicles.
 - Halo: Reach stereo, controls, weapon aim, hands/gun, HUD, cutscenes and
   vibration, plus native vehicle controls and a fix for sniper-triggered black
-  static-world geometry, both new in 0.3.1. Reach is new in 0.3.0 and is the
-  earliest of the three titles.
+  static-world geometry, both new in 0.3.1, and first-person vehicles new in
+  0.3.3. Reach is new in 0.3.0 and is the earliest of the three titles.
+- The `game_brightness` slider moves all three games. New in 0.3.3 — it used to
+  affect Halo 3 only.
 - Both MCC editions from one download: Steam, and Microsoft Store / Xbox app
   (Game Pass). All three titles work on either, and no game file is renamed.
 - A room-fixed 3D cutscene theatre for all three games, new in 0.3.1: cutscenes
@@ -110,15 +159,17 @@ Known limitations:
   once; do not repeatedly skip or you will miss the working drop sequence.
 - MCC can retain multiple title modules after switching games. If a level
   returns to the menu, fully close and restart MCC.
-- ODST brightness stays at the game default.
 - On Reach, character tags and navpoints are misplaced in 3D, and the
   `hud_curvature` and `hud_vertical_offset` settings have no effect.
 - The right stick still turns you while the F1 menu is open.
 - **Microsoft Store / Game Pass only: MCC freezes for about nine seconds on the
   first loading screen. It has not crashed — wait it out.** See below.
-- First-person vehicles for Reach and ODST are upcoming. Broader ODST and Reach
-  weapon, turret, passenger-gun, vehicle, co-op, headset, and long-session
-  coverage is still needed.
+- **Vehicle seats need your own adjustment** — see the notice at the top. The
+  shipped positions are a starting point, not a finished setting.
+- In Reach passenger seats your floating hands aren't drawn yet. The seat, the
+  aim and the shooting work; the hands are still being chased down.
+- Broader co-op, headset and long-session coverage is still needed across all
+  three games.
 
 ### Game Pass: the nine-second freeze on the first loading screen
 
@@ -156,7 +207,7 @@ There is no installer script. Both the Steam copy of MCC and the Microsoft Store
 needs any game file renamed.
 
 1. Download the binary asset
-   `MCC_VR_ALPHA_0.3.2.zip` from the official `0.3.2` release page.
+   `MCC_VR_ALPHA_0.3.3.zip` from the official `0.3.3` release page.
 2. Open MCC's main game folder — the one that contains the `MCC` folder.
    - **Steam:** **Manage > Browse local files**.
    - **Microsoft Store / Game Pass:** in the Xbox app, **... > Manage > Files >
@@ -188,7 +239,7 @@ If you previously renamed `MCCWinStore-Win64-Shipping.exe` to the Steam name to
 force an older build to launch, rename it back. The launcher records the edition
 it detected in `halo3xr_launcher.log`.
 
-### Updating to 0.3.2 — replace your config
+### Updating to 0.3.3 — replace your config
 
 **Replace `halomccvr.cfg` with the one in the ZIP. Do not keep your old one.**
 This is different from updates before 0.3.0, which told you to keep it.
@@ -198,7 +249,9 @@ no migration step: any setting your old file is missing silently falls back to a
 built-in default rather than the shipped value. The most visible casualty is
 `fit_desktop_window`, whose built-in default is off while the shipped config
 turns it on — keeping an old config can therefore cap your headset frame rate.
-Sharpening, HUD and weapon-alignment values regress the same way.
+Sharpening, HUD and weapon-alignment values regress the same way. 0.3.3 adds the
+whole first-person vehicle block, including a starting position for every ODST
+and Reach seat, which an older config has no equivalent for at all.
 
 The shipped config is a tuned, tested configuration rather than bare defaults.
 If you want your own tuning back, copy your old `halomccvr.cfg` somewhere safe
@@ -209,12 +262,13 @@ OpenXR runtime, fully close every MCC process before relaunching, compare the
 installed hashes below, and compare `halomccvr.cfg`. Do not use a repository
 build folder as an installation source.
 
-Release `0.3.2` hashes:
+Release `0.3.3` hashes:
 
 ```text
-ZIP      A7702E2EBEFB42F30B73D684712476FA5E808256EE32A45BE77F08FFA3C81BD6
-DLL      B5B5CAC121BB934213DB82536CB3580F1A5592C58466B5495227A10ABF22A369
-Launcher D0EBE57BBE7CD5092AEDF052DCE3C4F283E16795CBCDA715566ED4D23A15DFF0
+ZIP      C1CC84C1F2278E622F0A439E4DC3791A4E2264DEE8F1F71E48D61346D3AFE69D
+DLL      44A82E28B65F8FD6D0A52FF2C87A55C37EFC8B5888DEE6836DEE9AEF89DE026D
+Launcher 930BEA232BFC3F8010BC2B385834DEBF796CD3DBEC02ECD0E8475E0DE8A72CE6
+Config   E941BC189B57B9ED11EB62DCF8D6AE1C5787936074C2358EB6AF99A377C97975
 ```
 
 Windows security software may flag or quarantine unsigned injection-based VR

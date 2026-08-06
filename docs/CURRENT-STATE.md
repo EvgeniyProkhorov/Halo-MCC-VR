@@ -1,18 +1,16 @@
 # Current state
 
-Authoritative as of 2026-07-30. This file is the only active accepted-build
+Authoritative as of 2026-08-06. This file is the only active accepted-build
 pointer. Detailed pre-cleanup experiments remain available in Git history; they
 are evidence, not instructions.
 
-> **Start here: "PUBLIC RELEASE: MCC VR Alpha 0.3.1 - 2026-07-30" below is the
-> current published state, and "DEVELOPMENT BASELINE: Reach first-person
-> vehicles - 2026-08-06" is the current development baseline that the next
-> hotfix/feature update builds on. Read its open list before relying on
-> anything in it - it was set by a "good enough for now" directive, not a
-> per-item acceptance, and it still owes a Halo 3/ODST regression. It descends
-> from the ODST first-person vehicle baseline, which descends from the Halo 3
-> animated CHUD crosshair baseline, which descends from the Halo 3
-> first-person vehicle baseline.**
+> **Start here: "PUBLIC RELEASE: MCC VR Alpha 0.3.3 - 2026-08-06" below is both
+> the current published state AND the current development baseline. Halo 4
+> bring-up starts from it.** It supersedes the 0.3.1 public release and the
+> 2026-08-06 Reach first-person vehicle development baseline, which are both
+> retained below for their per-behavior evidence and their open lists. Every
+> item still open on the Reach vehicle line carries forward - read it before
+> relying on anything.
 > Everything dated earlier is history.
 > Several older sections describe Reach features as impossible, mandatory, or
 > not yet built that have since been built and headset-confirmed - in
@@ -26,9 +24,75 @@ are evidence, not instructions.
 > instead of checked. If a comment or doc says a title cannot do something,
 > verify it against the code before building on it.
 
-## DEVELOPMENT BASELINE: Reach first-person vehicles - 2026-08-06
+## PUBLIC RELEASE: MCC VR Alpha 0.3.3 - 2026-08-06
 
-**The development baseline is now source
+**The public known-good product and the development baseline are both now
+`MCC_VR_ALPHA_0.3.3`, the FP Vehicle Update.** It supersedes
+`MCC_VR_ALPHA_0.3.2` publicly and supersedes the Reach first-person vehicle
+development baseline `558d0bf` recorded below. The user's directive on this
+exact source and DLL: "the dll i tested on steam is the best version we have
+and our new baseline once we begin halo 4."
+
+| Identity | Value |
+| --- | --- |
+| Runtime source | `94dc09fd0a6579d723de71792ae4c3f62ce4fb7e` |
+| Build | Release x64, preset `release`, ODST ON, Reach ON, ReachRender ON |
+| Candidate package | `out/candidates/94dc09f-reach-fp-parity-20260806-150849513Z` |
+| `halo3xr.dll` SHA-256 | `44A82E28B65F8FD6D0A52FF2C87A55C37EFC8B5888DEE6836DEE9AEF89DE026D` |
+| `halo3xr_launcher.exe` SHA-256 | `930BEA232BFC3F8010BC2B385834DEBF796CD3DBEC02ECD0E8475E0DE8A72CE6` |
+| `halomccvr.cfg` SHA-256 | `E941BC189B57B9ED11EB62DCF8D6AE1C5787936074C2358EB6AF99A377C97975` |
+| ZIP SHA-256 | `C1CC84C1F2278E622F0A439E4DC3791A4E2264DEE8F1F71E48D61346D3AFE69D` |
+| Title coverage | Halo 3, Halo 3: ODST, Halo: Reach |
+| Installed editions | Steam and Microsoft Store; DLL, launcher and config hashes verified independently in both `Halo_MCC_VR` folders |
+| Accepted run | Steam edition, VirtualDesktopXR 1.0.10, Meta Quest 3, session starting `10:12:30` on this exact source (`halo3xr.log` records `source 94dc09f...`) |
+| Headset result | Accepted. The Microsoft Store install was separately confirmed to run, but the tuning and the acceptance run were both on Steam. |
+
+**The shipped `halomccvr.cfg` is the user's live Steam config**, copied verbatim
+at packaging time, at the user's explicit direction: the Steam edition is where
+the 0.3.3 seat tuning was performed, and the Store install was only checked for
+liveness. Its universal trim is intact at the accepted `0.10 / 0.05 / 0.00`.
+
+**Release contents over 0.3.2**, all from the 67 commits in
+`MCC_VR_ALPHA_0.3.2..94dc09f`; the user-facing wording is in
+`releases/0.3.3/RELEASE-NOTES.md` and the full itemisation in
+`releases/0.3.3/manifest.json`:
+
+1. **First-person vehicles in ODST and Reach**, completing all three titles.
+   Every seat placed, each with its own config line and F1 sliders.
+2. **Turret aim parked and the reticle moved onto the barrel** (Halo 3, ODST).
+3. **Passenger shots on the sight line at every range** (all three titles).
+4. **Halo 3 seat entry faces the nose** whichever way `vehicle_view_follow` is
+   set.
+5. **The shared universal seat trim can no longer be destroyed** by an
+   unidentified vehicle, with a one-click reset and a loud config-load report.
+6. **`game_brightness` drives ODST and Reach**, plus an ODST steady-exposure
+   seat option.
+7. **Nothing is touched in a title whose level is still loading** - the fix for
+   the load bounce, widened from "do not install" to "do not touch".
+8. **Reach: a native pause no longer replays a seat entry on resume.**
+9. **Perf: ODST reaches stereo ~2 s sooner; signature scanning is ~7x faster**
+   with byte-identical results, tested against the original loop.
+
+**Open on this line - carried forward, do not treat as working:**
+
+- Reach passenger floating hands are still not drawn. Start from the
+  `ReachProcessFpPalette` collapse, not from the render gate; the engine's
+  first-person transaction ran 658 times during a 6 s passenger occupation, so
+  admission is not the fault.
+- ODST seat exposure hold, and the new ODST/Reach brightness paths, shipped in
+  the accepted build but were never individually confirmed in a headset.
+- Regression debt from R-V25's shared-code change is discharged only to the
+  extent the user's own play covered it; no enumerated Halo 3/ODST regression
+  pass was recorded.
+- Everything still open on the superseded baselines below carries forward.
+
+## SUPERSEDED DEVELOPMENT BASELINE: Reach first-person vehicles - 2026-08-06
+
+**Superseded the same day by the 0.3.3 public release above, which contains this
+line plus the Halo 3/ODST/turret/brightness/load-gate work built on top of it.**
+Retained for its per-behavior evidence and its open list.
+
+**The development baseline was source
 `558d0bf1ffec148ffe9b6088df52b00c05381bea` (`halo3xr.dll` SHA-256
 `F1DA4FA2FE34D20977C90342674DC7E4D81AF001801CF65F9C5A59613D95490F`).**
 The user directed this after running that exact build: "alright that's great,
@@ -210,10 +274,15 @@ shows a `H3 vehicle pitch follow:` transition and the live config ends with
 follow experience, not a component-level C25 acceptance; the baseline pointer
 below is unchanged. Details in `docs/HALO3-VEHICLE-EVIDENCE.md` C25 status.
 
-## PUBLIC RELEASE: MCC VR Alpha 0.3.1 - 2026-07-30
+## SUPERSEDED PUBLIC RELEASE: MCC VR Alpha 0.3.1 - 2026-07-30
 
-**The public known-good product is now `MCC_VR_ALPHA_0.3.1`, a hotfixes update
-over 0.3.0.** It supersedes `MCC_VR_ALPHA_0.3.0`.
+**Superseded publicly by `MCC_VR_ALPHA_0.3.2` and then by
+`MCC_VR_ALPHA_0.3.3` at the top of this file.** Retained for its per-behavior
+evidence; its policies (ship the maintainer's live config, replace rather than
+keep, tested bytes = shipped bytes) all still apply.
+
+**The public known-good product was `MCC_VR_ALPHA_0.3.1`, a hotfixes update
+over 0.3.0.** It superseded `MCC_VR_ALPHA_0.3.0`.
 
 | Identity | Value |
 | --- | --- |

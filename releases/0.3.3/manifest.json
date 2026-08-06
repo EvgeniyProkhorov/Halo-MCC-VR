@@ -1,0 +1,103 @@
+{
+  "schema_version": 1,
+  "release": "MCC_VR_ALPHA_0.3.3",
+  "release_url": "https://github.com/pancreations/Halo-MCC-VR/releases/tag/MCC_VR_ALPHA_0.3.3",
+  "supersedes": "MCC_VR_ALPHA_0.3.2",
+  "runtime_source_commit": "94dc09fd0a6579d723de71792ae4c3f62ce4fb7e",
+  "candidate_package": "out/candidates/94dc09f-reach-fp-parity-20260806-150849513Z",
+  "build": {
+    "architecture": "x64",
+    "configuration": "Release",
+    "preset": "release",
+    "HALOMCCVR_EXPERIMENTAL_ODST_BRINGUP": true,
+    "HALOMCCVR_EXPERIMENTAL_REACH_BRINGUP": true,
+    "HALOMCCVR_EXPERIMENTAL_REACH_RENDER_CANDIDATE": true,
+    "compiled": "Aug  6 2026 10:08:41"
+  },
+  "titles": [
+    "Halo 3",
+    "Halo 3: ODST",
+    "Halo: Reach"
+  ],
+  "published_artifacts": {
+    "zip": {
+      "name": "MCC_VR_ALPHA_0.3.3.zip",
+      "download_url": "https://github.com/pancreations/Halo-MCC-VR/releases/download/MCC_VR_ALPHA_0.3.3/MCC_VR_ALPHA_0.3.3.zip",
+      "sha256": "C1CC84C1F2278E622F0A439E4DC3791A4E2264DEE8F1F71E48D61346D3AFE69D",
+      "bytes": 1098834,
+      "contents": [
+        "halo3xr.dll",
+        "halo3xr_launcher.exe",
+        "halomccvr.cfg",
+        "LICENSE",
+        "MANUAL-README.txt"
+      ]
+    },
+    "halo3xr.dll": {
+      "sha256": "44A82E28B65F8FD6D0A52FF2C87A55C37EFC8B5888DEE6836DEE9AEF89DE026D"
+    },
+    "halo3xr_launcher.exe": {
+      "sha256": "930BEA232BFC3F8010BC2B385834DEBF796CD3DBEC02ECD0E8475E0DE8A72CE6"
+    },
+    "halomccvr.cfg": {
+      "sha256": "E941BC189B57B9ED11EB62DCF8D6AE1C5787936074C2358EB6AF99A377C97975"
+    },
+    "MANUAL-README.txt": {
+      "sha256": "EEA5402335A28274EB4DDE5BABCC305FC49D8312C0C7D8EA3F251A1E6BCCAE04"
+    },
+    "LICENSE": {
+      "sha256": "F88ACC6048F7D24F9281FAE45F140C1E706C4059A3BB35D7E20A9F8FFB512825"
+    }
+  },
+  "acceptance": {
+    "edition": "Steam",
+    "openxr_runtime": "VirtualDesktopXR 1.0.10",
+    "headset": "Meta Quest 3",
+    "streaming_host": "Virtual Desktop",
+    "session": "2026-08-06 10:12:30 local, log halo3xr.log in the Steam Halo_MCC_VR folder",
+    "statement": "User directive on this exact source and DLL: the DLL tested on Steam is the best version we have and the new baseline going forward.",
+    "microsoft_store": "Installed and hash-verified; the user confirmed the Store install runs, but the tuning and the acceptance run were both done on Steam."
+  },
+  "changes": [
+    "First-person vehicles now cover all three games. Halo 3 shipped in 0.3.2; ODST and Halo: Reach are added here, with every seat placed - drivers, passengers, gunners and mounted turrets - and each seat carrying its own position line in halomccvr.cfg and its own sliders in the F1 menu.",
+    "Reach seat coverage: Warthog and its chaingun/gauss/rocket variants, Scorpion, Wraith and Wraith gunner, Ghost, Revenant (both seats), Banshee, Space Banshee, Sabre, Falcon (pilot and both door seats), Mongoose (both seats), Shade plasma and Shade flak, the plasma turret and machinegun emplacements, forklift, pickup, cargo truck and cart.",
+    "ODST seat coverage: Warthog driver and passenger, Scorpion, Prowler gunner, Hornet, Chopper, the mounted machinegun turret, and the Covenant walk-up Shade, which previously resolved to no seat point at all and left the gunner in the ground.",
+    "Mounted turrets in Halo 3 and ODST no longer wobble up and down chasing the crosshair. The aim loop had no deadband and its actuator quantises every non-zero command, so it limit-cycled forever; turret seats now park using a rest band measured from the engine's own minimum-authority frames.",
+    "A turret's reticle now rides the gun barrel unconditionally instead of the player's hand, so shots follow the crosshair. A 15 deg/s Shade cannot follow a wrist flick, and the old honest-crosshair path exempted a converging error - which a slow gun always has - so the reticle promised the hand's direction for seconds at a time.",
+    "A seated passenger's shots leave the sight line they aim down at every range, in Halo 3, ODST and Reach, instead of crossing the crosshair at one fixed distance.",
+    "Halo 3: entering a seat now faces the vehicle's nose whether or not View follows the vehicle is enabled. The nose-align was gated on that option, and the OFF branch took its heading from the engine camera mid-swing around the vehicle.",
+    "Seat trims can no longer be destroyed. An unidentified vehicle used to decode to the universal trim slot shared by all three titles, so tuning one unrecognised Reach seat silently moved every Halo 3 and ODST seat. Unmatched vehicles now key their own row, the F1 panel offers a one-click reset for the universal trim, and config load reports the shared triplet whenever it differs from the shipped value.",
+    "Seat sliders behave identically in all three titles, travelling Halo 3's distance either side of each seat's own authored base, and a seat's reset returns it to that base rather than to the shared universal trim.",
+    "game_brightness now drives ODST (halo3odst.dll+0x2A6308) and Reach (haloreach.dll+0x252E28) as well as Halo 3. One slider moves all three games.",
+    "ODST gains a Steady brightness in the seat option: looking down at a dark dashboard fills the game's light meter and ramps its auto-exposure, which this holds steady while seated.",
+    "Levels no longer need loading twice. The mod now touches nothing at all in a title whose level is still loading - no module pin, no signature scan, no debug-variable write - rather than merely declining to install hooks. The bounced load ran with zero hooks installed and the title module absent from the module list, so the fault was the refcount pin taken by the preflight scan racing MCC's own unload.",
+    "Reach: a native pause no longer replays a full seat entry on resume. While paused the player-unit resolver reports no unit, so the samplers published Unknown, restored the seat lease and dropped the input snapshot; the resume then recentered the play space and re-bound controls, and the engine bailed to the main menu 1.5-3 s later.",
+    "ODST reaches stereo about two seconds sooner. Its ownership block was stamped after the optional feature hooks resolved and re-zeroed the camera heartbeat on the way past, so the one-second stability interval could only start once the whole install had finished - 945 ms of install plus 1015 ms of arming, strictly serial, where Halo 3's equivalent tail is ~466 ms because its debounce overlaps its remaining installs.",
+    "Signature scanning is about 7x faster in all three titles (37.1 ms -> 5.5 ms measured on a buffer the size of halo3odst.dll). The mask became a uint8_t array and memchr now skips to offsets where the pattern's first concrete byte can sit. No verification was relaxed: every candidate is still compared in full, the uniqueness re-scan gets the same speed-up, and equivalence against the original byte-by-byte loop is tested over 400 randomised patterns in core_tests.",
+    "The level-load gate is sampled from title detection rather than from the proof pass, so 3D now enters in about 2 s instead of about 9 s."
+  ],
+  "config_policy": {
+    "ships_config": true,
+    "instruction": "Replace halomccvr.cfg; do not keep the previous file.",
+    "reason": "config.cpp parses config_version but performs no migration, so any key an older config lacks silently falls back to a built-in default instead of the shipped value. fit_desktop_window in particular defaults to false while the shipped config sets it to 1, which can reintroduce the desktop-window frame-rate cap. 0.3.3 adds the entire first-person vehicle block, including a per-seat starting position for every ODST and Reach seat, for which an older config has no equivalent at all.",
+    "shipped_config_source": "The maintainer's live, headset-tuned halomccvr.cfg, copied verbatim at packaging time from the Steam Halo_MCC_VR folder - the edition the 0.3.3 tuning and acceptance run were performed on.",
+    "user_action_required": "Per-seat camera positions are a starting point, not a finished setting. Users must adjust each seat they use via F1 > Vehicles > Seat forward / Seat height / Seat left / right while sitting in that seat."
+  },
+  "known_issues": [
+    "Vehicle seat positions ship as a starting point and must be adjusted per seat by each user.",
+    "Reach passenger seats do not draw the player's floating hands. The seat, the aim and the firing all work; the engine builds the first-person models in that seat, so the remaining fault is placement or the ReachProcessFpPalette collapse, not engine admission.",
+    "Game Pass: MCC freezes for about nine seconds on the first loading screen, every launch. MCC's own loop, not the mod; not a crash.",
+    "The right stick still turns the player while the F1 menu is open.",
+    "Reach: character tags and navpoints are misplaced in 3D.",
+    "Reach: hud_curvature and hud_vertical_offset have no effect.",
+    "ODST: the first captioned opening cutscene can be black; skip that scene once.",
+    "MCC can retain multiple title modules after switching games; fully restart MCC if a level returns to the menu.",
+    "ODST seat exposure hold and the ODST/Reach brightness paths are implemented and shipped in the accepted build but were not individually confirmed in a headset."
+  ],
+  "dependencies": {
+    "OpenXR-SDK": "5267613edf3d937e3d77556a106a65c2f82b25c6",
+    "MinHook": "c3fcafdc10146beb5919319d0683e44e3c30d537",
+    "Dear ImGui": "8936b58fe26e8c3da834b8f60b06511d537b4c63"
+  },
+  "rebuild_note": "Source rebuilds are not byte-identical because the DLL embeds compile date/time and toolchain output can differ. The published ZIP carries the exact halo3xr.dll bytes the maintainer ran and accepted on Steam, installed and hash-verified in both the Steam and Microsoft Store Halo_MCC_VR folders; do not rebuild and republish without repeating that verification."
+}
