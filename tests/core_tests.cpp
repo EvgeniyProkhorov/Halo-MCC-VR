@@ -6724,23 +6724,8 @@ int main()
             // No seat evidence at all: refuse to guess.
             OdstDefinitionFields blind = shade;
             blind.seatFlagsValid = false;
-            // The 2026-08-06 probe's real Covenant Shade: the engine says
-            // in-vehicle, but seat 0 is a GUNNER seat with no driver bit
-            // (0x101188). It used to fall through to StationaryTurret and be
-            // placed at the walk-up machinegun's 0.5743 point instead of the
-            // Shade's own 0.9791 - the "I'm in the ground" report.
-            OdstDefinitionFields gunnerShade;
-            gunnerShade.physicsType = kOdstPhysicsTypeTurret;
-            gunnerShade.seatFlagsValid = true;
-            gunnerShade.seat0Flags = 0x101188u;
-            gunnerShade.inVehicle = true;
             const bool shadeSplitsFromTurret =
                 OdstResolveVehicleId(shade) == OdstVehicleId::Shade &&
-                OdstResolveVehicleId(gunnerShade) == OdstVehicleId::Shade &&
-                !(gunnerShade.seat0Flags & kOdstSeatDriverBit) &&
-                OdstFindSeatPoint(OdstVehicleId::Shade, 0, false) !=
-                    OdstFindSeatPoint(
-                        OdstVehicleId::StationaryTurret, 0, false) &&
                 OdstResolveVehicleId(turret) ==
                     OdstVehicleId::StationaryTurret &&
                 OdstResolveVehicleId(ambiguous) == OdstVehicleId::Unknown &&
