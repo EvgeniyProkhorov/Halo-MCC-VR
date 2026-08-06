@@ -15897,6 +15897,34 @@ namespace
                 ? OdstInstallResult::Failed
                 : OdstInstallResult::CleanupPending;
         }
+        // OWNERSHIP BEGINS HERE - the instant the core hooks are live, not
+        // after the optional feature work below. MH_ApplyQueued has just
+        // enabled the ten-hook core, so CamCopy is already publishing a
+        // heartbeat while the optional hooks resolve. Stamping the install
+        // clock down there instead (and re-zeroing g_odstLastCamCopyMs) threw
+        // those heartbeats away and restarted the one-second
+        // kOdstCameraStableMs interval from scratch, so ODST paid its whole
+        // install cost and THEN a full second: measured 945 ms + 1015 ms =
+        // ~1.95 s from resolve to stereo, against Halo 3's ~466 ms tail,
+        // which is short precisely because its debounce overlaps its
+        // remaining hook installs. Halo 3 parity is the point of this core,
+        // so it applies here too.
+        //
+        // Safe against the watchdog: EvaluateOdstHeartbeat is only consulted
+        // by the worker once odstHooked is set from this function's return
+        // value, so nothing evaluates this clock until install has finished.
+        // Every failure path below still rolls the hooks back through
+        // DiscardCreatedOdstHooks, and `installed` stays false until the very
+        // end, so a rollback can never leave a live clock behind.
+        g_odstCamera.captureFailures.store(0, std::memory_order_release);
+        g_odstCamera.sawValidCamera.store(false, std::memory_order_release);
+        g_odstCamera.fallbackReason.store(
+            static_cast<int>(OdstFallbackReason::None),
+            std::memory_order_release);
+        g_odstCamera.teardownRequested.store(false, std::memory_order_release);
+        g_odstCamera.cameraArrayReady.store(true, std::memory_order_release);
+        g_odstCamera.installedAtMs.store(
+            GetTickCount64(), std::memory_order_release);
         if (!ApplyOdstNativeWeaponIkBypass(
                 resolved.nativeWeaponIkDecision))
         {
@@ -15941,17 +15969,13 @@ namespace
                 : OdstInstallResult::CleanupPending;
         }
 
-        g_odstCamera.captureFailures.store(0, std::memory_order_release);
-        g_odstCamera.sawValidCamera.store(false, std::memory_order_release);
-        g_odstCamera.fallbackReason.store(
-            static_cast<int>(OdstFallbackReason::None), std::memory_order_release);
-        g_odstCamera.teardownRequested.store(false, std::memory_order_release);
-        g_odstCamera.cameraArrayReady.store(true, std::memory_order_release);
+        // The ownership block that used to sit here now runs the moment the
+        // core hooks go live, above. In particular g_odstLastCamCopyMs is NOT
+        // re-zeroed here: the heartbeats CamCopy published while the optional
+        // hooks resolved are real, and discarding them is exactly what forced
+        // the one-second stability interval to start over after the install.
         g_odstCamera.installed.store(true, std::memory_order_release);
         g_odstCamera.armed.store(false, std::memory_order_release);
-        g_odstCamera.installedAtMs.store(
-            GetTickCount64(), std::memory_order_release);
-        g_odstLastCamCopyMs.store(0, std::memory_order_release);
         g_stereoEye.store(-1, std::memory_order_release);
         g_aimSeen.store(false, std::memory_order_release);
         for (auto& valid : g_barrelInWristValid)
