@@ -1487,6 +1487,63 @@ the reset; that a seat or vehicle change earns one new reset; and that settled
 exit remains position-only. Record edition, runtime, headset, and a refresh
 rate in the supported 72-144 Hz range. Nothing here advances CURRENT-STATE.
 
+## R-V24 - passenger floating hands and fine Reach trim controls
+
+The Halo 3/ODST experience being matched is specific: a passenger seat whose
+authored flags allow the occupant's personal weapon submits the separate
+first-person hands/weapon presentation, and that presentation follows the VR
+controllers. Drivers and mounted vehicle guns do not acquire a personal gun.
+The independent native seated `fp_body` legs and camera-local world-biped hide
+from R-V23/R-V22 remain unchanged.
+
+The R-V23 headset log proves the Reach controller reconstruction itself was
+active (`body=47 live=52`) but does not record a passenger first-person weapon
+presentation after the Warthog seat changes. The implementation had preserved
+and controller-bound such a graph only when Reach happened to submit it; it did
+not cause the third-person-authored passenger seat to submit one. That is the
+gap this candidate closes.
+
+Official HREK names seat-flags bit 5 `allows weapons` and bit 4 `third person
+camera`; their Reach-specific identities and pinned-retail seat record binding
+are established in R-V1/R-V2. For an exact occupied seat with bit 5 still set
+in the live word, this candidate clears only bit 4 immediately before the
+synchronous stock `main_render_view` call and restores only that bit in the
+outer finally. The scope exists solely to admit Reach's native first-person
+hands/weapon render graph. The established private palette transaction then
+maps both wrists and the held-object range to the prepared left/right controller
+targets. Personal-projectile origin remains the R-V12 rendered-eye transaction;
+the visible controller aim and gun tracking therefore do not guess or replace
+a vehicle barrel.
+
+This is deliberately not the rejected R-V20 lease: the flag never survives the
+stock render call, no between-frame camera/control consumer sees it, and the
+permanently-false `kReachR_V20SeatBitLeaseEnabled` is pinned by a pure test.
+View Follow, steering, mounted turrets, reticle publication, the R-V22 selected
+vehicle-barrel path, and the R-V23 entry/exit recenter transaction are unchanged.
+The runtime re-resolves the complete salted unit/parent/definition/raw-seat key,
+revalidates the live allows-weapons bit, uses complete-word compare/exchange,
+retains no tag pointer, preserves unrelated concurrent flag changes on restore,
+and logs first activation or failure from the worker tick.
+
+Reach's per-seat authored camera range is much wider than Halo 3/ODST
+(-64..64 m forward and -16..16 m vertical/lateral). ImGui's range-based slider
+therefore moved too far per pixel and displayed only centimetres. The Reach F1
+bank now uses a title-only clamped drag control at exactly 0.001 m per pixel,
+displays three decimals, and supports Ctrl-click exact numeric entry. Halo 3 and
+ODST keep their existing sliders, ranges, display precision, and config keys.
+The stored Reach floats and save/load grammar are unchanged.
+
+Pure tests pin the passenger admission predicate, preservation of the authored
+allows-weapons bit, render-scoped removal/restoration of only bit 4 (including
+an unrelated in-render word change), the dormant between-frame lease, and the
+one-millimetre Reach adjustment constant. This candidate remains headset-
+unverified and does not advance CURRENT-STATE. Acceptance needs an actual
+allows-weapons passenger with both View Follow settings: visible independent
+hands, gun rigidly tracking the right controller, shots agreeing with the VR
+aim, legs still present, and no body/camera shake. It also needs a driver,
+Warthog mounted gun, and Covenant turret regression plus confirmation that each
+Reach adjustment can be tuned and saved at millimetre precision.
+
 ## R-V9 - acceptance still required
 
 Nothing in this document changes the accepted pointer. Packaging, successful

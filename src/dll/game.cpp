@@ -15999,6 +15999,10 @@ namespace
     std::atomic<uint32_t> g_reachUnitCameraHideAlreadySet{0};
     std::atomic<uint32_t> g_reachUnitCameraHideRestores{0};
     std::atomic<uint32_t> g_reachUnitCameraHideFailures{0};
+    std::atomic<uint32_t> g_reachPassengerFpPresentationSets{0};
+    std::atomic<uint32_t> g_reachPassengerFpPresentationNative{0};
+    std::atomic<uint32_t> g_reachPassengerFpPresentationRestores{0};
+    std::atomic<uint32_t> g_reachPassengerFpPresentationFailures{0};
     std::atomic<uint32_t> g_reachVehicleSeatRecenters{0};
     std::atomic<uint32_t> g_reachVehicleExitRecenters{0};
     std::atomic<uint32_t> g_reachSeatAuthorsSteering{0};
@@ -21957,6 +21961,138 @@ namespace
         scope = {};
     }
 
+    // Personal-weapon passengers need Reach's own first-person weapon graph so
+    // the established controller palette transaction has hands, gun, and held
+    // object records to own.  Seat bit 4 is changed only around the synchronous
+    // stock render.  Simulation, aiming, steering, View Follow, and the camera
+    // between frames never see this presentation-only mutation.
+    struct ReachPassengerFpPresentationScope
+    {
+        volatile LONG* flags = nullptr;
+        uint32_t originalFlags = 0;
+        bool ownsMutation = false;
+    };
+
+    bool ReachBeginPassengerFpPresentation(
+        const ReachVehicleFrame& frame,
+        ReachPassengerFpPresentationScope& scope)
+    {
+        scope = {};
+        if (!ReachSeatNeedsPersonalWeaponPresentation(
+                frame.active, g_config.vehicle_first_person, frame.seatFlags) ||
+            g_reachCamera.teardownRequested.load(std::memory_order_acquire) ||
+            g_reachCamera.vehicleCameraBindingState.load(
+                std::memory_order_acquire) != static_cast<uint8_t>(
+                    ReachVehicleCameraBindingState::Installed))
+        {
+            return false;
+        }
+        const ReachSeatLeaseKey key{
+            g_reachCamera.generation.load(std::memory_order_acquire),
+            frame.unitHandle, frame.directParent, frame.definitionDatum,
+            frame.seatIndex};
+        if (!ReachSeatLeaseKeyValid(key))
+            return false;
+
+        bool admitted = false;
+        bool failed = false;
+        __try
+        {
+            uint32_t* liveFlags = ReachResolveLiveSeatFlagsPointer(key, true);
+            if (!liveFlags)
+            {
+                failed = true;
+                __leave;
+            }
+            auto* flags = reinterpret_cast<volatile LONG*>(liveFlags);
+            const uint32_t original = static_cast<uint32_t>(
+                InterlockedCompareExchange(flags, 0, 0));
+            // Revalidate the live word: the sampled seat must still be an
+            // authored personal-weapon seat at the mutation boundary.
+            if ((original & kReachSeatAllowsWeaponsBit) == 0)
+            {
+                failed = true;
+                __leave;
+            }
+            const uint32_t written =
+                ReachPersonalWeaponPresentationFlags(original);
+            if (written == original)
+            {
+                g_reachPassengerFpPresentationNative.fetch_add(
+                    1, std::memory_order_relaxed);
+                admitted = true;
+                __leave;
+            }
+            const uint32_t prior = static_cast<uint32_t>(
+                InterlockedCompareExchange(
+                    flags, static_cast<LONG>(written),
+                    static_cast<LONG>(original)));
+            if (prior != original)
+            {
+                failed = true;
+                __leave;
+            }
+            scope.flags = flags;
+            scope.originalFlags = original;
+            scope.ownsMutation = true;
+            g_reachPassengerFpPresentationSets.fetch_add(
+                1, std::memory_order_relaxed);
+            admitted = true;
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            failed = true;
+        }
+        if (failed)
+            g_reachPassengerFpPresentationFailures.fetch_add(
+                1, std::memory_order_relaxed);
+        return admitted;
+    }
+
+    void ReachEndPassengerFpPresentation(
+        ReachPassengerFpPresentationScope& scope)
+    {
+        if (!scope.ownsMutation || !scope.flags)
+            return;
+        bool restored = false;
+        __try
+        {
+            for (int attempt = 0; attempt < 8; ++attempt)
+            {
+                const uint32_t current = static_cast<uint32_t>(
+                    InterlockedCompareExchange(scope.flags, 0, 0));
+                const uint32_t desired =
+                    ReachRestorePersonalWeaponPresentationFlags(
+                        current, scope.originalFlags);
+                if (current == desired)
+                {
+                    restored = true;
+                    break;
+                }
+                const uint32_t prior = static_cast<uint32_t>(
+                    InterlockedCompareExchange(
+                        scope.flags, static_cast<LONG>(desired),
+                        static_cast<LONG>(current)));
+                if (prior == current)
+                {
+                    restored = true;
+                    break;
+                }
+            }
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            restored = false;
+        }
+        if (restored)
+            g_reachPassengerFpPresentationRestores.fetch_add(
+                1, std::memory_order_relaxed);
+        else
+            g_reachPassengerFpPresentationFailures.fetch_add(
+                1, std::memory_order_relaxed);
+        scope = {};
+    }
+
     bool ReachRestoreNativeSeatLease()
     {
         if (!kReachR_V20SeatBitLeaseEnabled)
@@ -23479,8 +23615,13 @@ namespace
 
         uintptr_t result = 0;
         ReachUnitCameraHideScope bodyHide{};
+        ReachPassengerFpPresentationScope passengerPresentation{};
         if (candidate.vehicleViewApplied)
+        {
+            ReachBeginPassengerFpPresentation(
+                candidate.vehicle, passengerPresentation);
             ReachBeginUnitCameraPlayerHide(candidate.vehicle, bodyHide);
+        }
         __try
         {
             result = g_reachOrigMainRenderView(
@@ -23489,6 +23630,7 @@ namespace
         __finally
         {
             ReachEndUnitCameraPlayerHide(bodyHide);
+            ReachEndPassengerFpPresentation(passengerPresentation);
             ReachEndFpPairScope();
             // Restore only the proven camera-pair data. The engine owns the
             // camera-stack callback at +0x2A8 and its push/pop lifetime.
@@ -26034,6 +26176,10 @@ namespace
         g_reachUnitCameraHideAlreadySet.store(0, std::memory_order_relaxed);
         g_reachUnitCameraHideRestores.store(0, std::memory_order_relaxed);
         g_reachUnitCameraHideFailures.store(0, std::memory_order_relaxed);
+        g_reachPassengerFpPresentationSets.store(0, std::memory_order_relaxed);
+        g_reachPassengerFpPresentationNative.store(0, std::memory_order_relaxed);
+        g_reachPassengerFpPresentationRestores.store(0, std::memory_order_relaxed);
+        g_reachPassengerFpPresentationFailures.store(0, std::memory_order_relaxed);
         g_reachVehicleSeatRecenters.store(0, std::memory_order_relaxed);
         g_reachVehicleExitRecenters.store(0, std::memory_order_relaxed);
         g_reachFpLegPaletteObservationCount.store(
@@ -26674,6 +26820,8 @@ namespace
         static bool loggedFollowFallback = false;
         static bool loggedUnitCameraHide = false;
         static bool loggedUnitCameraHideFailure = false;
+        static bool loggedPassengerFpPresentation = false;
+        static bool loggedPassengerFpPresentationFailure = false;
         static bool loggedPatchActivity = false;
         static bool loggedPatchFailure = false;
         static bool loggedShotMove = false;
@@ -26703,6 +26851,8 @@ namespace
             loggedFollowFallback = false;
             loggedUnitCameraHide = false;
             loggedUnitCameraHideFailure = false;
+            loggedPassengerFpPresentation = false;
+            loggedPassengerFpPresentationFailure = false;
             loggedPatchActivity = false;
             loggedPatchFailure = false;
             loggedRecenters = 0;
@@ -26889,6 +27039,35 @@ namespace
             LOG("Reach first-person vehicles: native unit-camera body hide "
                 "could not be set or restored exactly; body hide alone fell "
                 "back for that frame and the seat camera continued");
+        }
+        const uint32_t passengerFpSets =
+            g_reachPassengerFpPresentationSets.load(
+                std::memory_order_relaxed);
+        const uint32_t passengerFpNative =
+            g_reachPassengerFpPresentationNative.load(
+                std::memory_order_relaxed);
+        if (!loggedPassengerFpPresentation &&
+            (passengerFpSets != 0 || passengerFpNative != 0))
+        {
+            loggedPassengerFpPresentation = true;
+            LOG("Reach passenger floating hands ACTIVE: personal-weapon seat "
+                "requested the native first-person gun graph inside the "
+                "admitted render (set=%u, already-native=%u, restored=%u); "
+                "controller wrists and held gun use the existing Reach FP "
+                "palette transaction",
+                passengerFpSets, passengerFpNative,
+                g_reachPassengerFpPresentationRestores.load(
+                    std::memory_order_relaxed));
+        }
+        if (!loggedPassengerFpPresentationFailure &&
+            g_reachPassengerFpPresentationFailures.load(
+                std::memory_order_relaxed) != 0)
+        {
+            loggedPassengerFpPresentationFailure = true;
+            LOG("Reach passenger floating hands: the render-scoped personal-"
+                "weapon presentation could not be applied or restored safely "
+                "for at least one frame; camera, steering, reticle and "
+                "projectile ownership remain unchanged");
         }
         const uint32_t patchSerial = g_reachVehicleSeatPatchSerial.load(
             std::memory_order_acquire);

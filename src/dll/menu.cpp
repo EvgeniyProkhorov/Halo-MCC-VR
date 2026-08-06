@@ -819,6 +819,7 @@ namespace
         }
         const bool perSeat = seatSlot >= 0 && seatSlot < seatSlotLimit;
         const bool reachSeat = perSeat && s_seatBank == VehicleTrimBank::Reach;
+        const bool reachAdjust = s_seatBank == VehicleTrimBank::Reach;
         const float forwardMin = reachSeat ? kReachVehicleCamForwardMin :
                                              kVehicleCamForwardMin;
         const float forwardMax = reachSeat ? kReachVehicleCamForwardMax :
@@ -834,13 +835,25 @@ namespace
                         Game_VehicleSeatTrimName(seatSlot, s_seatBank));
         else
             ImGui::Text("Adjusting: every seat (universal trim)");
+        const auto seatAdjustment = [reachAdjust](
+            const char* label, float* value, float minimum, float maximum) {
+            if (reachAdjust)
+                return ImGui::DragFloat(
+                    label, value, kReachVehicleCamFineStep,
+                    minimum, maximum, "%.3f", ImGuiSliderFlags_AlwaysClamp);
+            return ImGui::SliderFloat(
+                label, value, minimum, maximum, "%.2f");
+        };
+        if (reachAdjust)
+            ImGui::TextDisabled(
+                "Reach fine adjustment: 1 mm per drag pixel; Ctrl-click to type an exact value.");
         float seatFwd = ConfigSeatCamForward(g_config, seatSlot);
         if (s_seatBank == VehicleTrimBank::Odst)
             seatFwd = ConfigOdstSeatCamForward(g_config, seatSlot);
         else if (s_seatBank == VehicleTrimBank::Reach)
             seatFwd = ConfigReachSeatCamForward(g_config, seatSlot);
-        if (ImGui::SliderFloat("Seat forward (m)", &seatFwd,
-                               forwardMin, forwardMax, "%.2f"))
+        if (seatAdjustment("Seat forward (m)", &seatFwd,
+                           forwardMin, forwardMax))
         {
             if (perSeat)
             {
@@ -858,8 +871,7 @@ namespace
             seatUp = ConfigOdstSeatCamUp(g_config, seatSlot);
         else if (s_seatBank == VehicleTrimBank::Reach)
             seatUp = ConfigReachSeatCamUp(g_config, seatSlot);
-        if (ImGui::SliderFloat("Seat height (m)", &seatUp,
-                               upMin, upMax, "%.2f"))
+        if (seatAdjustment("Seat height (m)", &seatUp, upMin, upMax))
         {
             if (perSeat)
             {
@@ -877,8 +889,8 @@ namespace
             seatRight = ConfigOdstSeatCamRight(g_config, seatSlot);
         else if (s_seatBank == VehicleTrimBank::Reach)
             seatRight = ConfigReachSeatCamRight(g_config, seatSlot);
-        if (ImGui::SliderFloat("Seat left / right (m)", &seatRight,
-                               rightMin, rightMax, "%.2f"))
+        if (seatAdjustment("Seat left / right (m)", &seatRight,
+                           rightMin, rightMax))
         {
             if (perSeat)
             {

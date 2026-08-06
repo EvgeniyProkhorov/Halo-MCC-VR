@@ -1674,6 +1674,38 @@ int main()
                     ReachSeatLeaseRestoreDisposition::ExternalWrite,
                 "Reach body hide sets only unit-camera bit 2 and restores only that owned bit while preserving unrelated changes");
         }
+        // Allows-weapons passengers temporarily request Reach's native FP
+        // weapon graph during rendering. The old between-frame camera lease
+        // remains disabled, and restoration owns bit 4 only.
+        {
+            constexpr uint32_t original =
+                0xA5000000u | kReachSeatThirdPersonCameraBit |
+                kReachSeatAllowsWeaponsBit;
+            constexpr uint32_t written =
+                ReachPersonalWeaponPresentationFlags(original);
+            constexpr uint32_t changedDuringRender = written ^ 0x00000400u;
+            Check(
+                ReachSeatNeedsPersonalWeaponPresentation(
+                    true, true, original) &&
+                !ReachSeatNeedsPersonalWeaponPresentation(
+                    true, true, kReachSeatThirdPersonCameraBit) &&
+                !ReachSeatNeedsPersonalWeaponPresentation(
+                    false, true, original) &&
+                !ReachSeatNeedsPersonalWeaponPresentation(
+                    true, false, original) &&
+                !kReachR_V20SeatBitLeaseEnabled &&
+                (written & kReachSeatThirdPersonCameraBit) == 0 &&
+                (written & kReachSeatAllowsWeaponsBit) != 0 &&
+                ReachRestorePersonalWeaponPresentationFlags(
+                    written, original) == original &&
+                ReachRestorePersonalWeaponPresentationFlags(
+                    changedDuringRender, original) ==
+                    (original ^ 0x00000400u),
+                "Reach passenger FP presentation admits only allows-weapons seats and owns only render-scoped bit 4");
+        }
+        Check(
+            kReachVehicleCamFineStep == 0.001f,
+            "Reach vehicle camera adjustments use an explicit one-millimetre fine step");
         // R-V18: entering a Reach seat selects the same native aim feedback
         // under BOTH view-follow settings.
         {
