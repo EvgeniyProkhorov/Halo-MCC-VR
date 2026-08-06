@@ -106,17 +106,31 @@ here; the fifth is measured and explicitly NOT fixed. Full evidence is in
 4. **The Warthog driver seat is repaired without touching the user's config.**
    Its `use_universal` tombstone now returns the seat to its authored Blender
    row instead of to the polluted universal trim.
-5. **Passenger hands and passenger shots are NOT fixed.** R-V24's render
-   admission detour installed and finished the whole session - including a
-   Warthog passenger seat - with zero admissions, so it is not the mechanism;
-   it is disabled rather than deleted. The session also never logged a single
-   personal shot-origin substitution. Both now report engine state: the seat
-   line prints the live seat-flags word with bit 4 (third person camera) and
-   bit 5 (allows weapons) decoded, and the skip line names which of five
-   conditions rejected each shot. Halo 3's mechanism (seat bit 4 -> first-person
-   perspective -> the first-person model cache) is recorded in R-V25 as the
-   path the next candidate owes, along with why R-V20's rejected between-frame
-   lease cannot simply be re-scoped.
+5. **Passenger hands, ported from Halo 3's accepted C20 (R-V26).** R-V24's
+   render admission detour finished the whole session - including a Warthog
+   passenger seat - with zero admissions, so it is not the mechanism and is
+   disabled rather than deleted. The mechanism Halo 3 actually uses is
+   recorded in its own accepted C20 result: clearing the occupied seat's
+   `third person camera` bit puts the engine in first-person perspective, and
+   the first-person model cache builds the occupant's arms and weapon only in
+   that perspective. Reach authors the same bit, and the HREK census confirms
+   a Reach passenger seat is authored `third person camera, allows weapons`.
+   R-V20 used this bit and was rejected - but as a one-frame-interval lease
+   that restored and re-cleared the word twice per frame, which is the
+   reported shaking. Halo 3 never toggles it: it clears once on entry and
+   restores on seat change, exit, config disable or teardown. R-V26 ports that
+   lifetime exactly, keeping R-V20's pointer-free key and re-resolve-before-
+   restore safety. Gated by "Sit in the seat (first person)", not by the body
+   checkbox, because R-V20 proved this bit does not hide the Reach body.
+   **Because this is the bit R-V20 was rejected over, the headset test must
+   re-check driver seats, both View Follow settings and the Scorpion, Wraith
+   and Covenant turrets for any return of the vehicle shaking.**
+6. **Passenger shot origin is measured, not yet fixed.** The session never
+   logged a single personal shot-origin substitution. The skip line now names
+   which of five conditions rejected each shot, and the seat line prints the
+   live seat-flags word with bit 4 and bit 5 decoded. If R-V26 brings the
+   hands up and shots still miss, those two lines identify the cause without
+   another probe build.
 
 Release x64 builds, `ctest --preset release` passes 1/1, and the Reach parity
 gate passes. A build and a passing gate prove nothing about the headset.

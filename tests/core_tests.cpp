@@ -1417,6 +1417,38 @@ int main()
                     {37, 0x12340007, 0x23450009, 0x00030021, 16}),
                 "Reach body-hide lease key preserves generation, both salted handles, definition datum and raw seat");
 
+            // R-V26: the seat-bit lease is armed again, but with Halo 3's
+            // accepted C20 LIFETIME, not R-V20's. The two rules that make it
+            // C20 rather than R-V20 are: the seat we already own is never
+            // rewritten (so the word cannot toggle per frame - the rejected
+            // shaking), and any other key is a new occupation that must be
+            // restored first. R-V20's own flag stays permanently false.
+            Check(
+                kReachSeatFirstPersonPresentationEnabled &&
+                !kReachR_V20SeatBitLeaseEnabled &&
+                ReachSeatLeaseOwnsMutation(ReachSeatLeaseState::Active) &&
+                ReachSeatLeaseOwnsMutation(
+                    ReachSeatLeaseState::RestorePending) &&
+                !ReachSeatLeaseOwnsMutation(ReachSeatLeaseState::Empty) &&
+                !ReachSeatLeaseOwnsMutation(ReachSeatLeaseState::External) &&
+                // Same seat while Active: owned, equal, so the sampler returns
+                // early and performs no write.
+                (ReachSeatLeaseOwnsMutation(ReachSeatLeaseState::Active) &&
+                 ReachSeatLeaseKeyEqual(leaseKey, leaseKey)) &&
+                // Any other seat/vehicle/generation is a different occupation.
+                !ReachSeatLeaseKeyEqual(leaseKey, otherSeat) &&
+                !ReachSeatLeaseKeyEqual(leaseKey, otherParent) &&
+                // A naturally first-person seat (the Workshop maps clear this
+                // bit in the tags) is External for its own key and is never
+                // rewritten or restored.
+                ReachSeatLeaseBlocksKey(
+                    ReachSeatLeaseState::External, leaseKey, leaseKey) &&
+                writtenFlags ==
+                    (originalFlags & ~kReachSeatThirdPersonCameraBit) &&
+                (writtenFlags & kReachSeatAllowsWeaponsBit) ==
+                    (originalFlags & kReachSeatAllowsWeaponsBit),
+                "The Reach seat first-person lease keeps Halo 3 C20's lifetime and touches only bit 4");
+
             // A complete exact seat earns one re-centre regardless of headset
             // cadence or View Follow. Repeated frames carrying that same key
             // can never fire again after the successful application commits.

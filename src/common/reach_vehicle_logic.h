@@ -498,9 +498,18 @@ inline constexpr uint32_t kReachSeatThirdPersonCameraBit = 1u << 4;
 inline constexpr uint16_t kReachUnitCameraHidePlayerBit = 0x0004;
 
 // R-V20's between-frame seat-bit lease executed but did not hide the Reach
-// world biped in the headset. Retain its implementation as evidence, but never
-// arm it. Reach has a separate, camera-local authoring flag for this job.
+// world biped in the headset, and the user reported vehicle shaking. Body
+// hiding is not this bit's job in Reach - R-V22's unit-camera hide-player bit
+// owns that and is headset-independent of this one.
 inline constexpr bool kReachR_V20SeatBitLeaseEnabled = false;
+
+// R-V26: the same bit, with Halo 3's ACCEPTED C20 lifetime instead of R-V20's.
+// It is armed for one job only, the one C20 proved it does: put the occupied
+// seat in the engine's own first-person state so Reach builds the occupant's
+// first-person arms and weapon. C20's own headset result records exactly that
+// - "it also brings up the first-person weapon in `allows weapons` passenger
+// seats". Cleared once per occupation and left clear, never toggled per frame.
+inline constexpr bool kReachSeatFirstPersonPresentationEnabled = true;
 
 // Body hiding owns one complete seat-flags word between two proven outer
 // render callbacks. The runtime keeps this key and the two exact words, never

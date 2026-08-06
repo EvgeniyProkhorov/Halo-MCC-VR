@@ -22044,7 +22044,8 @@ namespace
 
     bool ReachRestoreNativeSeatLease()
     {
-        if (!kReachR_V20SeatBitLeaseEnabled)
+        if (!kReachR_V20SeatBitLeaseEnabled &&
+            !kReachSeatFirstPersonPresentationEnabled)
             return true;
         const ReachSeatLeaseState state = ReachNativeSeatLeaseState();
         if (!ReachSeatLeaseOwnsMutation(state))
@@ -22121,15 +22122,33 @@ namespace
     // Returns true only when this call owns an actual bit-4 mutation. A seat
     // that is naturally first person is recorded as External/native and is
     // deliberately never restored or rewritten.
+    //
+    // R-V26: this is Halo 3's accepted C20 lifetime, not R-V20's. C20 clears
+    // the occupied seat's `third person camera` bit ONCE on entry and leaves it
+    // clear for the whole occupation (Halo3EnsureFirstPersonSeatFlag returns
+    // early on `sameSeat && patch.active`), restoring only on seat change,
+    // exit, config disable or teardown. R-V20 instead restored the bit at the
+    // top of every outer render callback and re-cleared it before
+    // main_render_view, so the word toggled twice per frame - that is the
+    // "vehicle shaking" the 03766bd headset run rejected, and a bit that is
+    // clear only for part of a tick cannot hold the director in first-person
+    // perspective long enough for the engine to build the first-person weapon
+    // models. The value-only key and re-resolve-before-restore safety that
+    // R-V20 designed is kept; only the toggling is gone.
     bool ReachEnsureNativeFirstPersonSeat(const ReachVehicleFrame& frame)
     {
-        if (!kReachR_V20SeatBitLeaseEnabled || !frame.active ||
-            !g_config.vehicle_hide_body ||
+        if (!kReachSeatFirstPersonPresentationEnabled)
+            return false;
+        // Halo 3 C20's own first act: turning the feature off, or losing the
+        // binding, hands the seat's word back immediately rather than waiting
+        // for the player to climb out.
+        if (!frame.active || !g_config.vehicle_first_person ||
             g_reachCamera.teardownRequested.load(std::memory_order_acquire) ||
             g_reachCamera.vehicleCameraBindingState.load(
                 std::memory_order_acquire) != static_cast<uint8_t>(
                     ReachVehicleCameraBindingState::Installed))
         {
+            ReachRestoreNativeSeatLease();
             return false;
         }
         const ReachSeatLeaseKey key{
@@ -22139,7 +22158,22 @@ namespace
         if (!ReachSeatLeaseKeyValid(key))
             return false;
 
-        const ReachSeatLeaseState state = ReachNativeSeatLeaseState();
+        ReachSeatLeaseState state = ReachNativeSeatLeaseState();
+        // Halo 3's `sameSeat && patch.active` early-out: the seat we already
+        // own stays owned and is never rewritten frame to frame.
+        if (ReachSeatLeaseOwnsMutation(state) &&
+            ReachSeatLeaseKeyEqual(g_reachNativeSeatLease.key, key))
+        {
+            return state == ReachSeatLeaseState::Active;
+        }
+        // A different seat, vehicle or generation is a new occupation. Give the
+        // old one its exact word back before claiming this one; a failed
+        // restore leaves the old lease pending and blocks the new claim below.
+        if (ReachSeatLeaseOwnsMutation(state))
+        {
+            ReachRestoreNativeSeatLease();
+            state = ReachNativeSeatLeaseState();
+        }
         if (ReachSeatLeaseBlocksKey(
                 state, g_reachNativeSeatLease.key, key))
         {
@@ -22840,6 +22874,9 @@ namespace
         {
             g_reachVehicleTrimSnapshot.store(0, std::memory_order_release);
             ReachPublishShotOccupation(generation, nullptr);
+            // The optional vehicle transaction is going stock for this title
+            // generation; it must not leave a cleared seat word behind.
+            ReachRestoreNativeSeatLease();
             g_reachVehicleCameraFaults.fetch_add(
                 1, std::memory_order_relaxed);
             g_reachCamera.vehicleCameraBindingState.store(
@@ -22890,6 +22927,14 @@ namespace
             g_reachVehicleTrimSnapshot.store(0, std::memory_order_release);
             ReachPublishShotOccupation(generation, nullptr);
             g_reachHeadReference = {};
+            // R-V26: give the seat word back the moment the seat relationship
+            // itself is gone. A camera-only miss (marker/bounds/identity) with
+            // the structural occupation intact keeps the lease, exactly as it
+            // keeps the debounced occupation immediately below - otherwise
+            // every transient miss would re-toggle the bit and reintroduce the
+            // rejected per-frame churn.
+            if (!structurallySeated)
+                ReachRestoreNativeSeatLease();
             // Marker, bounds and identity proof can fail while the occupied
             // seat relationship itself remains structurally valid. Hold the
             // already-debounced occupation through those camera-only misses:
@@ -22918,6 +22963,15 @@ namespace
         // record before substituting a personal-weapon origin.
         ReachPublishShotOccupation(
             generation, frame.active ? &frame : nullptr);
+        // R-V26, the exact shape of Halo 3's accepted C20 sampler: while the
+        // seat is occupied, tell Reach that seat is first person; the instant
+        // it is not, give the word back. Idempotent - a seat we already own is
+        // returned early without a write, so the bit stays continuously clear
+        // for the whole occupation instead of toggling every frame.
+        if (frame.active)
+            ReachEnsureNativeFirstPersonSeat(frame);
+        else
+            ReachRestoreNativeSeatLease();
         ReachUpdateVehicleTransition(Halo3VehicleState::Vehicle, nowMs);
         return frame.active;
     }
@@ -23293,11 +23347,28 @@ namespace
                 ReachOuterRenderCaller::NormalPlayer;
         if (normalPlayerWindow0)
         {
-            // Re-resolve and reconcile the preceding one-frame interval before
-            // sampling, arming checks, or any other early return. This is the
-            // only ordinary restoration thread; a failed lookup stays pending.
+            // R-V26: this callback no longer restores the seat word on the way
+            // in. R-V20 did, and re-cleared it before main_render_view, so the
+            // bit toggled twice per frame - the rejected shaking, and a state
+            // too brief for the engine to build the occupant's first-person
+            // models. Halo 3's accepted C20 clears once per occupation and
+            // restores on the seat/exit/config/teardown edges, which the
+            // sampler below and CleanupLocked now own. Abnormal exit still
+            // restores through the __finally this flag guards.
             seatLeaseCleanupPermitted = true;
-            ReachRestoreNativeSeatLease();
+            // Teardown is the one case the sampler cannot serve: it returns at
+            // its own first guard once teardown is requested, so without this
+            // the worker would wait forever for an engine-thread restore and
+            // retain the hook. False in ordinary play, so the steady state
+            // still never touches the word.
+            if (g_reachCamera.teardownRequested.load(
+                    std::memory_order_acquire) ||
+                g_reachCamera.vehicleCameraBindingState.load(
+                    std::memory_order_acquire) != static_cast<uint8_t>(
+                        ReachVehicleCameraBindingState::Installed))
+            {
+                ReachRestoreNativeSeatLease();
+            }
         }
 
         ReachSampleVehicleInputState(windowIndex, returnAddress);
@@ -26908,7 +26979,8 @@ namespace
         static bool loggedFollowFallback = false;
         static bool loggedUnitCameraHide = false;
         static bool loggedUnitCameraHideFailure = false;
-        static bool loggedPatchActivity = false;
+        static uint32_t loggedPatchSerial = 0;
+        static uint32_t loggedPatchState = 0;
         static bool loggedPatchFailure = false;
         static bool loggedShotMove = false;
         static uint32_t loggedShotSkip = 0;
@@ -26938,7 +27010,8 @@ namespace
             loggedFollowFallback = false;
             loggedUnitCameraHide = false;
             loggedUnitCameraHideFailure = false;
-            loggedPatchActivity = false;
+            loggedPatchSerial = 0;
+            loggedPatchState = 0;
             loggedPatchFailure = false;
             loggedRecenters = 0;
             loggedExitRecenters = 0;
@@ -27160,26 +27233,42 @@ namespace
                 "could not be set or restored exactly; body hide alone fell "
                 "back for that frame and the seat camera continued");
         }
+        // R-V26: report what the ENGINE holds for the seat, once per change of
+        // state, not that we wrote it. `active` means the occupied seat is
+        // reporting first person right now, which is the state Halo 3's C20
+        // proved brings up the occupant's own arms and weapon;
+        // `external/native` means the seat was already first person (the
+        // Workshop first-person-vehicle maps do this in the tags) and we own
+        // no write at all. Either of those is a seat that should show hands.
         const uint32_t patchSerial = g_reachVehicleSeatPatchSerial.load(
             std::memory_order_acquire);
-        if (!loggedPatchActivity && patchSerial != 0)
+        const ReachSeatLeaseState leaseNow = ReachNativeSeatLeaseState();
+        if (patchSerial != 0 &&
+            (patchSerial != loggedPatchSerial ||
+             static_cast<uint32_t>(leaseNow) != loggedPatchState))
         {
-            loggedPatchActivity = true;
-            LOG("Reach first-person vehicles: native seat-bit one-frame-"
-                "interval body-hide lease observed (serial=%u, current=%s)",
-                patchSerial,
-                ReachNativeSeatLeaseStateName(
-                    ReachNativeSeatLeaseState()));
+            loggedPatchSerial = patchSerial;
+            loggedPatchState = static_cast<uint32_t>(leaseNow);
+            LOG("Reach seat first person: the occupied seat's third-person "
+                "camera bit is %s (serial=%u, state=%s); Reach builds the "
+                "occupant's own first-person arms and weapon only while this "
+                "seat reports first person",
+                (leaseNow == ReachSeatLeaseState::Active)
+                    ? "CLEARED by us for this occupation"
+                    : (leaseNow == ReachSeatLeaseState::External
+                           ? "already clear in the loaded tag; we own no write"
+                           : "not currently owned"),
+                patchSerial, ReachNativeSeatLeaseStateName(leaseNow));
         }
         if (!loggedPatchFailure &&
             g_reachVehicleSeatPatchFailures.load(
                 std::memory_order_relaxed) != 0)
         {
             loggedPatchFailure = true;
-            LOG("Reach first-person vehicles: native seat-bit body-hide lease "
-                "could not be installed/reconciled safely; body hide alone "
-                "fell back or remains cleanup-pending, while unit-aim feedback "
-                "and the seat camera continue");
+            LOG("Reach seat first person: the seat's camera bit could not be "
+                "cleared or restored safely; that seat keeps its stock "
+                "third-person presentation while unit-aim feedback and the "
+                "seat camera continue");
         }
         const uint32_t recenters = g_reachVehicleSeatRecenters.load(
             std::memory_order_relaxed);

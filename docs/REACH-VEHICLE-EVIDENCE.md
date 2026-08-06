@@ -1668,6 +1668,91 @@ both turret Warthogs sit correctly; a rocket/chaingun Warthog turret now logs
 its own identity instead of `unmatched vehicle tuple`; and no seat adjustment
 made while seated changes any other seat. Nothing here advances CURRENT-STATE.
 
+## R-V26 - 2026-08-06: passenger hands, with Halo 3's C20 lifetime
+
+The Halo 3 behavior being matched is stated verbatim in
+`docs/HALO3-VEHICLE-EVIDENCE.md` under the accepted C20 headset result:
+
+> 1. Clearing seat flag bit 4 does suppress the occupant's character model.
+> 2. It also brings up the **first-person weapon** in `allows weapons`
+>    passenger seats - the user reports hands and gun present there.
+
+The same document names the chain that makes point 2 true: `set_camera_mode`
+stores `c_director::get_perspective()` at output-user record `+0x604`; the
+first-person camera vtable returns perspective `0`; and the first-person model
+cache at `halo3+0x28ADDC` stores the player's unit into
+`first_person_camera_object_index` and builds the first-person weapon models
+**only** when that word is `0`. The perspective is chosen when the camera mode
+is set, i.e. during the tick, not inside a render callback.
+
+Reach authors the identical bit. `test_fbx_mongoose` seat 1 and
+`warthog_troop` seat 0 both read
+`third person camera, allows weapons, third person on enter, ...` in the HREK
+census (`out/hrek-evidence/reach-vehicle-census/`), so a Reach passenger seat
+really does allow a personal weapon and really is authored third person - which
+is why stock Reach shows no first-person gun there and why our seated
+first-person palette is nearly idle. The 12a7ee4 log measures that directly:
+between `01:01:50` and `01:02:47`, a stretch spent in driver seats, the
+first-person palette ran **6** times; comparable on-foot stretches run in the
+thousands.
+
+**What is different from the rejected R-V20.** R-V20 used the same bit and was
+rejected (`03766bd`, Steam / VirtualDesktopXR / Quest 3 / 90 Hz: player model
+still visible, vehicle shaking). Its mechanism was a *one-frame-interval
+lease*: the top of every proven normal-player outer callback restored the word,
+and the code before `main_render_view` cleared it again. The word therefore
+toggled twice per frame. Halo 3's accepted C20 does not do that at all -
+`Halo3EnsureFirstPersonSeatFlag` returns immediately on
+`sameSeat && patch.active` and writes nothing, so the bit is cleared once on
+entry and stays clear for the whole occupation, restoring on seat change, exit,
+config disable or teardown.
+
+R-V26 ports that lifetime exactly:
+
+1. The sampler that already builds the vehicle frame calls
+   `ReachEnsureNativeFirstPersonSeat` while the seat is occupied and
+   `ReachRestoreNativeSeatLease` when it is not - the same two lines, in the
+   same place, as Halo 3's C20 sampler.
+2. A key that is already `Active` returns early with no write. A different
+   generation, unit, parent, definition or raw seat is a new occupation: the
+   old word is restored first, and a failed restore leaves the old lease
+   pending and blocks the new claim rather than losing a live mutation.
+3. `vehicle_first_person` off, a lost binding, a sampler fault, or a proven
+   loss of the structural seat relationship all restore immediately. A
+   camera-only miss (marker, bounds or identity) with the occupation intact
+   deliberately keeps the lease, so a transient miss cannot reintroduce
+   per-frame churn.
+4. Teardown is the one edge the sampler cannot serve, because it returns at its
+   own first guard once teardown is requested. The outer callback therefore
+   restores when teardown is requested or the binding is no longer `Installed`.
+   That condition is false in ordinary play, so the steady state still never
+   touches the word.
+5. R-V20's value-only lease is kept whole: no seat, tag, definition or flags
+   pointer survives a callback, the live pointer is re-resolved from the key
+   before any restore, and a word that is neither our exact written value nor
+   its exact original belongs to an engine or tag writer, which wins
+   permanently for that key.
+6. The gate moved from `vehicle_hide_body` to `vehicle_first_person`. R-V20's
+   headset result proved this bit does not hide the Reach body - R-V22's
+   unit-camera hide-player bit does, and is independent - so tying it to the
+   body checkbox would have been a false label. It is gated by the checkbox
+   whose text it actually implements, "Sit in the seat (first person)".
+
+The worker now reports engine state rather than our intent: one line per change
+saying whether the occupied seat's third-person bit is *cleared by us for this
+occupation*, *already clear in the loaded tag* (the Workshop first-person
+vehicle maps do this in content, and we then own no write), or *not owned*.
+`kReachR_V20SeatBitLeaseEnabled` stays permanently false and its interval code
+remains dormant evidence.
+
+Release x64 builds, `ctest --preset release` passes 1/1, and
+`tools/check-reach-fp-parity.ps1` passes. The headset test is the acceptance:
+a Warthog or Mongoose passenger must show floating hands and the personal
+weapon, shots must follow them, and - because this is the bit R-V20 was
+rejected over - driver seats, both View Follow settings and the Scorpion,
+Wraith and Covenant turrets must be re-checked for any return of the vehicle
+shaking. Nothing here advances CURRENT-STATE.
+
 ## R-V9 - acceptance still required
 
 Nothing in this document changes the accepted pointer. Packaging, successful
