@@ -6718,17 +6718,52 @@ int main()
             turret.seat0Flags = kOdstSeatGunnerBit |
                 kOdstSeatThirdPersonCameraBit;
             turret.inVehicle = false;
-            // Same shape but the engine disagrees: refuse to guess.
+            // O8: same shape as the shade but the engine says it is not a
+            // vehicle. This was asserted as "refuse to guess" -> Unknown, and
+            // the 2026-08-06 probe proved it is real shipped content: the
+            // Covenant walk-up gun, `native=0 type=5 seats=1
+            // seat0Flags=0x800C`. Refusing left it with no authored seat point
+            // and put the camera at the vehicle root - in the ground. A turret
+            // the engine does not call a vehicle is a walk-up emplacement.
             OdstDefinitionFields ambiguous = shade;
             ambiguous.inVehicle = false;
             // No seat evidence at all: refuse to guess.
             OdstDefinitionFields blind = shade;
             blind.seatFlagsValid = false;
+            // O8: every real turret line from the 2026-08-06 ODST probe logs,
+            // so a change to this switch can never again move a family that
+            // was not checked. O7 was rejected for exactly that.
+            //
+            // The Warthog's own mounted gun: in a vehicle, two seats, seat 0 a
+            // GUNNER seat. It must keep resolving as it always has - O7 swept
+            // this into Shade and the user reported the Warthog turrets off.
+            OdstDefinitionFields warthogMountedGun;
+            warthogMountedGun.physicsType = kOdstPhysicsTypeTurret;
+            warthogMountedGun.seatFlagsValid = true;
+            warthogMountedGun.seat0Flags = 0x101188u;   // driver=0 gunner=1
+            warthogMountedGun.inVehicle = true;
+            // The Covenant walk-up gun: NOT a vehicle, one seat, and seat 0
+            // carries the driver bit - which used to reject it into Unknown,
+            // leaving it with no authored seat point at all.
+            OdstDefinitionFields covenantWalkUp;
+            covenantWalkUp.physicsType = kOdstPhysicsTypeTurret;
+            covenantWalkUp.seatFlagsValid = true;
+            covenantWalkUp.seat0Flags = 0x800Cu;        // driver=1 gunner=1
+            covenantWalkUp.inVehicle = false;
+            const bool probedTurretsResolve =
+                OdstResolveVehicleId(warthogMountedGun) ==
+                    OdstVehicleId::StationaryTurret &&
+                OdstResolveVehicleId(covenantWalkUp) ==
+                    OdstVehicleId::StationaryTurret &&
+                OdstFindSeatPoint(
+                    OdstVehicleId::StationaryTurret, 0, false) != nullptr;
             const bool shadeSplitsFromTurret =
+                probedTurretsResolve &&
                 OdstResolveVehicleId(shade) == OdstVehicleId::Shade &&
                 OdstResolveVehicleId(turret) ==
                     OdstVehicleId::StationaryTurret &&
-                OdstResolveVehicleId(ambiguous) == OdstVehicleId::Unknown &&
+                OdstResolveVehicleId(ambiguous) ==
+                    OdstVehicleId::StationaryTurret &&
                 OdstResolveVehicleId(blind) == OdstVehicleId::Unknown &&
                 OdstResolveVehicleId(OdstDefinitionFields{}) ==
                     OdstVehicleId::Unknown;

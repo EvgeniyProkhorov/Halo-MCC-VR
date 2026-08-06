@@ -295,6 +295,22 @@ inline OdstVehicleId OdstResolveVehicleId(const OdstDefinitionFields& def)
         // occupant is in a vehicle. Walk-up turrets satisfy neither.
         if ((def.seat0Flags & kOdstSeatDriverBit) && def.inVehicle)
             return OdstVehicleId::Shade;
+        // O8: a turret the engine does NOT call a vehicle is a walk-up
+        // emplacement, whatever its seat 0 authors. The 2026-08-06 probe
+        // caught the Covenant gun as `native=0 ... type=5 seats=1
+        // seat0Flags=0x800C (driver=1 gunner=1)`: it carries the driver bit,
+        // so the test below rejected it and it resolved to Unknown - no
+        // identity, therefore no authored seat point, therefore the camera sat
+        // at the vehicle root. That is the reported "I'm in the ground".
+        //
+        // This deliberately keys on inVehicle being FALSE, which is the exact
+        // opposite scoping to the rejected O7. Every in-vehicle turret,
+        // including the Warthog's own mounted gun (`def=0xE32 native=1
+        // seats=2`), reaches this point unchanged and is decided by the two
+        // rules above exactly as before. O7 broke that gun by sweeping the
+        // in-vehicle side; this cannot touch it.
+        if (!def.inVehicle)
+            return OdstVehicleId::StationaryTurret;
         if (!(def.seat0Flags & kOdstSeatDriverBit))
             return OdstVehicleId::StationaryTurret;
         return OdstVehicleId::Unknown;

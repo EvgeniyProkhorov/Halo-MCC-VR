@@ -801,3 +801,48 @@ switch. Two facts for the next candidate to start from:
    separates them, and no build is needed to collect it.
 
 Nothing here advances the accepted pointer.
+
+## O8 - 2026-08-06: the Covenant walk-up gun resolved to nothing
+
+O7 was rejected because it read the probe wrong. Both session logs, side by
+side, name the two turret families and settle which is which:
+
+| `def` | type | seats | `native` | `seat0Flags` | resolved before O8 |
+| --- | --- | ---: | ---: | --- | --- |
+| `0xE32` | 5 | 2 | 1 | `0x101188` (driver=0 gunner=1) | `turret` |
+| `0x14F5` | 5 | 1 | 0 | `0x800C` (driver=1 gunner=1) | **`unknown`** |
+
+`0xE32` is IN a vehicle and authors two seats: it is the **Warthog's own
+mounted gun**, which is exactly why O7's `inVehicle`-only rule renamed it Shade
+and the user reported the Warthog turrets off. The Covenant walk-up gun is
+`0x14F5`, and it resolved to **`unknown`** - no identity, therefore no authored
+seat point from `kOdstSeatPoints`, therefore the camera sat at the vehicle
+root. That is the "I'm in the ground", and it was never an anchor bug or a trim
+bug: the seat simply had no placement at all.
+
+The cause is one condition. The walk-up branch was
+`if (!(seat0Flags & driver)) return StationaryTurret;`, so an emplacement whose
+seat 0 happens to author the driver bit fell past it into `Unknown`. The
+Covenant gun authors driver AND gunner (`0x800C`).
+
+O8 adds one rule ahead of it: **a turret the engine does not call a vehicle is a
+walk-up emplacement, whatever its seat 0 authors.** That is the exact opposite
+scoping to O7 - it keys on `inVehicle` being FALSE, so every in-vehicle turret,
+including `0xE32`, reaches the two original rules unchanged and cannot be
+touched. The walk-up seat point it now receives, `-0.2368/0.0000/0.5743`, is the
+row the table already documents as shared by "the walk-up machinegun turret /
+plasma cannon / missile pod ... exactly as they do in Halo 3".
+
+Exactly one case changes: turret physics, not in a vehicle, driver bit set -
+previously `Unknown`, now `StationaryTurret`. One existing test asserted that
+case as "refuse to guess"; the probe proves it is real shipped content, and
+refusing is what left the player in the ground.
+
+The core tests now pin both real probe words - the Warthog mounted gun
+`0x101188 / inVehicle` and the Covenant walk-up `0x800C / not-inVehicle` - so a
+future change to this switch cannot silently move a family that was not
+checked, which is the specific way O7 failed.
+
+Release x64 builds, `ctest --preset release` passes 1/1, and the Reach parity
+gate passes. Headset acceptance: the Covenant turret seats the player at the
+gun, and the Warthog turret is unchanged from `dc50e6b`.
