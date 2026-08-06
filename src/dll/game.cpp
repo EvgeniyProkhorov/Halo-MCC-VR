@@ -15662,8 +15662,6 @@ namespace
     using ReachObjectUltimateParentFn = int32_t(__fastcall*)(int32_t);
     using ReachVehicleTypeFn = int32_t(__fastcall*)(uint32_t);
     using ReachTagGetFn = void*(__fastcall*)(uint32_t, uint32_t);
-    using ReachFirstPersonWeaponVisibilityFn =
-        bool(__fastcall*)(int32_t, int32_t);
 
     enum class ReachVehicleInputBindingState : uint8_t
     {
@@ -15975,9 +15973,6 @@ namespace
         ReachObjectUltimateParentFn objectUltimateParent = nullptr;
         ReachVehicleTypeFn vehicleType = nullptr;
         ReachTagGetFn tagGet = nullptr;
-        ReachFirstPersonWeaponVisibilityFn firstPersonWeaponsShow = nullptr;
-        ReachFirstPersonWeaponVisibilityFn firstPersonWeaponsHide = nullptr;
-        std::atomic<uint8_t> passengerPresentationState{0};
         std::atomic<uint8_t> vehicleCameraBindingState{
             static_cast<uint8_t>(
                 ReachVehicleCameraBindingState::StockFallback)};
@@ -16761,10 +16756,6 @@ namespace
 
     Halo3VehicleDebounce g_reachVehicleFpDebounce;
     ReachSeatRecenterLatch g_reachSeatRecenterLatch;
-    ReachSeatRecenterLatch g_reachPassengerPresentationLatch;
-    std::atomic<uint32_t> g_reachPassengerPresentationShows{0};
-    std::atomic<uint32_t> g_reachPassengerPresentationHides{0};
-    std::atomic<uint32_t> g_reachPassengerPresentationFailures{0};
     Halo3SeatYaw g_reachSeatYaw;
     Halo3SeatPositionKey g_reachYawSeat;
 
@@ -22266,102 +22257,6 @@ namespace
         }
     }
 
-    // Halo 3 passenger parity means a real first-person weapon graph, not a
-    // render-time camera-bit illusion. Official HREK first_person_weapons.cpp
-    // exposes independent show/hide transactions. Request show once per exact
-    // allows-weapons occupation; request hide only when that passenger moves to
-    // another vehicle seat or disables vehicle FP. A true on-foot exit is left
-    // to Reach's normal first-person lifecycle.
-    void ReachUpdatePassengerWeaponPresentation(
-        const ReachVehicleFrame* frame)
-    {
-        if (!frame)
-        {
-            g_reachPassengerPresentationLatch.Clear();
-            return;
-        }
-
-        const bool wants =
-            ReachSeatWantsPersonalWeaponPresentation(
-                frame->active, frame->seatFlags);
-        if (!wants)
-        {
-            if (!g_reachPassengerPresentationLatch.valid)
-                return;
-            bool hidden = false;
-            if (g_reachCamera.passengerPresentationState.load(
-                    std::memory_order_acquire) == 2 &&
-                g_reachCamera.firstPersonWeaponsHide)
-            {
-                __try
-                {
-                    // Zero is Reach's immediate native transition, matching
-                    // its own unit-state caller at HREK 0xD8510F.
-                    g_reachCamera.firstPersonWeaponsHide(0, 0);
-                    hidden = true;
-                }
-                __except (EXCEPTION_EXECUTE_HANDLER)
-                {
-                    g_reachCamera.passengerPresentationState.store(
-                        1, std::memory_order_release);
-                    g_reachPassengerPresentationFailures.fetch_add(
-                        1, std::memory_order_relaxed);
-                }
-            }
-            if (hidden)
-            {
-                g_reachPassengerPresentationHides.fetch_add(
-                    1, std::memory_order_relaxed);
-            }
-            g_reachPassengerPresentationLatch.Clear();
-            return;
-        }
-
-        const ReachSeatLeaseKey key{
-            g_reachCamera.generation.load(std::memory_order_acquire),
-            frame->unitHandle, frame->directParent, frame->definitionDatum,
-            frame->seatIndex};
-        if (!g_reachPassengerPresentationLatch.NeedsApply(
-                true, true, &key))
-        {
-            return;
-        }
-        if (g_reachCamera.passengerPresentationState.load(
-                std::memory_order_acquire) != 2 ||
-            !g_reachCamera.firstPersonWeaponsShow)
-        {
-            return;
-        }
-
-        bool transitioned = false;
-        bool completed = false;
-        __try
-        {
-            transitioned = g_reachCamera.firstPersonWeaponsShow(0, 0);
-            completed = true;
-        }
-        __except (EXCEPTION_EXECUTE_HANDLER)
-        {
-            g_reachCamera.passengerPresentationState.store(
-                1, std::memory_order_release);
-            g_reachPassengerPresentationFailures.fetch_add(
-                1, std::memory_order_relaxed);
-        }
-        // False means Reach is still in an active/pending/hide transition. Do
-        // not consume the exact-seat latch: retry on a later rendered frame so
-        // a stock third-person hide can finish before this FP show begins.
-        if (!completed || !transitioned)
-            return;
-        if (!g_reachPassengerPresentationLatch.Commit(key))
-        {
-            g_reachPassengerPresentationFailures.fetch_add(
-                1, std::memory_order_relaxed);
-            return;
-        }
-        g_reachPassengerPresentationShows.fetch_add(
-            1, std::memory_order_relaxed);
-    }
-
     bool ReachSampleVehicleCameraFrame(ReachVehicleFrame& frame)
     {
         frame = {};
@@ -22864,7 +22759,6 @@ namespace
             g_reachSeatAnchorLatch = {};
             g_reachVehicleFpDebounce = {};
             g_reachSeatRecenterLatch.Clear();
-            g_reachPassengerPresentationLatch.Clear();
             g_reachVehicleFpStable.store(
                 static_cast<uint32_t>(Halo3VehicleState::Unknown),
                 std::memory_order_relaxed);
@@ -22919,8 +22813,6 @@ namespace
                         ? g_reachVehicleFpDebounce.stable
                         : Halo3VehicleState::OnFoot),
                 nowMs);
-            if (unitKnown && !seatOccupationObserved)
-                ReachUpdatePassengerWeaponPresentation(nullptr);
             return false;
         }
 
@@ -22935,7 +22827,6 @@ namespace
         // record before substituting a personal-weapon origin.
         ReachPublishShotOccupation(
             generation, frame.active ? &frame : nullptr);
-        ReachUpdatePassengerWeaponPresentation(&frame);
         ReachUpdateVehicleTransition(Halo3VehicleState::Vehicle, nowMs);
         return frame.active;
     }
@@ -24235,8 +24126,6 @@ namespace
             static_cast<uint8_t>(
                 ReachVehicleCameraBindingState::CleanupRequired),
             std::memory_order_release);
-        g_reachCamera.passengerPresentationState.store(
-            1, std::memory_order_release);
         g_reachVehicleTrimSnapshot.store(0, std::memory_order_release);
         g_reachSeatAuthorsSteering.store(0, std::memory_order_release);
         Halo3ClearRollStableFollow();
@@ -24387,10 +24276,6 @@ namespace
         g_reachCamera.objectUltimateParent = nullptr;
         g_reachCamera.vehicleType = nullptr;
         g_reachCamera.tagGet = nullptr;
-        g_reachCamera.firstPersonWeaponsShow = nullptr;
-        g_reachCamera.firstPersonWeaponsHide = nullptr;
-        g_reachCamera.passengerPresentationState.store(
-            0, std::memory_order_release);
         g_reachCamera.vehicleCameraBindingState.store(
             static_cast<uint8_t>(
                 ReachVehicleCameraBindingState::StockFallback),
@@ -24402,7 +24287,6 @@ namespace
             std::memory_order_relaxed);
         g_reachVehicleFpDebounce = {};
         g_reachSeatRecenterLatch.Clear();
-        g_reachPassengerPresentationLatch.Clear();
         g_reachYawReferencePair.store(
             kReachInvalidYawReferencePair,
             std::memory_order_release);
@@ -24741,48 +24625,6 @@ namespace
             ReachColdExecutableAddress(
                 reinterpret_cast<uintptr_t>(vehicleType)) &&
             ReachColdExecutableAddress(reinterpret_cast<uintptr_t>(tagGet));
-    }
-
-    // Optional passenger-presentation binding. HREK
-    // interface/first_person_weapons.cpp 0x8CB7A0 and 0x8CB8F0 establish the
-    // show/hide ABI and state transitions; retail is used only to match the two
-    // homologs. Both signatures must be unique at their pinned RVAs.
-    bool ResolveReachPassengerPresentationBinding(
-        uintptr_t base, size_t size,
-        ReachFirstPersonWeaponVisibilityFn& show,
-        ReachFirstPersonWeaponVisibilityFn& hide)
-    {
-        show = nullptr;
-        hide = nullptr;
-        static constexpr char kShowAob[] =
-            "48 89 5C 24 08 48 89 6C 24 10 48 89 74 24 20 "
-            "57 41 54 41 55 41 56 41 57 48 83 EC 20 4C 63 F9 "
-            "44 8B EA 33 C9";
-        static constexpr char kHideAob[] =
-            "48 89 5C 24 18 89 54 24 10 55 56 57 41 54 41 55 "
-            "41 56 41 57 48 83 EC 20 4C 63 F9 33 DB 44 8B E2";
-        static constexpr char kShowStateTransitionAob[] =
-            "83 E0 BF 83 C8 10 EB 06 83 E0 EF 83 C8 40";
-        constexpr uintptr_t kShowStateTransitionOffset = 0xF0;
-        if (!ReachColdExactSignatureAt(
-                base, size, kReachFirstPersonWeaponsShowRva, kShowAob) ||
-            !ReachColdExactSignatureAt(
-                base, size, kReachFirstPersonWeaponsHideRva, kHideAob) ||
-            !ReachColdExactSignatureAt(
-                base, size,
-                kReachFirstPersonWeaponsShowRva +
-                    kShowStateTransitionOffset,
-                kShowStateTransitionAob))
-        {
-            return false;
-        }
-        show = reinterpret_cast<ReachFirstPersonWeaponVisibilityFn>(
-            base + kReachFirstPersonWeaponsShowRva);
-        hide = reinterpret_cast<ReachFirstPersonWeaponVisibilityFn>(
-            base + kReachFirstPersonWeaponsHideRva);
-        return ReachColdExecutableAddress(
-                   reinterpret_cast<uintptr_t>(show)) &&
-            ReachColdExecutableAddress(reinterpret_cast<uintptr_t>(hide));
     }
 
     bool ResolveReachLightmapShadowsControl(
@@ -25672,19 +25514,6 @@ namespace
                 "parent proof failed");
         }
 
-        ReachFirstPersonWeaponVisibilityFn reachPassengerShow = nullptr;
-        ReachFirstPersonWeaponVisibilityFn reachPassengerHide = nullptr;
-        const bool reachPassengerPresentationResolved =
-            reachVehicleCameraResolved &&
-            ResolveReachPassengerPresentationBinding(
-                base, size, reachPassengerShow, reachPassengerHide);
-        if (!reachPassengerPresentationResolved)
-        {
-            LOG("Reach passenger presentation: StockFallback; the exact HREK "
-                "first-person weapon show/hide homologs did not verify. Vehicle "
-                "camera, body hide and OpenXR remain active");
-        }
-
         uint8_t* reachNativeWeaponIkDisable = nullptr;
         uint8_t reachNativeWeaponIkDisableOriginal = 0;
         if (!ResolveReachNativeWeaponIkControl(
@@ -26180,13 +26009,6 @@ namespace
             reachVehicleCameraResolved ? reachVehicleType : nullptr;
         g_reachCamera.tagGet =
             reachVehicleCameraResolved ? reachTagGet : nullptr;
-        g_reachCamera.firstPersonWeaponsShow =
-            reachPassengerPresentationResolved ? reachPassengerShow : nullptr;
-        g_reachCamera.firstPersonWeaponsHide =
-            reachPassengerPresentationResolved ? reachPassengerHide : nullptr;
-        g_reachCamera.passengerPresentationState.store(
-            reachPassengerPresentationResolved ? 2 : 0,
-            std::memory_order_release);
         g_reachCamera.vehicleCameraBindingState.store(
             static_cast<uint8_t>(reachVehicleCameraResolved
                 ? ReachVehicleCameraBindingState::Installed
@@ -26234,11 +26056,6 @@ namespace
         ReachClearHullHeading();
         g_reachVehicleFpDebounce = {};
         g_reachSeatRecenterLatch.Clear();
-        g_reachPassengerPresentationLatch.Clear();
-        g_reachPassengerPresentationShows.store(0, std::memory_order_relaxed);
-        g_reachPassengerPresentationHides.store(0, std::memory_order_relaxed);
-        g_reachPassengerPresentationFailures.store(
-            0, std::memory_order_relaxed);
         g_reachYawReferencePair.store(
             kReachInvalidYawReferencePair,
             std::memory_order_release);
@@ -26258,12 +26075,6 @@ namespace
                 "render-scoped native unit-camera body hide, bounce and "
                 "hands",
                 kReachVehicleIdentityCount);
-            if (reachPassengerPresentationResolved)
-            {
-                LOG("Reach passenger presentation: Installed; allows-weapons "
-                    "seats request the native first-person weapon graph while "
-                    "the camera and steering remain on the accepted Reach path");
-            }
         }
 
         // The shot line (R-V10). Resolve the camera-position evaluator and
@@ -26874,8 +26685,6 @@ namespace
         static bool loggedAimFallback = false;
         static bool loggedAimReadFallback = false;
         static bool loggedReticleAimFallback = false;
-        static bool loggedPassengerPresentation = false;
-        static bool loggedPassengerPresentationFailure = false;
         static uint32_t loggedRecenters = 0;
         static uint32_t loggedExitRecenters = 0;
         static uint64_t loggedSeat = 0;
@@ -26908,8 +26717,6 @@ namespace
             loggedAimFallback = false;
             loggedAimReadFallback = false;
             loggedReticleAimFallback = false;
-            loggedPassengerPresentation = false;
-            loggedPassengerPresentationFailure = false;
             for (auto& missSlot : g_reachVehicleCensusMisses)
                 missSlot.state.store(0, std::memory_order_release);
         }
@@ -26959,27 +26766,6 @@ namespace
                 "(not a current allows-weapons personal seat, key mismatch, "
                 "or stale/invalid completed eye); those shots kept the stock "
                 "origin");
-        }
-        const uint32_t passengerShows =
-            g_reachPassengerPresentationShows.load(
-                std::memory_order_relaxed);
-        if (!loggedPassengerPresentation && passengerShows != 0)
-        {
-            loggedPassengerPresentation = true;
-            LOG("Reach passenger floating hands ACTIVE: native first-person "
-                "weapon graph requested for the exact allows-weapons seat "
-                "(transitions=%u, hides=%u)",
-                passengerShows,
-                g_reachPassengerPresentationHides.load(
-                    std::memory_order_relaxed));
-        }
-        if (!loggedPassengerPresentationFailure &&
-            g_reachPassengerPresentationFailures.load(
-                std::memory_order_relaxed) != 0)
-        {
-            loggedPassengerPresentationFailure = true;
-            LOG("Reach passenger floating hands: native show/hide transaction "
-                "faulted; only passenger weapon presentation is now stock");
         }
         if (!loggedVehicleShotRedirect &&
             g_reachVehicleShotRedirects.load(

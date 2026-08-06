@@ -1674,18 +1674,6 @@ int main()
                     ReachSeatLeaseRestoreDisposition::ExternalWrite,
                 "Reach body hide sets only unit-camera bit 2 and restores only that owned bit while preserving unrelated changes");
         }
-        Check(
-            ReachSeatWantsPersonalWeaponPresentation(
-                true, kReachSeatThirdPersonCameraBit |
-                          kReachSeatAllowsWeaponsBit) &&
-            !ReachSeatWantsPersonalWeaponPresentation(
-                true, kReachSeatThirdPersonCameraBit) &&
-            !ReachSeatWantsPersonalWeaponPresentation(
-                false, kReachSeatAllowsWeaponsBit) &&
-            kReachFirstPersonWeaponsShowRva == 0x002B5474 &&
-            kReachFirstPersonWeaponsHideRva == 0x002B5598 &&
-            std::fabs(kReachVehicleCamFineHalfRange - 0.10f) < 1.0e-6f,
-            "Reach passenger presentation uses native FP-weapon state independently of camera mode and exposes a 20 cm fine-slider window");
         // R-V18: entering a Reach seat selects the same native aim feedback
         // under BOTH view-follow settings.
         {

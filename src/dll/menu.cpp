@@ -839,70 +839,8 @@ namespace
             seatFwd = ConfigOdstSeatCamForward(g_config, seatSlot);
         else if (s_seatBank == VehicleTrimBank::Reach)
             seatFwd = ConfigReachSeatCamForward(g_config, seatSlot);
-        float seatUp = ConfigSeatCamUp(g_config, seatSlot);
-        if (s_seatBank == VehicleTrimBank::Odst)
-            seatUp = ConfigOdstSeatCamUp(g_config, seatSlot);
-        else if (s_seatBank == VehicleTrimBank::Reach)
-            seatUp = ConfigReachSeatCamUp(g_config, seatSlot);
-        float seatRight = ConfigSeatCamRight(g_config, seatSlot);
-        if (s_seatBank == VehicleTrimBank::Odst)
-            seatRight = ConfigOdstSeatCamRight(g_config, seatSlot);
-        else if (s_seatBank == VehicleTrimBank::Reach)
-            seatRight = ConfigReachSeatCamRight(g_config, seatSlot);
-
-        struct ReachFineSeatRange
-        {
-            int slot = -1;
-            float center[3]{};
-        };
-        static ReachFineSeatRange s_reachFineRange;
-        const auto centerReachFineRange = [&]() {
-            s_reachFineRange.slot = seatSlot;
-            s_reachFineRange.center[0] = seatFwd;
-            s_reachFineRange.center[1] = seatUp;
-            s_reachFineRange.center[2] = seatRight;
-        };
-        if (!reachSeat)
-        {
-            s_reachFineRange.slot = -1;
-        }
-        else
-        {
-            const bool changedSeat = s_reachFineRange.slot != seatSlot;
-            const bool outsideWindow =
-                fabsf(seatFwd - s_reachFineRange.center[0]) >
-                    kReachVehicleCamFineHalfRange ||
-                fabsf(seatUp - s_reachFineRange.center[1]) >
-                    kReachVehicleCamFineHalfRange ||
-                fabsf(seatRight - s_reachFineRange.center[2]) >
-                    kReachVehicleCamFineHalfRange;
-            if (changedSeat || outsideWindow)
-                centerReachFineRange();
-            ImGui::TextDisabled(
-                "Reach fine range: +/- %.0f cm around the current point.",
-                kReachVehicleCamFineHalfRange * 100.0f);
-            ImGui::SameLine();
-            if (ImGui::SmallButton("Recenter fine range##reachseattrim"))
-                centerReachFineRange();
-        }
-        const auto seatSlider = [&](const char* label, float* value, int axis,
-                                    float minimum, float maximum) {
-            if (!reachSeat)
-                return ImGui::SliderFloat(
-                    label, value, minimum, maximum, "%.2f");
-            const float center = s_reachFineRange.center[axis];
-            const float fineMin = std::max(
-                minimum, center - kReachVehicleCamFineHalfRange);
-            const float fineMax = std::min(
-                maximum, center + kReachVehicleCamFineHalfRange);
-            return ImGui::SliderFloat(
-                label, value, fineMin, fineMax, "%.3f",
-                ImGuiSliderFlags_NoRoundToFormat |
-                    ImGuiSliderFlags_AlwaysClamp);
-        };
-
-        if (seatSlider("Seat forward (m)", &seatFwd, 0,
-                       forwardMin, forwardMax))
+        if (ImGui::SliderFloat("Seat forward (m)", &seatFwd,
+                               forwardMin, forwardMax, "%.2f"))
         {
             if (perSeat)
             {
@@ -915,7 +853,13 @@ namespace
                 g_config.vehicle_cam_forward_m = seatFwd;
             changed = true;
         }
-        if (seatSlider("Seat height (m)", &seatUp, 1, upMin, upMax))
+        float seatUp = ConfigSeatCamUp(g_config, seatSlot);
+        if (s_seatBank == VehicleTrimBank::Odst)
+            seatUp = ConfigOdstSeatCamUp(g_config, seatSlot);
+        else if (s_seatBank == VehicleTrimBank::Reach)
+            seatUp = ConfigReachSeatCamUp(g_config, seatSlot);
+        if (ImGui::SliderFloat("Seat height (m)", &seatUp,
+                               upMin, upMax, "%.2f"))
         {
             if (perSeat)
             {
@@ -928,8 +872,13 @@ namespace
                 g_config.vehicle_cam_up_m = seatUp;
             changed = true;
         }
-        if (seatSlider("Seat left / right (m)", &seatRight, 2,
-                       rightMin, rightMax))
+        float seatRight = ConfigSeatCamRight(g_config, seatSlot);
+        if (s_seatBank == VehicleTrimBank::Odst)
+            seatRight = ConfigOdstSeatCamRight(g_config, seatSlot);
+        else if (s_seatBank == VehicleTrimBank::Reach)
+            seatRight = ConfigReachSeatCamRight(g_config, seatSlot);
+        if (ImGui::SliderFloat("Seat left / right (m)", &seatRight,
+                               rightMin, rightMax, "%.2f"))
         {
             if (perSeat)
             {
@@ -948,10 +897,7 @@ namespace
             if (ImGui::SmallButton("Back to the universal trim##seattrim"))
             {
                 if (reachSeat)
-                {
                     ConfigReachSeatUseUniversalTrim(g_config, seatSlot);
-                    s_reachFineRange.slot = -1;
-                }
                 else
                 {
                     trimForwardSet[seatSlot] = false;

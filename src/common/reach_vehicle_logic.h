@@ -476,12 +476,6 @@ inline constexpr bool ReachVehiclePhysicsTypeMatches(
 }
 
 inline constexpr uint32_t kReachSeatThirdPersonCameraBit = 1u << 4;
-
-// Official HREK first_person_weapons.cpp owns passenger weapon presentation
-// independently of the vehicle camera. Its show/hide transactions are matched
-// to these pinned-retail homologs by unique entry signatures before use.
-inline constexpr uintptr_t kReachFirstPersonWeaponsShowRva = 0x002B5474;
-inline constexpr uintptr_t kReachFirstPersonWeaponsHideRva = 0x002B5598;
 // HREK unit_camera_flags_definition bit 2: "hides player-unit from camera".
 // The controlling player's camera omits its unit; every other camera sees it.
 inline constexpr uint16_t kReachUnitCameraHidePlayerBit = 0x0004;
@@ -724,13 +718,6 @@ inline constexpr uint16_t ReachUnitCameraRestorePlayerFlags(
 // fires from a vehicle barrel and its shot origin must not be re-aimed.
 inline constexpr uint32_t kReachSeatAllowsWeaponsBit = 1u << 5;
 inline constexpr int kReachVehicleSeatLimit = 16;
-
-inline constexpr bool ReachSeatWantsPersonalWeaponPresentation(
-    bool vehicleFirstPerson, uint32_t seatFlags) noexcept
-{
-    return vehicleFirstPerson &&
-        (seatFlags & kReachSeatAllowsWeaponsBit) != 0;
-}
 
 // HREK weapons.cpp reads the ordinary unit aiming vector from the live unit
 // object at +0x214 when it builds the projectile line (R-V12/R-V18). This is
