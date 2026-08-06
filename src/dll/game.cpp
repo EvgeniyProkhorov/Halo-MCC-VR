@@ -22872,6 +22872,24 @@ namespace
         return false;
     }
 
+    bool ReadReachEnginePaused(bool& paused);
+
+    // A native pause suspends, never exits, the occupation. While Reach is
+    // paused its player-unit resolver reports no unit, so sampling published
+    // Unknown, the debounce left Vehicle, the seat lease was restored and the
+    // exact-seat latch cleared - and the resume then replayed a full seat
+    // ENTRY (play-space recenter, seat camera-bit clear, LT/X rebind) about
+    // 2 s later. Both captured Reach kick-to-menu events (07:21:14 and
+    // 08:36:16, 2026-08-06) follow exactly that replayed entry by 1.5-3 s.
+    // The R-V26 rule already holds the occupation across camera-only misses;
+    // a native pause is the same suspension, so every published seat state
+    // holds across it and nothing is restored or reapplied at resume.
+    bool ReachVehicleSamplingSuspendedByPause()
+    {
+        bool paused = false;
+        return ReadReachEnginePaused(paused) && paused;
+    }
+
     // Sample only on Reach's proven normal-player outer-render thread, whose
     // engine TLS is valid. The XInput hook reads only the resulting lock-free
     // snapshot and never calls title code from MCC's input thread.
@@ -22903,6 +22921,8 @@ namespace
                 base, kReachRetailImageSize, returnAddress) !=
                     ReachOuterRenderCaller::NormalPlayer)
             return;
+        if (ReachVehicleSamplingSuspendedByPause())
+            return; // hold the previous snapshot; a pause is not an exit
 
         ReachVehicleInputState state = ReachVehicleInputState::Unknown;
         bool faulted = false;
@@ -22984,6 +23004,12 @@ namespace
         {
             return false;
         }
+        // See ReachVehicleSamplingSuspendedByPause: return before ANY publish,
+        // restore or transition so the whole occupation (input snapshot,
+        // debounced state, seat lease, trim/shot occupation, exact-seat
+        // latch) holds across a native pause and the resume replays nothing.
+        if (ReachVehicleSamplingSuspendedByPause())
+            return false;
 
         const uint64_t nowMs = GetTickCount64();
         bool unitKnown = false;
