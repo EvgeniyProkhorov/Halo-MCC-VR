@@ -148,9 +148,6 @@ inline constexpr float kReachVehicleCamUpMin = -16.0f;
 inline constexpr float kReachVehicleCamUpMax = 16.0f;
 inline constexpr float kReachVehicleCamRightMin = -16.0f;
 inline constexpr float kReachVehicleCamRightMax = 16.0f;
-// Reach's wide authored-placement ranges make a range-based slider too coarse.
-// Its F1 trim controls use an explicit one-millimetre drag increment instead.
-inline constexpr float kReachVehicleCamFineStep = 0.001f;
 
 // The storage slot for one seat, or -1 when the seat cannot be keyed (on
 // foot, unidentified vehicle, or a seat index Halo 3 never authors).

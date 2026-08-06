@@ -719,30 +719,6 @@ inline constexpr uint16_t ReachUnitCameraRestorePlayerFlags(
 inline constexpr uint32_t kReachSeatAllowsWeaponsBit = 1u << 5;
 inline constexpr int kReachVehicleSeatLimit = 16;
 
-// Reach decides whether to build the passenger's first-person hands/weapon
-// presentation while main_render_view is running. A personal-weapon seat is
-// identified by the independent HREK-authored "allows weapons" bit. Clear the
-// camera-mode bit only for that bounded render call: this admits the native FP
-// weapon graph without reviving R-V20's between-frame camera/control lease.
-inline constexpr bool ReachSeatNeedsPersonalWeaponPresentation(
-    bool frameActive, bool vehicleFirstPerson, uint32_t seatFlags)
-{
-    return frameActive && vehicleFirstPerson &&
-        (seatFlags & kReachSeatAllowsWeaponsBit) != 0;
-}
-
-inline constexpr uint32_t ReachPersonalWeaponPresentationFlags(uint32_t flags)
-{
-    return flags & ~kReachSeatThirdPersonCameraBit;
-}
-
-inline constexpr uint32_t ReachRestorePersonalWeaponPresentationFlags(
-    uint32_t currentFlags, uint32_t originalFlags)
-{
-    return (currentFlags & ~kReachSeatThirdPersonCameraBit) |
-        (originalFlags & kReachSeatThirdPersonCameraBit);
-}
-
 // HREK weapons.cpp reads the ordinary unit aiming vector from the live unit
 // object at +0x214 when it builds the projectile line (R-V12/R-V18). This is
 // engine aim state, not a camera marker or the compact render camera.
