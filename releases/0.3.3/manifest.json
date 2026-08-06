@@ -3,6 +3,7 @@
   "release": "MCC_VR_ALPHA_0.3.3",
   "release_url": "https://github.com/pancreations/Halo-MCC-VR/releases/tag/MCC_VR_ALPHA_0.3.3",
   "supersedes": "MCC_VR_ALPHA_0.3.2",
+  "tag_commit": "61725bf099555d01d5c792eb048d9326d1563619",
   "runtime_source_commit": "94dc09fd0a6579d723de71792ae4c3f62ce4fb7e",
   "candidate_package": "out/candidates/94dc09f-reach-fp-parity-20260806-150849513Z",
   "build": {
