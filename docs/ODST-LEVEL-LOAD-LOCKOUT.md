@@ -349,6 +349,25 @@ sufficient to bounce a load; it is not proven to be the ONLY trigger of the
 kick-to-menu family. If a mid-play kick recurs on this build, its log now
 carries the full gate history for that generation.
 
+**REACH MID-PLAY KICK LEAD (2026-08-06, second capture + crash).** Preserved:
+`halo3xr-a42e869-steam-20260806-reach-pause-seat-reentry-kick-and-crash.log`
+(SHA-256 `06123F50...F795BEF`). Both captured Reach kicks sit on the identical
+sequence: pause -> resume -> ~2 s -> a REPLAYED "exact occupied-seat entry"
+(recenter count increments for a seat never left, "local player seated;
+native LT/X active" re-logs) -> the engine bails to the menu 1.5-3 s later
+(07:21:07-14 and 08:36:10-18). Cause of the replay: a natively paused Reach
+reports no player unit, so the vehicle samplers published Unknown, the
+debounce left Vehicle, the seat lease was RESTORED (an engine-visible
+seat-flags write), the exact-seat latch cleared, and resume replayed the full
+entry. Fixed in `382e4eb`: both samplers hold every published seat state
+across a native pause (the R-V26 suspension rule). Whether removing the
+replayed entry also removes the kick is the open headset question. The same
+session shows the post-kick dead state: after teardown the display worker
+proof waits on engine-fields forever in menus/theatre, so nothing can
+reinstall until a real mission load - and MCC itself crashed 2 s after a
+pause press in that state (dump 08:37:39, WER unread - archive needs
+elevation).
+
 **The session end (the "Halo 3 did not hook" report).** After the 07:21:14
 kick, the menu's module churn transiently narrowed to a unique
 `haloreach.dll` and Reach was re-detected at 07:21:18; the runtime correctly

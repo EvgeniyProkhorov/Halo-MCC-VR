@@ -28957,14 +28957,24 @@ namespace
 
         if (!installed)
         {
+            // Sample the level-load gate every tick from title detection, NOT
+            // only once the display proof passes. The proof's engine-fields
+            // often settle only when the level is already rendering, and a
+            // gate that begins observing there has missed the loading
+            // screen's freeze - it then pays the full 6 s already-running
+            // proof while the level and its opening cinematic show flat.
+            // Captured 2026-08-06: proof PASS 08:54:38, gate open
+            // (already-running, 6078 ms) 08:54:44, 3D ~9 s after the level
+            // appeared - against the same session's 08:52:31 where an early
+            // proof let the gate witness frozen-then-ticking and 3D arrived
+            // ~2 s in. Sampling is a read-only fingerprint of engine memory;
+            // installing still requires the proof AND the open gate.
+            const bool gateOpen = g_reachLevelLoadGate.AllowsInstall(
+                generation, base, kReachRetailImageSize,
+                kReachPlayerViewArray, "Reach");
             // Never hook into a loading screen; see PlayerViewLivenessGate.
-            if (ready &&
-                g_reachLevelLoadGate.AllowsInstall(
-                    generation, base, kReachRetailImageSize,
-                    kReachPlayerViewArray, "Reach"))
-            {
+            if (ready && gateOpen)
                 InstallReachCameraCore(base, size, generation);
-            }
             return;
         }
         if (!g_reachCamera.armed.load(std::memory_order_acquire) && ready &&
