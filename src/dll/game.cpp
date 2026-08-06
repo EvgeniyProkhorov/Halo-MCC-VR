@@ -16119,6 +16119,14 @@ namespace
         std::atomic<float> x{0.0f};
         std::atomic<float> y{0.0f};
         std::atomic<float> z{0.0f};
+        // R-V27: the ORIGIN of the same presented sight ray, in the same game
+        // space as the target above. A seated personal shot must leave this
+        // point, not the rendered eye: the crosshair rides the controller ray,
+        // so an eye-origin shot only crosses the sight at crosshair_distance_m
+        // and misses it at every other range.
+        std::atomic<float> originX{0.0f};
+        std::atomic<float> originY{0.0f};
+        std::atomic<float> originZ{0.0f};
     };
     ReachCompletedReticleTargetPublication g_reachCompletedReticleTarget;
 
@@ -16413,6 +16421,16 @@ namespace
     std::atomic<uint32_t> g_reachFiringOriginSkipNoWeaponSeat{0};
     std::atomic<uint32_t> g_reachFiringOriginSkipKeyMismatch{0};
     std::atomic<uint32_t> g_reachFiringOriginSkipStaleEye{0};
+    std::atomic<uint32_t> g_reachFiringOriginSkipNoSightRay{0};
+    // The occupied seat's own flags word, published by the engine
+    // thread that read it so the worker can report it honestly.
+    std::atomic<uint32_t> g_reachVehicleSeatFlagsPublished{0};
+    // How many times Reach's own first-person interpolation/palette
+    // transaction ran while a vehicle seat was occupied. This is the
+    // one number that separates "the engine never built the occupant's
+    // arms and weapon" from "it built them and we placed or collapsed
+    // them wrong", and no previous report could tell those apart.
+    std::atomic<uint32_t> g_reachSeatedFpPaletteCalls{0};
 
     struct ReachShotOccupationSnapshot
     {
@@ -16440,6 +16458,7 @@ namespace
         uint64_t sampleMs = 0;
         ReachSeatLeaseKey key{};
         float target[3]{};
+        float origin[3]{};
     };
 
     bool ReachReadShotOccupation(ReachShotOccupationSnapshot& out)
@@ -16536,6 +16555,12 @@ namespace
                 published.y.load(std::memory_order_relaxed);
             sample.target[2] =
                 published.z.load(std::memory_order_relaxed);
+            sample.origin[0] =
+                published.originX.load(std::memory_order_relaxed);
+            sample.origin[1] =
+                published.originY.load(std::memory_order_relaxed);
+            sample.origin[2] =
+                published.originZ.load(std::memory_order_relaxed);
             if (published.sequence.load(std::memory_order_acquire) != before)
                 continue;
             out = sample;
@@ -16614,9 +16639,47 @@ namespace
             reason->fetch_add(1, std::memory_order_relaxed);
             return stockResult;
         }
-        out[0] = renderedEye.eye[0];
-        out[1] = renderedEye.eye[1];
-        out[2] = renderedEye.eye[2];
+        // R-V27: leave from where the SIGHT starts, not from the eye.
+        //
+        // The 7235d8d headset run proved this substitution finally fires for a
+        // passenger ("seated personal-weapon shots are leaving the rendered
+        // eye", 01:52:57) and the user still reported that shots do not follow
+        // the crosshair. The rendered eye was the wrong point. In a Reach
+        // vehicle the sight we present is the floating CONTROLLER reticle, and
+        // ReachBuildPresentedReticleWorldTarget places it at
+        // crosshair_distance_m along the controller ray. A shot leaving the eye
+        // toward a point on the controller ray is a different line that merely
+        // CROSSES the sight at that one distance; at every other range it is
+        // off by the whole eye-to-hand offset - tens of centimetres, several
+        // degrees at close range. Taking the ray's own origin makes the shot
+        // line and the sight line the same line at every range, which is the
+        // property the ODST work recorded as the whole point of moving an
+        // origin at all.
+        //
+        // No silent fallback: without a fresh exact-key sight ray this shot
+        // stays completely stock rather than leaving from a mismatched point.
+        ReachCompletedReticleTargetSnapshot sight{};
+        const bool sightRead = ReachReadCompletedReticleTarget(sight) &&
+            g_reachCompletedReticleTarget.sequence.load(
+                std::memory_order_acquire) == sight.sequence;
+        const bool sightUsable = sightRead && sight.sampleMs != 0 &&
+            sight.generation == generation &&
+            ReachSeatLeaseKeyValid(sight.key) &&
+            ReachSeatLeaseKeyEqual(sight.key, occupation.key) &&
+            nowMs >= sight.sampleMs &&
+            nowMs - sight.sampleMs <= kReachShotOriginFreshMs &&
+            std::isfinite(sight.origin[0]) && std::isfinite(sight.origin[1]) &&
+            std::isfinite(sight.origin[2]);
+        if (!sightUsable)
+        {
+            g_reachFiringOriginSkips.fetch_add(1, std::memory_order_relaxed);
+            g_reachFiringOriginSkipNoSightRay.fetch_add(
+                1, std::memory_order_relaxed);
+            return stockResult;
+        }
+        out[0] = sight.origin[0];
+        out[1] = sight.origin[1];
+        out[2] = sight.origin[2];
         g_reachFiringOriginMoves.fetch_add(1, std::memory_order_relaxed);
         return stockResult;
     }
@@ -19932,11 +19995,15 @@ namespace
                 "the title's own crosshair alpha/fade fields (kill_reticle=1)");
     }
 
+    // R-V27: `outOrigin` is where the presented sight ray STARTS, in the same
+    // game space as `outTarget`. Both come from one controller pose through one
+    // transform, so a shot fired from the origin toward the target is the exact
+    // line the player sees - at every range, not just at crosshair_distance_m.
     bool ReachBuildPresentedReticleWorldTarget(
-        const ReachOwnerScope& owner, float outTarget[3],
+        const ReachOwnerScope& owner, float outTarget[3], float outOrigin[3],
         uint64_t& outSampleMs)
     {
-        if (!outTarget || !owner.vehicleViewApplied ||
+        if (!outTarget || !outOrigin || !owner.vehicleViewApplied ||
             !owner.vehicle.active)
         {
             return false;
@@ -19973,15 +20040,8 @@ namespace
             p[1] + aimForward[1] * distance,
             p[2] + aimForward[2] * distance};
 
-        const float dx = localTarget[0] - g_headPosRef[0];
-        const float dy = localTarget[1] - g_headPosRef[1];
-        const float dz = localTarget[2] - g_headPosRef[2];
         const float sh = sinf(g_headYawRef);
         const float ch = cosf(g_headYawRef);
-        const float roomForward = dx * sh - dz * ch;
-        const float roomRight = dx * ch + dz * sh;
-        const float positionLocal[3] = {roomForward, -roomRight, dy};
-        float offset[3]{};
         float hullYaw = 0.0f;
         float hullPitch = 0.0f;
         float positionBasis[9]{};
@@ -19989,29 +20049,45 @@ namespace
             Halo3ReadRollStableFollow(hullYaw, hullPitch) &&
             Halo3ComposeRollStableFollowBasis(
                 hullYaw, hullPitch, g_gameYawRef,
-                0.0f, 0.0f, 0.0f, positionBasis) &&
-            Halo3TransformBasisVector(
-                positionBasis, positionLocal, offset);
-        if (!follows)
+                0.0f, 0.0f, 0.0f, positionBasis);
+        // One transform, applied to both ends of the same ray. Any difference
+        // between them would reintroduce exactly the parallax this removes.
+        const auto toGameSpace =
+            [&](const float local[3], float out[3]) -> bool
         {
-            const float cg = cosf(g_gameYawRef);
-            const float sg = sinf(g_gameYawRef);
-            offset[0] = cg * roomForward + sg * roomRight;
-            offset[1] = sg * roomForward - cg * roomRight;
-            offset[2] = dy;
-        }
-        for (int axis = 0; axis < 3; ++axis)
-        {
-            // The OpenXR quad is positioned in the same local space as the
-            // headset projection, so its room origin maps to the authored
-            // camera base. gameplayBasePosition may deliberately select the
-            // rigid hands base and would offset the sight when body-following
-            // hands are enabled.
-            outTarget[axis] = owner.vehicle.cameraBase[axis] +
-                offset[axis] * kReachWorldUnitsPerMeter;
-            if (!std::isfinite(outTarget[axis]))
-                return false;
-        }
+            const float dx = local[0] - g_headPosRef[0];
+            const float dy = local[1] - g_headPosRef[1];
+            const float dz = local[2] - g_headPosRef[2];
+            const float roomForward = dx * sh - dz * ch;
+            const float roomRight = dx * ch + dz * sh;
+            const float positionLocal[3] = {roomForward, -roomRight, dy};
+            float offset[3]{};
+            if (!follows ||
+                !Halo3TransformBasisVector(
+                    positionBasis, positionLocal, offset))
+            {
+                const float cg = cosf(g_gameYawRef);
+                const float sg = sinf(g_gameYawRef);
+                offset[0] = cg * roomForward + sg * roomRight;
+                offset[1] = sg * roomForward - cg * roomRight;
+                offset[2] = dy;
+            }
+            for (int axis = 0; axis < 3; ++axis)
+            {
+                // The OpenXR quad is positioned in the same local space as the
+                // headset projection, so its room origin maps to the authored
+                // camera base. gameplayBasePosition may deliberately select the
+                // rigid hands base and would offset the sight when
+                // body-following hands are enabled.
+                out[axis] = owner.vehicle.cameraBase[axis] +
+                    offset[axis] * kReachWorldUnitsPerMeter;
+                if (!std::isfinite(out[axis]))
+                    return false;
+            }
+            return true;
+        };
+        if (!toGameSpace(localTarget, outTarget) || !toGameSpace(p, outOrigin))
+            return false;
         outSampleMs = sampleMs;
         return sampleMs != 0;
     }
@@ -20098,11 +20174,12 @@ namespace
         }
 
         float presentedTarget[3]{};
+        float presentedOrigin[3]{};
         uint64_t presentedTargetMs = 0;
         const bool targetValid = seated &&
             ReachSeatLeaseKeyValid(reticle.occupation) &&
             ReachBuildPresentedReticleWorldTarget(
-                owner, presentedTarget, presentedTargetMs);
+                owner, presentedTarget, presentedOrigin, presentedTargetMs);
         {
             auto& published = g_reachCompletedReticleTarget;
             published.sequence.fetch_add(1, std::memory_order_acq_rel);
@@ -20133,6 +20210,15 @@ namespace
                 std::memory_order_relaxed);
             published.z.store(
                 targetValid ? presentedTarget[2] : 0.0f,
+                std::memory_order_relaxed);
+            published.originX.store(
+                targetValid ? presentedOrigin[0] : 0.0f,
+                std::memory_order_relaxed);
+            published.originY.store(
+                targetValid ? presentedOrigin[1] : 0.0f,
+                std::memory_order_relaxed);
+            published.originZ.store(
+                targetValid ? presentedOrigin[2] : 0.0f,
                 std::memory_order_relaxed);
             published.sequence.fetch_add(1, std::memory_order_release);
         }
@@ -21304,6 +21390,16 @@ namespace
         uintptr_t unused, const BoneMatrix* source, const int32_t* boneMap)
     {
         ReachFpPaletteFn original=g_reachOrigFpPalette;
+        // R-V27: one relaxed increment when a seat is occupied. Reach builds
+        // the occupant's first-person arms and weapon through this exact
+        // transaction, so a non-zero count while seated means the engine did
+        // build them and any remaining fault is ours (placement or collapse);
+        // a zero count means it never built them at all.
+        if (g_reachVehicleTrimSnapshot.load(std::memory_order_relaxed) != 0)
+        {
+            g_reachSeatedFpPaletteCalls.fetch_add(
+                1, std::memory_order_relaxed);
+        }
         if (g_reachNestedOuterSuppressed)
         {
             if (original)
@@ -22142,7 +22238,16 @@ namespace
         // Halo 3 C20's own first act: turning the feature off, or losing the
         // binding, hands the seat's word back immediately rather than waiting
         // for the player to climb out.
+        // R-V27: only a seat that authors HREK bit 5 `allows weapons` - i.e. a
+        // passenger holding their own gun - takes this. Halo 3's C20 result is
+        // specifically about "the first-person weapon in `allows weapons`
+        // passenger seats"; a driver, mounted gunner or walk-up turret has no
+        // personal weapon for the engine to bring up, so clearing their seat's
+        // camera bit buys nothing and the 7235d8d headset run reported it
+        // breaking every turret. Those seats keep exactly the behavior the user
+        // called "a better state" one build earlier.
         if (!frame.active || !g_config.vehicle_first_person ||
+            (frame.seatFlags & kReachSeatAllowsWeaponsBit) == 0 ||
             g_reachCamera.teardownRequested.load(std::memory_order_acquire) ||
             g_reachCamera.vehicleCameraBindingState.load(
                 std::memory_order_acquire) != static_cast<uint8_t>(
@@ -22958,6 +23063,13 @@ namespace
                       generation, frame.identity, frame.seatIndex)
                 : 0,
             std::memory_order_release);
+        // R-V27: publish the seat's own flags word from the engine thread that
+        // read it. The 7235d8d report printed 00000000 for every seat because
+        // it read g_reachOwnerScope from the 50 ms worker, and that scope is
+        // only populated INSIDE an outer render callback - a diagnostic that
+        // reported zero no matter what the tag actually said.
+        g_reachVehicleSeatFlagsPublished.store(
+            frame.active ? frame.seatFlags : 0u, std::memory_order_release);
         // Publish the full-salt occupation as one seqlock record. The firing
         // thread must match it against the independently completed rendered-eye
         // record before substituting a personal-weapon origin.
@@ -27080,7 +27192,9 @@ namespace
             (g_reachFiringOriginSkipKeyMismatch.load(
                  std::memory_order_relaxed) ? 8u : 0u) |
             (g_reachFiringOriginSkipStaleEye.load(std::memory_order_relaxed)
-                 ? 16u : 0u);
+                 ? 16u : 0u) |
+            (g_reachFiringOriginSkipNoSightRay.load(std::memory_order_relaxed)
+                 ? 32u : 0u);
         if (shotSkipMask != loggedShotSkip &&
             g_reachFiringOriginSkips.load(std::memory_order_relaxed) != 0)
         {
@@ -27088,7 +27202,8 @@ namespace
             LOG("Reach seat aim: %u firing-path substitutions were SKIPPED and "
                 "kept the stock origin - torn read %u, not seated %u, seat "
                 "does not allow a personal weapon %u, occupation/eye key "
-                "mismatch %u, stale or invalid rendered eye %u",
+                "mismatch %u, stale or invalid rendered eye %u, no fresh "
+                "presented sight ray %u",
                 g_reachFiringOriginSkips.load(std::memory_order_relaxed),
                 g_reachFiringOriginSkipTorn.load(std::memory_order_relaxed),
                 g_reachFiringOriginSkipNotSeated.load(
@@ -27098,6 +27213,8 @@ namespace
                 g_reachFiringOriginSkipKeyMismatch.load(
                     std::memory_order_relaxed),
                 g_reachFiringOriginSkipStaleEye.load(
+                    std::memory_order_relaxed),
+                g_reachFiringOriginSkipNoSightRay.load(
                     std::memory_order_relaxed));
         }
         if (!loggedVehicleShotRedirect &&
@@ -27250,15 +27367,16 @@ namespace
             loggedPatchSerial = patchSerial;
             loggedPatchState = static_cast<uint32_t>(leaseNow);
             LOG("Reach seat first person: the occupied seat's third-person "
-                "camera bit is %s (serial=%u, state=%s); Reach builds the "
-                "occupant's own first-person arms and weapon only while this "
-                "seat reports first person",
+                "camera bit is %s (serial=%u, state=%s); the engine's own "
+                "first-person arms/weapon transaction has run %u times while "
+                "seated this session",
                 (leaseNow == ReachSeatLeaseState::Active)
                     ? "CLEARED by us for this occupation"
                     : (leaseNow == ReachSeatLeaseState::External
                            ? "already clear in the loaded tag; we own no write"
                            : "not currently owned"),
-                patchSerial, ReachNativeSeatLeaseStateName(leaseNow));
+                patchSerial, ReachNativeSeatLeaseStateName(leaseNow),
+                g_reachSeatedFpPaletteCalls.load(std::memory_order_relaxed));
         }
         if (!loggedPatchFailure &&
             g_reachVehicleSeatPatchFailures.load(
@@ -27304,9 +27422,8 @@ namespace
             // report of "no passenger hands" cannot be told apart from "this
             // seat never claimed to allow weapons" without it.
             const uint32_t seatFlagsNow =
-                g_reachOwnerScope.vehicle.active
-                    ? g_reachOwnerScope.vehicle.seatFlags
-                    : 0u;
+                g_reachVehicleSeatFlagsPublished.load(
+                    std::memory_order_acquire);
             if (identity > 0 && identity <= kReachVehicleIdentityTrimCount &&
                 seat >= 0 && slot >= 0)
             {

@@ -1753,6 +1753,85 @@ rejected over - driver seats, both View Follow settings and the Scorpion,
 Wraith and Covenant turrets must be re-checked for any return of the vehicle
 shaking. Nothing here advances CURRENT-STATE.
 
+## R-V27 - 2026-08-06: scope the seat bit to passengers, and put the shot on the sight ray
+
+Headset report against 7235d8d (DLL `4BB35849...`, Steam / VirtualDesktopXR /
+Quest 3, log `01:50:57`-`01:54:29`): "we're in a better state now but turrets
+are broken and even though the floaty hands aren't working the shots aren't
+following my crosshair." The log answers two of those three outright.
+
+### Turrets: a regression R-V26 caused, and its exact scope
+
+R-V26 cleared the `third person camera` bit for **every** occupied seat. The
+log shows it doing so on `shade_plasma`, `scorpion`, `warthog_chaingun`,
+`warthog_gauss` and `shade_flak` - all seats where Halo 3's C20 result promises
+nothing, because a driver, mounted gunner or walk-up turret has no personal
+weapon for the engine to bring up. C20's own wording is specific: it brings up
+the first-person weapon "in `allows weapons` passenger seats".
+
+The clear is now gated on HREK seat-flags bit 5 `allows weapons`. Every turret,
+driver and gunner seat returns bit-for-bit to the R-V25 behaviour the user had
+just called "a better state"; only a passenger holding their own gun takes the
+change.
+
+### The shot line: the eye was the wrong origin
+
+R-V10 substituted the **rendered eye** for the personal-weapon shot origin. The
+7235d8d log proves that substitution finally reached a passenger -
+`01:52:57 Reach seat aim: seated personal-weapon shots are leaving the rendered
+eye` - during `warthog raw seat 1`, and the user still reported that shots do
+not follow the crosshair. The eye is the wrong point, and the reason is in
+`ReachBuildPresentedReticleWorldTarget`: the sight we present in a Reach
+vehicle is the floating **controller** reticle, placed at
+`crosshair_distance_m` along the controller ray.
+
+A shot leaving the eye toward a point on the controller ray is not the sight
+line. It is a second line that merely *crosses* the sight at that one distance
+and diverges from it everywhere else by the whole eye-to-hand offset - tens of
+centimetres, which is several degrees at the ranges a passenger actually
+shoots at. That is exactly the failure mode `docs/ODST-VEHICLE-EVIDENCE.md`
+recorded for O5 ("parallel lines meet at no distance, so re-aiming can only
+make them CROSS at one chosen range"), reintroduced by choosing the wrong ray.
+
+The builder now returns the ray's **origin** as well as its target, both from
+one controller pose through one shared transform, and the firing substitution
+takes the origin instead of the eye. Origin and target are then two points on
+the same presented ray, so the shot line and the sight line are one line at
+every range. The existing R-V22 direction redirect already aims at the target,
+so the two halves now agree by construction. There is no fallback: a shot
+without a fresh, exact-key sight ray stays completely stock and is counted
+under a new `no fresh presented sight ray` skip reason.
+
+### Two diagnostics that were lying, now fixed
+
+- **The seat-flags line printed `00000000` for every seat.** It read
+  `g_reachOwnerScope` from the 50 ms worker, and that scope is only populated
+  inside an outer render callback, so it reported zero whatever the tag said.
+  The word is now published by the engine thread that reads it. (The flags
+  themselves were never wrong: the same run's skip breakdown correctly
+  classified 222 driver shots as "seat does not allow a personal weapon" and
+  admitted the passenger's.)
+- **Nothing measured whether Reach builds the occupant's first-person models
+  at all.** `ReachProcessFpPalette` now counts its invocations while a seat is
+  occupied and the seat line reports the total. A non-zero count while seated
+  means the engine did build the arms and weapon and any remaining fault is
+  ours - placement or the palette collapse; zero means it never built them.
+  No previous report could separate those two, which is why the hands have
+  cost three candidates.
+
+Supporting signal from the same run, not yet a conclusion: `world/fp-output-none`
+went from 0 in every earlier session to 7926, `retargeted` from 0 to 1, and the
+`effect+0x50` high nibble from 0x8000 to 0x8001, all first appearing in the
+window containing the passenger seat. Something first-person did happen there
+for the first time. The palette counter is what will say whether it was the
+occupant's own weapon.
+
+Release x64 builds, `ctest --preset release` passes 1/1, and
+`tools/check-reach-fp-parity.ps1` passes. The headset test is: turrets behave
+exactly as they did two builds ago; a passenger's shots land on the crosshair
+at close range AND at distance, not only at one distance; and the seat line's
+palette count is recorded either way. Nothing here advances CURRENT-STATE.
+
 ## R-V9 - acceptance still required
 
 Nothing in this document changes the accepted pointer. Packaging, successful

@@ -69,6 +69,41 @@ alternating eyes).
 choice; see `docs/ODST-LEVEL-LOAD-LOCKOUT.md`. Its undone decisive test is a
 no-mod control run.
 
+## PENDING HEADSET CANDIDATE: Reach passenger sight line + turret repair - 2026-08-06
+
+The accepted pointer remains 118b8bde. The 7235d8d headset run (Steam /
+VirtualDesktopXR / Quest 3) reported: "we're in a better state now but turrets
+are broken and even though the floaty hands aren't working the shots aren't
+following my crosshair." Full evidence is `docs/REACH-VEHICLE-EVIDENCE.md`
+R-V27.
+
+1. **Turret regression fixed.** R-V26 cleared the seat's `third person camera`
+   bit on every occupied seat, including Shade, Scorpion and both Warthog
+   turrets. Halo 3's C20 result only ever promised the first-person weapon in
+   `allows weapons` passenger seats, so the clear is now gated on that HREK
+   flag. Turrets, drivers and gunners return bit-for-bit to the R-V25
+   behaviour the user had just called "a better state".
+2. **The passenger shot line was leaving the wrong point.** The log proves the
+   origin substitution finally reached a passenger at `01:52:57`, and the shots
+   still missed the crosshair - because it substituted the rendered **eye**
+   while the sight we present is the floating **controller** reticle. Those are
+   two different rays that cross only at `crosshair_distance_m`. The presented
+   ray's own origin is now published beside its target, through one shared
+   transform, and the shot leaves from there, so the shot line and the sight
+   line are one line at every range. A shot without a fresh exact-key sight ray
+   stays completely stock.
+3. **Two diagnostics that were lying are fixed**, because the hands have now
+   cost three candidates for want of one number. The seat-flags line read a
+   render-scope global from the worker thread and printed `00000000` for every
+   seat; it is now published by the engine thread that reads it. And
+   `ReachProcessFpPalette` now counts its invocations while a seat is occupied,
+   which separates "the engine never built the occupant's arms and weapon" from
+   "it built them and we placed or collapsed them wrong" - a distinction no
+   previous report could make.
+
+Release x64 builds, `ctest --preset release` passes 1/1, and the Reach parity
+gate passes.
+
 ## PENDING HEADSET CANDIDATE: Reach vehicle trim + identity repair - 2026-08-06
 
 The accepted pointer remains 118b8bde. This candidate repairs what the
