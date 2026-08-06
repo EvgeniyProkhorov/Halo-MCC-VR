@@ -28943,6 +28943,13 @@ namespace
         {
             if (installed)
                 RemoveReachCameraCore();
+            else
+            {
+                // Title-exit re-arm, matching Halo 3 and ODST: stillness seen
+                // while Reach is not the active title must not satisfy the
+                // frozen half of the next level's proof.
+                g_reachLevelLoadGate.Rearm();
+            }
             return;
         }
         if (installed &&
@@ -29187,6 +29194,11 @@ namespace
                  runtime.ownershipPending);
             const bool haloActive = !haloGenerationMismatch &&
                 (haloAvailableForInstall || haloRuntimeRetained);
+            // Same title-exit re-arm as ODST above: stillness observed while
+            // Halo 3 is not the active title must never satisfy the frozen
+            // half of the NEXT level's proof.
+            if (!haloActive && !gameHooked)
+                g_halo3LevelLoadGate.Rearm();
             if (gameHooked && !haloActive)
             {
                 PublishHalo3Lifecycle(true, false, true);
@@ -29370,6 +29382,20 @@ namespace
             }
             if (!odstActive && !odstHooked)
             {
+                // Re-arm on TITLE EXIT, not only on teardown. Rearm() used to
+                // run only where hooks came out, so an exit with nothing
+                // installed - the menu churn between two loads - left the
+                // gate holding the stillness it had observed IN THE MENU.
+                // The next level's very first camera tick then satisfied
+                // "frozen, then ticking" at the START of its loading screen,
+                // so the gate opened early and ODST's own readiness probe was
+                // left to wait out the rest of the load ALONE: measured
+                // 07:15:17.078 gate open -> 07:15:24.912 probe satisfied,
+                // 7.1 s of pure serialisation on top of an 11.7 s gate hold.
+                // With the gate re-armed here the two waits observe the same
+                // loading screen concurrently and the cost is the longer of
+                // them, not their sum.
+                g_odstLevelLoadGate.Rearm();
                 odstRearmGate.Observe(false, false);
                 odstPauseRearmGate.Observe(
                     pollNow, false, false, false);
