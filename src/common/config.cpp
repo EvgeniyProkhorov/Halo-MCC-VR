@@ -1203,6 +1203,7 @@ void ConfigSave()
     fprintf(f, "#  Shared intent; each title adapter maps it to that game's renderer.\n");
     fprintf(f, "# -------------------------------------------------------------------\n\n");
     fprintf(f, "# Game brightness / gamma. 1.0 = the game's own; higher = brighter.\n");
+    fprintf(f, "# One value for Halo 3, ODST and Reach, so a change is felt in all three.\n");
     fprintf(f, "# (default %.2f, range 0.5 to 2)\n", d.game_brightness);
     fprintf(f, "game_brightness = %.2f\n\n", g_config.game_brightness);
     fprintf(f, "# How sharp the game renders inside the headset. ANY value in range\n");

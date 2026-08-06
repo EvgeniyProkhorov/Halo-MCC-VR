@@ -572,9 +572,11 @@ struct Config
     // crosshair. The head-locked game cursor is redundant with our VR reticle.
     bool kill_reticle = true;
 
-    // Game brightness / gamma (0x278EE0's screen color constant). 1.0 = the game's
-    // own brightness; higher = brighter, lower = darker. NOT a HUD control — the
-    // function once thought to size the HUD actually adjusts brightness.
+    // Game brightness / gamma, applied to the screen colour constant every title
+    // publishes: halo3+0x278EE0, halo3odst+0x2A6308, haloreach+0x252E28. 1.0 =
+    // the game's own brightness; higher = brighter, lower = darker. NOT a HUD
+    // control — the function once thought to size the HUD adjusts brightness.
+    // One value for all three titles, so a change is felt everywhere.
     float game_brightness = 1.11f;
 
     // Halo's internal raster scale, applied by the launcher on the next game

@@ -2553,6 +2553,67 @@ additionally requires the exact current full-salt local unit/parent/definition/
 seat key, current generation, two coherent seqlocks and non-future occupation
 and reticle samples no older than 50 ms.
 
+## Screen colour/gamma publisher - the game-brightness control - 2026-08-06
+
+`game_brightness` had only ever driven Halo 3. This section is the Reach half of
+extending it to all three titles; the ODST half is in
+`docs/ODST-SIGNATURE-EVIDENCE.md` under `kHudXformSig`.
+
+**The function.** `haloreach.dll+0x252E28`, a `__fastcall` taking three floats
+in `xmm0`-`xmm2`. It is the exact homologue of `halo3.dll+0x278EE0` and
+`halo3odst.dll+0x2A6308`, the function a headset test already proved drives game
+brightness rather than HUD size:
+
+| | Halo 3 `+0x278EE0` | ODST `+0x2A6308` | Reach `+0x252E28` |
+| --- | --- | --- | --- |
+| Argument shuffle | `xmm6=a1, xmm1=a2, xmm7=a0` | same | same |
+| Transcendental | imported `powf(base, a2)` | same | same |
+| `base` constant | `15.1` | `2.0` | `2.0` |
+| Product term | `mulss xmm7, xmm6` (`a0*a1`) | same | same |
+| Published pair 1 | `(a0, powf, 1, 1)` | same | `(a0/powf, powf, a0, k)` |
+| Published pair 2 | `(a1, a0*a1, 0, 0)` | same | `(a1/powf, ?, a0*a1, 0)` |
+| Constant IDs | `0x280000`/`0x2D0000`, `0x280001`/`0x2D0001` | same | `0x4E0000`/`0x540000`, `0x4E0001`/`0x540001` |
+| Buffer | one stack buffer | same | module globals at `0xC868C4`-`0xC868F4` |
+
+Both `powf` call sites resolve through the module IAT to
+`api-ms-win-crt-math-l1-1-0.dll!powf`, verified by walking each module's import
+descriptors. Halo 3 and ODST upload inline; Reach stores the same terms into
+globals and tail-jumps to `+0x252D64`, which divides both leading terms by that
+same `powf` result before its four uploads. The direction of the relationship is
+unchanged - the published leading term rises with `a0` in every title - so
+scaling `a0` and `a1` is the whole control everywhere.
+
+**Why a Reach-only signature.** The shared Halo 3/ODST AOB
+(`40 55 48 8B EC 48 83 EC 50 ...`) matches **zero** times in `haloreach.dll`:
+Reach's recompiled prologue is `sub rsp,0x48` with a different register-save
+layout and no frame pointer. Searching Reach for the Halo 3 constant IDs is also
+a dead end - `0x280000`, `0x280001` and `0x2D0001` do not appear at all. The
+function was instead found by its invariant argument shuffle
+(`0F 28 CA 0F 28 F8`, two matches module-wide) and confirmed by the `powf` +
+`mulss` + four-upload shape.
+
+Reach entry AOB, which matches exactly once in the pinned image:
+
+```text
+48 83 EC 48 0F 29 74 24 30 0F 28 F1 0F 29 7C 24 20 0F 28 CA 0F 28 F8
+```
+
+**How it is bound.** `kReachScreenColorUploadRva = 0x00252E28` in
+`src/common/reach_render_logic.h`, re-proved at install by
+`ReachColdExactSignatureAt` (exact RVA + module-wide uniqueness + executable
+page) inside the already whole-image-hashed module. `ReachHudXformDetour` scales
+the first two arguments by `game_brightness`, counts itself into
+`g_reachCamera.activeCallbacks`, and joins the verified teardown lists - the
+detour ingress ranges grew 13 -> 14. Failure of the proof or of
+`MH_CreateHook`/`MH_EnableHook` leaves only this control stock and the Reach
+camera core continues.
+
+**Not claimed.** No headset result exists for Reach or ODST brightness yet. The
+numeric response curve is not claimed to be identical across titles - the `powf`
+base differs (15.1 vs 2.0) and Reach divides by that term - so the same slider
+value may read as a different amount of lift in each game. What is proven is
+that the control exists, is the same control, and moves in the same direction.
+
 ## Evidence still required
 
 The unaccepted camera candidate now implements the exact outer-owner token,

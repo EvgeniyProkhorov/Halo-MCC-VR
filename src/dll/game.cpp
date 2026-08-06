@@ -565,10 +565,11 @@ namespace
         // the theatre discriminator for player-controllable cinematic shots.
         uint32_t cinematicCameraTlsMemberOffset = 0;
         // 10 camera/weapon/CHUD core hooks + optional HUD height + two
-        // all-or-nothing crosshair hooks. Trampolines are recorded alongside
-        // targets so optional-hook absence can never shift lifecycle mapping.
-        void* hookTargets[13]{};
-        void* hookTrampolines[13]{};
+        // all-or-nothing crosshair hooks + optional brightness. Trampolines are
+        // recorded alongside targets so optional-hook absence can never shift
+        // lifecycle mapping.
+        void* hookTargets[14]{};
+        void* hookTrampolines[14]{};
         size_t hookTargetCount = 0;
         void* renderHookTarget = nullptr;
     };
@@ -779,12 +780,31 @@ namespace
     // but drive it from `game_brightness` (default 1.0 = untouched). This does
     // NOT resize the HUD; real HUD scaling needs a different mechanism (a
     // captured VR panel — the deferred 2D HUD has no single geometry lever).
+    // ODST and Reach publish the SAME control from the same three floats, so
+    // the one slider now drives all three titles (2026-08-06). Proof, from the
+    // pinned retail modules: halo3+0x278EE0, halo3odst+0x2A6308 and
+    // haloreach+0x252E28 each take (a0, a1, a2) in xmm0-2, call the imported
+    // `powf` with a rodata base and a2, then publish the pair
+    // (a0, powf(base, a2), ...) and (a1, a0*a1, ...) as two 16-byte screen
+    // colour/gamma constants. Halo 3 and ODST upload 0x280000/0x2D0000 and
+    // 0x280001/0x2D0001 from a stack buffer; Reach stores into module globals,
+    // divides both leading terms by the same powf result, and uploads
+    // 0x4E0000/0x540000 and 0x4E0001/0x540001 from its tail call. The
+    // relationship between the inputs and the published brightness is identical
+    // in all three, so scaling a0 and a1 is the whole control everywhere.
     typedef void (__fastcall *HudXformFn)(float, float, float);
     HudXformFn g_realHudXform = nullptr;
-    void __fastcall HudXformHook(float x, float y, float z)
+
+    inline float GameBrightnessScale()
     {
         const float b = g_config.game_brightness;
-        if (isfinite(b) && b > 0.05f && b != 1.0f) { x *= b; y *= b; }
+        return (isfinite(b) && b > 0.05f) ? b : 1.0f;
+    }
+
+    void __fastcall HudXformHook(float x, float y, float z)
+    {
+        const float b = GameBrightnessScale();
+        if (b != 1.0f) { x *= b; y *= b; }
         g_realHudXform(x, y, z);
         static std::atomic<bool> logged{false};
         if (!logged.exchange(true))
@@ -1000,6 +1020,30 @@ namespace
         g_odstCamera.activeCallbacks.fetch_sub(
             1, std::memory_order_acq_rel);
         return result;
+    }
+
+    // ODST game brightness. Same three-float screen colour/gamma uploader as
+    // Halo 3's, proven unique in halo3odst.dll by the shared `kHudXformSig`
+    // (docs/ODST-SIGNATURE-EVIDENCE.md). Its own trampoline, because MCC can
+    // hold both title modules loaded at once and a shared original pointer
+    // would let one title's teardown strand the other's call.
+    void* g_odstOriginalHudXform = nullptr;
+    __declspec(noinline) void __fastcall OdstHudXformHook(
+        float x, float y, float z)
+    {
+        g_odstCamera.activeCallbacks.fetch_add(1, std::memory_order_acq_rel);
+        HudXformFn original =
+            reinterpret_cast<HudXformFn>(g_odstOriginalHudXform);
+        if (original)
+        {
+            const float b = GameBrightnessScale();
+            if (b != 1.0f) { x *= b; y *= b; }
+            original(x, y, z);
+            static std::atomic<bool> logged{false};
+            if (!logged.exchange(true))
+                LOG("ODST brightness: hook active (game_brightness %.2f)", b);
+        }
+        g_odstCamera.activeCallbacks.fetch_sub(1, std::memory_order_acq_rel);
     }
 
     static bool OdstOwnsHudStereo()
@@ -13847,6 +13891,65 @@ namespace
         return OdstOptionalHookResult::Installed;
     }
 
+    // ODST game brightness. `kHudXformSig` is the same AOB Halo 3 uses and
+    // docs/ODST-SIGNATURE-EVIDENCE.md proves it matches exactly once in
+    // halo3odst.dll, at +0x2A6308, with the identical input shuffle, the same
+    // powf call and the same four constant uploads (0x280000, 0x2D0000,
+    // 0x280001, 0x2D0001). ODST simply omits Halo 3's extra eight-byte upload
+    // to 0x082F0005, which carries none of the colour maths. Missing or
+    // ambiguous proof leaves ODST at its stock brightness.
+    OdstOptionalHookResult InstallOdstBrightness(uintptr_t base, size_t size)
+    {
+        const char* kOdstHudXformSig =
+            "40 55 48 8B EC 48 83 EC 50 0F 29 74 24 40 0F 28 F1 "
+            "0F 29 7C 24 30 0F 28 CA 0F 28 F8";
+        const uintptr_t hudXform = sig::Find(base, size, kOdstHudXformSig);
+        if (!hudXform ||
+            sig::Find(hudXform + 1, base + size - hudXform - 1,
+                      kOdstHudXformSig))
+        {
+            LOG("ODST brightness: screen colour/gamma signature missing or "
+                "ambiguous; brightness stays at the game's own");
+            return OdstOptionalHookResult::StockFallback;
+        }
+        if (g_odstCamera.hookTargetCount >=
+            _countof(g_odstCamera.hookTargets))
+        {
+            LOG("ODST brightness: lifecycle hook capacity exhausted; "
+                "brightness stays at the game's own");
+            return OdstOptionalHookResult::StockFallback;
+        }
+
+        const MH_STATUS createStatus = MH_CreateHook(
+            reinterpret_cast<void*>(hudXform),
+            reinterpret_cast<void*>(&OdstHudXformHook),
+            &g_odstOriginalHudXform);
+        if (createStatus != MH_OK)
+        {
+            g_odstOriginalHudXform = nullptr;
+            LOG("ODST brightness: hook create failed (%d); brightness stays at "
+                "the game's own", static_cast<int>(createStatus));
+            return OdstOptionalHookResult::StockFallback;
+        }
+
+        const size_t slot = g_odstCamera.hookTargetCount++;
+        g_odstCamera.hookTargets[slot] = reinterpret_cast<void*>(hudXform);
+        g_odstCamera.hookTrampolines[slot] = g_odstOriginalHudXform;
+        const MH_STATUS enableStatus =
+            MH_EnableHook(reinterpret_cast<void*>(hudXform));
+        if (enableStatus != MH_OK)
+        {
+            LOG("ODST brightness: hook enable failed (%d); requesting verified "
+                "transaction cleanup", static_cast<int>(enableStatus));
+            return OdstOptionalHookResult::CleanupRequired;
+        }
+
+        LOG("ODST brightness: hook active at halo3odst.dll+0x%llX "
+            "(game_brightness)",
+            static_cast<unsigned long long>(hudXform - base));
+        return OdstOptionalHookResult::Installed;
+    }
+
     // ODST class-2 CHUD crosshair hider + authored-widget capture. Full parity
     // with Halo 3's InstallHook crosshair path, but every location is ODST-proven
     // (docs/ODST-SIGNATURE-EVIDENCE.md kHudElemSig candidate; disassembly at
@@ -14052,6 +14155,7 @@ namespace
         g_odstCamera.originalHudPhaseSecondary = nullptr;
         g_odstCamera.originalHudTargetCopy = nullptr;
         g_odstCamera.originalHudAnchorBasis = nullptr;
+        g_odstOriginalHudXform = nullptr;
         g_odstCamera.originalFpInterpolate = nullptr;
         g_odstCamera.originalFpVisiblePalette = nullptr;
         g_odstCamera.nativeWeaponIkBranch = nullptr;
@@ -15077,7 +15181,7 @@ namespace
                                   bool renderOnly, bool& busy)
     {
         static bool rangesResolved = false;
-        static OdstCodeRange ranges[13]{};
+        static OdstCodeRange ranges[14]{};
         if (!rangesResolved)
         {
             const void* functions[] = {
@@ -15094,6 +15198,7 @@ namespace
                 reinterpret_cast<const void*>(&OdstHudAnchorBasisHook),
                 reinterpret_cast<const void*>(&OdstHudCrosshairVisibleHook),
                 reinterpret_cast<const void*>(&OdstHudDrawWidgetHook),
+                reinterpret_cast<const void*>(&OdstHudXformHook),
             };
             static_assert(_countof(functions) == _countof(ranges));
             bool resolved = true;
@@ -15484,6 +15589,18 @@ namespace
         const OdstOptionalHookResult crosshairHooks =
             InstallOdstCrosshairHider(base, size);
         if (crosshairHooks == OdstOptionalHookResult::CleanupRequired)
+        {
+            return DiscardCreatedOdstHooks()
+                ? OdstInstallResult::Failed
+                : OdstInstallResult::CleanupPending;
+        }
+        // Optional, and installed after the crosshair pair so a missing
+        // crosshair proof simply leaves this one a lower slot - the ingress
+        // scan walks recorded targets and detour ranges as two independent
+        // sets, so an absent optional hook never shifts anything.
+        const OdstOptionalHookResult brightnessHook =
+            InstallOdstBrightness(base, size);
+        if (brightnessHook == OdstOptionalHookResult::CleanupRequired)
         {
             return DiscardCreatedOdstHooks()
                 ? OdstInstallResult::Failed
@@ -16771,6 +16888,16 @@ namespace
         uint8_t useUnitAim, uint8_t collision, uint32_t simulation);
     ReachUnitAdjustFn g_origReachUnitAdjust = nullptr;
     void* g_reachUnitAdjustTarget = nullptr;
+
+    // Reach game brightness. haloreach.dll+0x252E28 is Reach's screen
+    // colour/gamma publisher and the exact homologue of the Halo 3/ODST
+    // function the headset already proved: same (a0, a1, a2) shuffle, same
+    // imported `powf` against a rodata base, same (a0, powf) / (a1, a0*a1)
+    // pairs. It keeps its own trampoline for the same cross-title
+    // stale-pointer reason as ODST's.
+    HudXformFn g_origReachHudXform = nullptr;
+    void* g_reachHudXformTarget = nullptr;
+
     std::atomic<bool> g_reachVehicleShotRedirectEnabled{false};
     std::atomic<uint32_t> g_reachVehicleShotRedirects{0};
     std::atomic<uint32_t> g_reachVehicleShotRedirectMisses{0};
@@ -17551,6 +17678,29 @@ namespace
         }
         __except (EXCEPTION_EXECUTE_HANDLER)
         {
+        }
+    }
+
+    __declspec(noinline) void __fastcall ReachHudXformDetour(
+        float x, float y, float z)
+    {
+        static std::atomic<bool> logged{false};
+        g_reachCamera.activeCallbacks.fetch_add(1, std::memory_order_acq_rel);
+        __try
+        {
+            HudXformFn original = g_origReachHudXform;
+            if (!original)
+                return;
+            const float b = GameBrightnessScale();
+            if (b != 1.0f) { x *= b; y *= b; }
+            original(x, y, z);
+            if (!logged.exchange(true))
+                LOG("Reach brightness: hook active (game_brightness %.2f)", b);
+        }
+        __finally
+        {
+            g_reachCamera.activeCallbacks.fetch_sub(
+                1, std::memory_order_acq_rel);
         }
     }
 
@@ -24034,7 +24184,7 @@ namespace
     bool ScanForReachDetourIngress(bool& busy)
     {
         static bool rangesResolved = false;
-        static ReachDetourCodeRange ranges[13]{};
+        static ReachDetourCodeRange ranges[14]{};
         if (!rangesResolved)
         {
             const void* functions[] = {
@@ -24051,6 +24201,7 @@ namespace
                 reinterpret_cast<const void*>(&ReachUnitCameraPositionHook),
                 reinterpret_cast<const void*>(&ReachUnitAdjustHook),
                 reinterpret_cast<const void*>(&ReachFirstPersonRenderGateHook),
+                reinterpret_cast<const void*>(&ReachHudXformDetour),
             };
             static_assert(_countof(functions) == _countof(ranges));
             bool resolved = true;
@@ -24077,6 +24228,7 @@ namespace
             g_reachUnitCameraPositionTarget,
             g_reachUnitAdjustTarget,
             g_reachFirstPersonRenderGateTarget,
+            g_reachHudXformTarget,
         };
         void* const trampolines[] = {
             reinterpret_cast<void*>(g_reachOrigMainRenderView),
@@ -24092,6 +24244,7 @@ namespace
             reinterpret_cast<void*>(g_origReachUnitCameraPosition),
             reinterpret_cast<void*>(g_origReachUnitAdjust),
             reinterpret_cast<void*>(g_origReachFirstPersonRenderGate),
+            reinterpret_cast<void*>(g_origReachHudXform),
         };
         static_assert(_countof(targets) == _countof(ranges));
         static_assert(_countof(trampolines) == _countof(ranges));
@@ -24194,6 +24347,7 @@ namespace
         RevokeReachFiringOriginFeature();
         bool disabledAll = true;
         void* const targets[] = {
+            g_reachHudXformTarget,
             g_reachFirstPersonRenderGateTarget,
             g_reachUnitAdjustTarget,
             g_reachUnitCameraPositionTarget,
@@ -24224,6 +24378,20 @@ namespace
             return false;
 
         bool removedAll = true;
+        if (g_reachHudXformTarget)
+        {
+            const MH_STATUS status = MH_RemoveHook(g_reachHudXformTarget);
+            if (status == MH_OK || status == MH_ERROR_NOT_CREATED)
+            {
+                g_reachHudXformTarget = nullptr;
+                g_origReachHudXform = nullptr;
+            }
+            else
+            {
+                removedAll = false;
+                LOG("Reach brightness cleanup: hook remove failed");
+            }
+        }
         if (g_reachFirstPersonRenderGateTarget)
         {
             const MH_STATUS status =
@@ -26678,6 +26846,71 @@ namespace
                     "the camera core remains active");
             }
         }
+
+        // Reach game brightness. The exact homologue of the Halo 3/ODST screen
+        // colour/gamma publisher, pinned by RVA inside the already whole-image-
+        // hashed module and re-proved here by its own Reach-only entry AOB.
+        // Missing proof leaves only this control stock.
+        {
+            static constexpr char kReachScreenColorAob[] =
+                "48 83 EC 48 0F 29 74 24 30 0F 28 F1 0F 29 7C 24 20 "
+                "0F 28 CA 0F 28 F8";
+            const bool proven = ReachColdExactSignatureAt(
+                base, size, kReachScreenColorUploadRva, kReachScreenColorAob);
+            if (proven)
+            {
+                g_reachHudXformTarget = reinterpret_cast<void*>(
+                    base + kReachScreenColorUploadRva);
+                const MH_STATUS created = MH_CreateHook(
+                    g_reachHudXformTarget,
+                    reinterpret_cast<void*>(&ReachHudXformDetour),
+                    reinterpret_cast<void**>(&g_origReachHudXform));
+                const bool enabled = created == MH_OK &&
+                    MH_EnableHook(g_reachHudXformTarget) == MH_OK;
+                if (enabled)
+                {
+                    LOG("Reach brightness: Installed at haloreach.dll+0x%llX; "
+                        "game_brightness now scales Reach's screen colour/gamma "
+                        "exactly as it does Halo 3's and ODST's",
+                        (unsigned long long)kReachScreenColorUploadRva);
+                }
+                else
+                {
+                    bool retained = created == MH_OK;
+                    if (retained)
+                    {
+                        const MH_STATUS disabled =
+                            MH_DisableHook(g_reachHudXformTarget);
+                        if (ReachDisableStatusIsSafe(disabled))
+                        {
+                            const MH_STATUS removed =
+                                MH_RemoveHook(g_reachHudXformTarget);
+                            retained = removed != MH_OK &&
+                                removed != MH_ERROR_NOT_CREATED;
+                        }
+                    }
+                    if (!retained)
+                    {
+                        g_reachHudXformTarget = nullptr;
+                        g_origReachHudXform = nullptr;
+                    }
+                    LOG("Reach brightness: FAILED to install (create=%d, "
+                        "cleanup=%s); Reach keeps the game's own brightness "
+                        "while the camera core remains active",
+                        (int)created, retained
+                            ? "retained for verified teardown"
+                            : "complete");
+                }
+            }
+            else
+            {
+                LOG("Reach brightness: exact screen colour/gamma proof failed "
+                    "at +0x%llX; Reach keeps the game's own brightness while "
+                    "the camera core remains active",
+                    (unsigned long long)kReachScreenColorUploadRva);
+            }
+        }
+
         g_reachRainDecoupled.store(0, std::memory_order_relaxed);
         g_reachRainSkipped.store(0, std::memory_order_relaxed);
         g_reachMuzzleRedirects.store(0, std::memory_order_relaxed);

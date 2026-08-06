@@ -706,6 +706,21 @@ inline constexpr uintptr_t kReachFpWeaponIkDisableEntryRva = 0x00B3AEB8;
 inline constexpr uintptr_t kReachFpWeaponIkDisableValueRva = 0x04E38B61;
 inline constexpr uint64_t kReachDebugBooleanType = 5;
 
+// Reach's screen colour/gamma publisher - the exact homologue of the Halo 3
+// (+0x278EE0) and ODST (+0x2A6308) function the headset already proved drives
+// game brightness. All three take (a0, a1, a2) in xmm0-2, shuffle them the same
+// way, call the imported `powf` with a rodata base and a2, then publish the
+// pairs (a0, powf(base, a2)) and (a1, a0*a1) as two 16-byte shader constants.
+// Halo 3/ODST write a stack buffer and upload 0x280000/0x2D0000 and
+// 0x280001/0x2D0001 inline; Reach stores the same terms into module globals,
+// divides both leading terms by that same powf result, and tail-jumps to
+// +0x252D64, which uploads 0x4E0000/0x540000 and 0x4E0001/0x540001. The input
+// to published-brightness relationship is therefore identical, which is why one
+// slider can scale a0/a1 in every title. The Halo 3 AOB finds nothing in Reach
+// (the recompiled prologue is `sub rsp,0x48` with a different save layout), so
+// this pinned RVA carries its own Reach-only signature.
+inline constexpr uintptr_t kReachScreenColorUploadRva = 0x00252E28;
+
 // Pinned HREK first-person arms layouts. The discovery-palette count describes
 // the render_model output only; it is not the animation graph's live source
 // count. Official weapon graphs retain the exact body prefix and append held

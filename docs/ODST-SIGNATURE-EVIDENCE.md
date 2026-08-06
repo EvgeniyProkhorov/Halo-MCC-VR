@@ -223,6 +223,18 @@ with Halo 3's `0x40` assumption.
 Verdict: unique and semantically equivalent as the screen color/gamma constant
 uploader used by the game-brightness control. It is not a HUD-size transform.
 
+**Now in use (2026-08-06).** `InstallOdstBrightness` hooks this match at
+`halo3odst.dll+0x2A6308` from the ODST camera core, after the optional HUD
+height and crosshair hooks, and scales the first two float arguments by
+`game_brightness` exactly as Halo 3's `HudXformHook` does. It keeps its own
+trampoline (`g_odstOriginalHudXform`) rather than sharing Halo 3's, because MCC
+can hold both title modules loaded at once and a shared original pointer would
+let one title's teardown strand the other's call. It joins the ODST lifecycle as
+a normal hook slot (`hookTargets`/`hookTrampolines` grew 13 -> 14) and counts
+itself into `activeCallbacks`, so verified teardown covers it. Missing or
+ambiguous proof leaves ODST at its stock brightness and the camera core
+continues.
+
 ### `kFpRootCallSig`
 
 ```text
