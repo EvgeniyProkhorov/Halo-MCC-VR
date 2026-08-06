@@ -2110,3 +2110,53 @@ nor a personal weapon to re-origin.
 No seat point, trim, or anchor is touched by C28. Every authored placement in
 `kHalo3SeatPoints` and every `vehicle_cam_*` value in the live config is
 byte-for-byte what it was before.
+
+## C29 - the seat facing is a per-seat transaction, not a timed one
+
+Reported 2026-08-06: "when i get into a banshee in halo 3 im not in the the
+default spot i chose, it takes a second"; clarified as "i just need the camera
+oriented proper when entering a banshee". Facing, not placement - no seat
+point, trim or anchor is touched.
+
+C10's nose rebase was armed on the **settled** debounce edge, then had to find
+a live authored seat inside a 2000 ms expiry, and was additionally dropped
+whenever a single global `lastEntryAlignMs` said the previous align was under
+1500 ms ago. Three timers in series in front of one instantaneous assignment.
+
+Halo's boarding animation outlasts all of it on any vehicle the player climbs
+ONTO rather than steps into, and the Banshee's is the most rotational in the
+game - the player is carried right around the hull. So the entire mount was
+spent with "straight ahead" still pointing wherever the player walked in from,
+and the nose only arrived afterwards, as the snap the user is describing. The
+1500 ms rate limit could also silently skip an entry outright: exit and
+re-board inside that window and the request was consumed with no align at all,
+leaving the facing wrong for the whole occupation.
+
+C29 keys it on the concrete seat instead - the same
+`Halo3SeatPositionKey(generation, parentHandle, seatIndex, identity, mounted)`
+boundary the position zero and the yaw follow already use - and drives it from
+the RAW seat sample rather than the debounced state. It therefore runs on the
+first frame the engine reports a valid authored seat, which is before the
+player can see out of the vehicle, and exactly once per occupation.
+
+Keying is what makes dropping the timers safe, and it is strictly stronger than
+what it replaces:
+
+- a debounced-state flap does not change the seat identity, so it cannot
+  re-snap mid-drive - which is the only thing the 1500 ms rate limit bought;
+- a blipped player-unit read cannot trigger it, because a seat only counts once
+  its authored anchor has resolved *inside the vehicle's own bounds*
+  (`anchorValid`), which a bogus read does not produce;
+- a genuine seat switch or re-entry is a new key and aligns immediately,
+  instead of being suppressed for 1500 ms;
+- there is no pending request left to expire on foot, so the 2000 ms expiry has
+  nothing to guard. `g_halo3SeatEntryMs` is retired with it.
+
+Scope is every Halo 3 seat with an authored seat point, not the Banshee:
+`Halo3SeatFollowsHull` is the same gate C27 used, so walk-up turrets - whose
+yaw intentionally does not follow - still get no align. ODST and Reach are
+untouched; the user scoped the original facing request to Halo 3 themselves.
+
+The log line now reads `seat entry aligned to the vehicle's nose (X deg) on the
+first authored frame`, so a late align would be visible as a gap between the
+seat becoming active and that line.

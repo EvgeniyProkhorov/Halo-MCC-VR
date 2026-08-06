@@ -5834,11 +5834,9 @@ namespace
     // past the newest simulation state; a value pinned AT 1.00 while driving
     // is the clamp defect that caused the boost/flight bounce.
     std::atomic<float> g_halo3BlendAlpha{0.0f};
-    // Stamped on a settled seat ENTRY; consumed once by the follow, which
-    // rebases "straight ahead" onto the vehicle's nose. Zero means nothing
-    // pending, and a request that finds no live seat within two seconds
-    // expires rather than firing later on foot.
-    std::atomic<uint64_t> g_halo3SeatEntryMs{0};
+    // C29 retired the armed-then-expiring seat-entry request. The facing
+    // rebase is keyed on the concrete seat in Halo3ApplySeatYawFollow, so
+    // there is no pending state to stamp, expire, or rate-limit.
 
     // A 60 Hz tick is barely two steps of GetTickCount's 15.6 ms clock, so the
     // sub-tick blend needs the performance counter (same reason ApplyVrTurn
@@ -7062,33 +7060,13 @@ namespace
                     g_halo3SeatRecenters.fetch_add(
                         1, std::memory_order_relaxed);
                 }
-                // C10: a plain recenter takes its heading from the ENGINE
-                // camera, which at seat entry is mid-swing around the
-                // vehicle — the user's "the angle in which you enter
-                // overrides the direction the camera is supposed to be
-                // facing". Ask instead for a rebase onto the hull's own
-                // nose. Only on the way IN: on the way out the player is
-                // already facing the hull's final heading and a snap there
-                // would throw that away.
-                //
-                // C27: this used to be gated on vehicle_view_follow, and the
-                // OFF branch asked for the plain mid-swing recenter instead.
-                // But the shipped default IS off, so in practice every seat
-                // entry took its facing from wherever the entry animation
-                // happened to be pointing - the user's "I need the playspace
-                // to reset when entering the vehicle so it faces the right
-                // default direction". The hull's nose is the right default
-                // either way: with the follow ON it is the frame the view will
-                // then track, and with it OFF it is the direction the vehicle
-                // is actually pointing when you sit down. The rate limit and
-                // expiry below are unchanged, so a debounce flap still cannot
-                // re-snap mid-drive.
-                if (g_halo3VehicleFpDebounce.stable ==
-                    Halo3VehicleState::Vehicle)
-                {
-                    g_halo3SeatEntryMs.store(nowMs,
-                                             std::memory_order_release);
-                }
+                // C29: the facing rebase onto the hull's nose used to be
+                // ARMED here, on the settled edge, and then had to find a live
+                // seat before its expiry. That made the whole boarding
+                // animation face the wrong way. It is now a per-seat
+                // transaction driven by the raw authored seat in
+                // Halo3ApplySeatYawFollow, which fires on the first frame the
+                // engine reports the seat -- earlier than this edge can exist.
             }
         }
 
@@ -7491,41 +7469,63 @@ namespace
         // vehicle from the entry animation, so whichever way the player
         // happened to walk in became their forward.
         //
-        // Yaw is rate-limited on purpose. The C9 session logged 42 recenters,
-        // several under 200 ms apart, because the debounced seat state flaps
-        // whenever the player-unit read blips. A re-snap mid-drive would yank
-        // the world around to put the nose under wherever the head happened to
-        // be pointing, so only an entry at least 1.5 s after the last one
-        // counts; a flap is consumed and ignored. A request that never finds a
-        // live seat expires instead of firing later on foot.
-        static uint64_t lastEntryAlignMs = 0;
-        const uint64_t entryMs =
-            g_halo3SeatEntryMs.load(std::memory_order_acquire);
-        if (entryMs)
+        // C29: this is a per-SEAT transaction, not a timed one, and it no
+        // longer waits for the entry debounce.
+        //
+        // It used to be armed only when the 15-sample debounce settled, then
+        // had to find a live seat inside a 2 s expiry, and was silently
+        // dropped altogether by a 1.5 s global rate limit. Halo's boarding
+        // animation is longer than all of that on the vehicles you climb onto
+        // rather than step into - the Banshee swings the player right around
+        // the hull - so the whole mount was spent facing wherever the player
+        // walked in from, and the nose only arrived afterwards as a snap.
+        // The user's report is exactly that: "im not in the default spot i
+        // chose, it takes a second ... i just need the camera oriented proper
+        // when entering a banshee".
+        //
+        // Keyed on the concrete seat instead. It runs on the FIRST frame the
+        // engine reports a valid authored seat and exactly once per
+        // occupation, so the facing is already the hull's nose before the
+        // player can see out of it. The key is what makes that safe: a
+        // debounced-state flap does not change the seat identity, so it can
+        // never re-snap mid-drive, which is what the old rate limit was for.
+        // A blipped player-unit read cannot trigger it either, because a seat
+        // only counts once its authored anchor has resolved inside the
+        // vehicle's own bounds.
+        static Halo3SeatPositionKey alignSeat;
+        Halo3SeatSnapshot rawSeat;
+        const bool alignEligible =
+            g_config.vehicle_first_person &&
+            Game_Halo3VehicleState().state == Halo3VehicleState::Vehicle &&
+            Halo3ReadSeatSnapshot(rawSeat) && rawSeat.anchorValid &&
+            Halo3SeatFollowsHull(
+                static_cast<Halo3VehicleId>(rawSeat.identity),
+                rawSeat.seatIndex, rawSeat.mounted);
+        if (!alignEligible)
         {
-            const uint64_t nowMs = GetTickCount64();
+            alignSeat = {};
+        }
+        else
+        {
+            const uint32_t alignGeneration =
+                g_halo3RuntimeGeneration.load(std::memory_order_relaxed);
             float hq[4], hp[3];
-            if (nowMs - entryMs > 2000)
+            if (!alignSeat.Matches(alignGeneration, rawSeat.parentHandle,
+                                   rawSeat.seatIndex, rawSeat.identity,
+                                   rawSeat.mounted) &&
+                VR_GetHeadPose(hq, hp))
             {
-                g_halo3SeatEntryMs.store(0, std::memory_order_relaxed);
-            }
-            // C27: `active` is the live seat, not the follow option. The nose
-            // align is what gives the seat its default facing, and that is
-            // wanted with View Follow off as much as on.
-            else if (active && VR_GetHeadPose(hq, hp))
-            {
-                if (nowMs - lastEntryAlignMs > 1500)
-                {
-                    const float x = hq[0], y = hq[1], z = hq[2], w = hq[3];
-                    const float fx = -2.0f * (w * y + x * z);
-                    const float fz = -(1.0f - 2.0f * (x * x + y * y));
-                    g_gameYawRef = atan2f(seat.rawFwd[1], seat.rawFwd[0]);
-                    g_headYawRef = atan2f(fx, -fz);
-                    lastEntryAlignMs = nowMs;
-                    LOG("H3 vehicle: seat entry aligned to the vehicle's nose "
-                        "(%.1f deg)", g_gameYawRef * 57.2958f);
-                }
-                g_halo3SeatEntryMs.store(0, std::memory_order_relaxed);
+                const float x = hq[0], y = hq[1], z = hq[2], w = hq[3];
+                const float fx = -2.0f * (w * y + x * z);
+                const float fz = -(1.0f - 2.0f * (x * x + y * y));
+                g_gameYawRef = atan2f(rawSeat.rawFwd[1], rawSeat.rawFwd[0]);
+                g_headYawRef = atan2f(fx, -fz);
+                alignSeat.Set(alignGeneration, rawSeat.parentHandle,
+                              rawSeat.seatIndex, rawSeat.identity,
+                              rawSeat.mounted);
+                LOG("H3 vehicle: seat entry aligned to the vehicle's nose "
+                    "(%.1f deg) on the first authored frame",
+                    g_gameYawRef * 57.2958f);
             }
         }
 
