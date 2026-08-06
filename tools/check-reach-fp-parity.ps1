@@ -172,6 +172,19 @@ if ($vehicleLogic -notmatch
 $manifestContracts = @(
     'reach_vehicle_body_hide_interval_lease_enabled\s*=\s*\$false',
     'reach_vehicle_unit_camera_scoped_body_hide_enabled\s*=\s*\$true',
+    'reach_vehicle_exact_seat_entry_playspace_recenter_enabled\s*=\s*\$true',
+    'reach_vehicle_entry_recenter_view_follow_independent\s*=\s*\$true',
+    'reach_vehicle_entry_recenter_refresh_invariant\s*=\s*\$true',
+    'reach_vehicle_entry_recenter_openxr_present_owned\s*=\s*\$true',
+    'reach_vehicle_entry_recenter_outer_commit_staged\s*=\s*\$true',
+    'reach_vehicle_camera_proof_miss_preserves_occupation\s*=\s*\$true',
+    'reach_vehicle_yaw_reference_atomic_pair\s*=\s*\$true',
+    'reach_vehicle_yaw_reference_requires_committed_frame\s*=\s*\$true',
+    'reach_vehicle_exit_recenter_position_only\s*=\s*\$true',
+    'reach_vehicle_native_fp_body_seated_legs_enabled\s*=\s*\$true',
+    'reach_vehicle_fp_body_centered_authored_pose\s*=\s*\$true',
+    'reach_vehicle_fp_body_failure_isolated\s*=\s*\$true',
+    'hrek-checksum-count-exact-tag-next-pair',
     'reach_native_seated_aim_reticle_enabled\s*=\s*\$false',
     'reach_controller_vehicle_reticle_enabled\s*=\s*\$true',
     'reach_vehicle_selected_barrel_direction_alignment_enabled\s*=\s*\$true',
@@ -179,12 +192,25 @@ $manifestContracts = @(
 )
 foreach ($contract in $manifestContracts) {
     if ($package -notmatch $contract) {
-        throw 'Reach candidate manifest no longer describes the active R-V22 vehicle contract.'
+        throw 'Reach candidate manifest no longer describes the active R-V23 vehicle contract.'
     }
 }
 $installerContracts = @(
     'reach_vehicle_body_hide_interval_lease_enabled\s*-ne\s*\$false',
     'reach_vehicle_unit_camera_scoped_body_hide_enabled\s*-ne\s*\$true',
+    'reach_vehicle_exact_seat_entry_playspace_recenter_enabled\s*-ne',
+    'reach_vehicle_entry_recenter_view_follow_independent\s*-ne',
+    'reach_vehicle_entry_recenter_refresh_invariant\s*-ne',
+    'reach_vehicle_entry_recenter_openxr_present_owned\s*-ne',
+    'reach_vehicle_entry_recenter_outer_commit_staged\s*-ne',
+    'reach_vehicle_camera_proof_miss_preserves_occupation\s*-ne',
+    'reach_vehicle_yaw_reference_atomic_pair\s*-ne',
+    'reach_vehicle_yaw_reference_requires_committed_frame\s*-ne',
+    'reach_vehicle_exit_recenter_position_only\s*-ne',
+    'reach_vehicle_native_fp_body_seated_legs_enabled\s*-ne',
+    'reach_vehicle_fp_body_centered_authored_pose\s*-ne',
+    'reach_vehicle_fp_body_failure_isolated\s*-ne',
+    'hrek-checksum-count-exact-tag-next-pair',
     'reach_native_seated_aim_reticle_enabled\s*-ne\s*\$false',
     'reach_controller_vehicle_reticle_enabled\s*-ne\s*\$true',
     'reach_vehicle_selected_barrel_direction_alignment_enabled\s*-ne',
@@ -192,7 +218,7 @@ $installerContracts = @(
 )
 foreach ($contract in $installerContracts) {
     if ($installer -notmatch $contract) {
-        throw 'Reach candidate installer no longer enforces the active R-V22 vehicle contract.'
+        throw 'Reach candidate installer no longer enforces the active R-V23 vehicle contract.'
     }
 }
 Write-Host 'Reach consistency check passed: no disproven Reach-only architecture reintroduced, Reach capabilities intact, evidence constants and candidate manifest present.'

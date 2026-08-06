@@ -1,8 +1,10 @@
 #pragma once
 
 #include <array>
+#include <bit>
 #include <cmath>
 #include <cstdint>
+#include <limits>
 
 // Reach vehicle identities are an explicit contract shared by the runtime,
 // per-seat config bank and Blender authoring kit. The order mirrors the
@@ -535,6 +537,115 @@ inline constexpr bool ReachSeatLeaseKeyEqual(
         a.directParent == b.directParent &&
         a.definitionDatum == b.definitionDatum &&
         a.seatIndex == b.seatIndex;
+}
+
+// Native camera-info proves the occupation before its seat-camera pointer is
+// usable. A null/torn seatCamera blocks that frame's immersive camera only; it
+// must not turn a valid parent+seat relationship into a false OnFoot sample.
+inline constexpr bool ReachSeatOccupationObserved(
+    int32_t directParent, int32_t seatIndex, int32_t seatLimit) noexcept
+{
+    return directParent != -1 && seatLimit > 0 &&
+        seatIndex >= 0 && seatIndex < seatLimit;
+}
+
+// One-shot policy for a full play-space re-centre at a concrete Reach seat
+// boundary. The runtime supplies its already-debounced Vehicle state and the
+// complete full-salt seat key. A missing/torn frame deliberately leaves the
+// last applied key intact, so a transient sample failure cannot repeatedly
+// re-centre the player. Commit is separate from NeedsApply: a caller that
+// cannot apply the re-centre this frame retries on the next valid frame.
+struct ReachSeatRecenterLatch
+{
+    ReachSeatLeaseKey applied{};
+    bool valid = false;
+
+    constexpr void Clear()
+    {
+        applied = {};
+        valid = false;
+    }
+
+    constexpr bool NeedsApply(
+        bool enabled, bool stableVehicle,
+        const ReachSeatLeaseKey* current)
+    {
+        if (!enabled || !stableVehicle)
+        {
+            Clear();
+            return false;
+        }
+        if (!current || !ReachSeatLeaseKeyValid(*current))
+            return false;
+        return !valid || !ReachSeatLeaseKeyEqual(applied, *current);
+    }
+
+    constexpr bool Commit(const ReachSeatLeaseKey& current)
+    {
+        if (!ReachSeatLeaseKeyValid(current))
+            return false;
+        applied = current;
+        valid = true;
+        return true;
+    }
+};
+
+// The entry reset aligns horizontal facing only. A render-matched root/carrier
+// can be temporarily missing, non-finite, or nearly vertical; those samples do
+// not consume the exact-seat latch and the next valid frame retries.
+inline bool ReachVehicleEntryYaw(
+    const float forward[3], float& yaw) noexcept
+{
+    yaw = 0.0f;
+    if (!forward || !std::isfinite(forward[0]) ||
+        !std::isfinite(forward[1]) || !std::isfinite(forward[2]))
+    {
+        return false;
+    }
+    const float horizontalLengthSquared =
+        forward[0] * forward[0] + forward[1] * forward[1];
+    if (!std::isfinite(horizontalLengthSquared) ||
+        horizontalLengthSquared <= 1.0e-8f)
+    {
+        return false;
+    }
+    yaw = std::atan2(forward[1], forward[0]);
+    return std::isfinite(yaw);
+}
+
+// The render thread publishes both yaw references to input as one 64-bit
+// value. This prevents a controller poll from combining the new vehicle yaw
+// with the previous headset yaw (or vice versa) at an exact-seat reset.
+struct ReachYawReferencePair
+{
+    float gameYaw = 0.0f;
+    float headYaw = 0.0f;
+};
+
+inline constexpr uint64_t ReachPackYawReferencePair(
+    float gameYaw, float headYaw) noexcept
+{
+    return static_cast<uint64_t>(std::bit_cast<uint32_t>(gameYaw)) |
+        (static_cast<uint64_t>(std::bit_cast<uint32_t>(headYaw)) << 32);
+}
+
+inline constexpr ReachYawReferencePair ReachUnpackYawReferencePair(
+    uint64_t packed) noexcept
+{
+    return {
+        std::bit_cast<float>(static_cast<uint32_t>(packed)),
+        std::bit_cast<float>(static_cast<uint32_t>(packed >> 32))};
+}
+
+inline constexpr uint64_t kReachInvalidYawReferencePair =
+    ReachPackYawReferencePair(
+        std::numeric_limits<float>::quiet_NaN(),
+        std::numeric_limits<float>::quiet_NaN());
+
+inline bool ReachYawReferencePairValid(
+    const ReachYawReferencePair& pair) noexcept
+{
+    return std::isfinite(pair.gameYaw) && std::isfinite(pair.headYaw);
 }
 
 // Installing and CleanupLocked are opposing claims on the SAME atomic. The

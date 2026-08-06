@@ -356,6 +356,9 @@ namespace
     XrQuaternionf g_centerRot{0, 0, 0, 1};
     XrVector3f g_centerPos{0, 0, 0};
     bool g_haveCenter = false;
+    // Recenter requests can originate on the input/game camera threads. Only
+    // Present owns g_haveCenter and the OpenXR locate used to replace it.
+    std::atomic<bool> g_recenterRequested{false};
 
     // Screen placement while head tracking is on. World-locked (default) reads
     // as natural because turning your head shifts the screen in your view to
@@ -5158,7 +5161,6 @@ float4 ps_scope_linearize(VSOut i):SV_Target { return paint(i.uv,true); }
             if (!targetPaused)
             {
                 Game_Recenter();
-                g_haveCenter = false;
             }
             phase = Phase::FadeIn;
             phaseStartMs = now;
@@ -7313,6 +7315,11 @@ float4 ps_scope_linearize(VSOut i):SV_Target { return paint(i.uv,true); }
             {
                 D3D11_TEXTURE2D_DESC bd{};
                 backbuffer->GetDesc(&bd);
+                if (g_recenterRequested.exchange(
+                        false, std::memory_order_acq_rel))
+                {
+                    g_haveCenter = false;
+                }
                 if (!g_haveCenter)
                     TryRecenter(fs.predictedDisplayTime);
                 // SteamVR accepted eye swapchains made before xrBeginSession
@@ -9008,7 +9015,7 @@ void VR_AfterResizeBuffers(IDXGISwapChain*)
 
 void VR_RequestRecenter()
 {
-    g_haveCenter = false;
+    g_recenterRequested.store(true, std::memory_order_release);
 }
 
 void VR_RequestPausePresentation(bool paused)

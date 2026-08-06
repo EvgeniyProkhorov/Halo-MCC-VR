@@ -47,7 +47,7 @@ the same result from its own native constructs:
 | Arms and gun ride the seat rather than the player's face | vehicle_hands_follow_body selects the rigid authored seat base for the Reach first-person model/controller roots. The view may still receive the configured head-bounce residual. |
 | Per-seat live placement | The existing F1 forward, height, and left/right controls bind to a Reach-only 34-by-16 bank keyed by the exact current identity and raw seat index. |
 | Optional vehicle-frame view | vehicle_view_follow follows yaw and roll-stable pitch for ground vehicles, yaw only for aircraft, and no carrier frame for walk-up turrets. Attached guns follow their ultimate carrier. |
-| Entry/exit comfort | The shared debounced vehicle transition requests the existing position-only recenter on settled entry and exit when vehicle_recenter_on_seat is enabled. |
+| Entry/exit comfort | When vehicle_recenter_on_seat is enabled, a stable exact-seat entry performs one full play-space and game-reference recenter only after Reach's immersive vehicle view actually wins. Its heading comes from the render-matched vehicle root/carrier and is independent of vehicle_view_follow. A settled exit remains position-only. |
 | Native vehicle controls and honest aim | Supported Reach seats publish the same vehicle state used by the shared controller-layout, steering, VR-turn ownership, movement, and clamped-reticle paths. Look-steered drivers use native turn input or the virtual wheel according to the same policy as Halo 3/ODST. |
 
 This is experience parity, not implementation parity. Reach does not share
@@ -1400,6 +1400,93 @@ No Workshop asset is loaded or activated. The 25 shipped Blender camera rows,
 including Scorpion, Shade Plasma, Shade Flak and Plasma Turret, and their exact
 retail identity aliases remain unchanged and covered by config save/load tests.
 
+## R-V23 - 2026-08-05: exact-seat full play-space entry recenter
+
+The Halo 3 behavior being matched is the complete entry reset, not merely a
+lean-origin update: on entering an immersive first-person vehicle seat, the
+current physical headset pose becomes neutral and forward is aligned to the
+vehicle that owns the selected camera. This must be the same with View Follow
+OFF and ON. Leaving a vehicle must retain the accepted position-only
+neutralization so exit cannot snap the player's facing.
+
+The Reach implementation keeps that action on an exact occupation boundary:
+
+1. ReachSeatRecenterLatch consumes the already-debounced Vehicle state and the
+   complete full-salt key: title generation, local unit handle, direct parent
+   handle, definition datum, and raw seat index. It commits only after the full
+   action is applied. The same key therefore resets once per continuous
+   occupation; a change in any member is a new occupation, and a settled exit
+   or config disable rearms the latch. A missing, torn, invalid, or temporarily
+   incomplete frame does not erase a committed key and cannot repeatedly yank
+   the play space. An invalid or unavailable heading leaves the new key
+   uncommitted so the next valid rendered frame retries.
+2. Entry yaw comes from the finite horizontal forward of the same
+   render-selected root used for the seat camera (interpolated with smoothing
+   ON, raw with it OFF). Attached weapons and
+   carrier-mounted walk-up guns substitute the successfully resolved rendered
+   ultimate-carrier root. The stock entry-swing compact camera is never the
+   reference, and an unavailable required carrier cannot fall back to the
+   direct gun root. vehicle_view_follow is deliberately absent from this
+   selection: it controls continuous carrier-follow composition after entry,
+   not the initial orientation.
+3. A pending key reaches ReachApplyHeadLook only when the normal-player
+   transaction has actually selected the Reach vehicle camera. Authored-locked
+   cinematic ownership suppresses that selection, so it cannot consume the
+   latch or reset the player behind a cinema/theatre camera. ReachApplyHeadLook
+   uses staged local yaw/position references to build that first vehicle frame;
+   it does not mutate globals, request OpenXR recenter, or consume the latch.
+   Projection failure, prepared-serial failure, and outer-camera commit failure
+   therefore discard the stage. Only after the existing headCommitReady
+   rejection boundary has passed are the exact references and latch committed.
+   The staged entry also leaves manual/cinematic one-shot requests untouched
+   until that boundary; a rejected transaction cannot consume them. A newer
+   position-only request is deliberately left for the next committed frame
+   rather than cleared by the entry commit.
+   When gameplay vehicle ownership later wins, the still-pending exact key may
+   apply.
+4. The full entry action sets the game yaw reference from that root/carrier
+   heading, the headset yaw and position references from the current tracked
+   pose, and requests a new OpenXR play-space center. VR_RequestRecenter now
+   publishes that cross-thread request through an atomic flag; Present consumes
+   it before TryRecenter and remains the only thread that invalidates and
+   rebuilds the OpenXR center. The game/render thread no longer writes the
+   Present-owned center state directly. The committed game-yaw/head-yaw pair is
+   published to the controller thread in one atomic 64-bit snapshot, and the FP
+   center/controller targets are built only after that same commit, so the
+   first owned passenger frame cannot combine old hands with the new head.
+   That atomic yaw pair is invalid after install/teardown and becomes readable
+   only after an outer camera frame commits; rejected candidates never expose
+   an unpublished zero or a half-rendered follow update.
+5. ReachUpdateVehicleTransition no longer performs the full action on entry.
+   Its settled Vehicle-to-OnFoot edge requests only g_needPosRecenter. A
+   structurally occupied seat whose later identity/marker/bounds camera proof
+   misses holds the already-debounced occupation instead of reporting a false
+   exit. Occupation is the valid direct-parent plus bounded raw-seat
+   relationship; a null/torn seat-camera pointer blocks camera readiness but
+   does not erase that relationship. That frame still publishes no camera or
+   shot occupation. Thus only a proven exit updates neutral lean/position,
+   without changing yaw or the OpenXR play-space center.
+
+The latch has no refresh-rate timer or View Follow branch. Pure tests run the
+same exact key for two seconds at 72, 90, 120, and 144 samples per second under
+both View Follow values and prove exactly one commit in every case. They also
+pin every full-key member as a new occupation, preservation across null/invalid
+samples, retry after an uncommitted outer-camera stage, two seconds of
+camera-proof misses at each supported cadence, rearming only on proven OnFoot
+exit/config disable, bit-exact packed yaw publication plus an invalid lifecycle
+sentinel, invalid-commit rejection, and finite horizontal heading admission.
+The current Release configuration builds
+the DLL, launcher, and core-test executable successfully; ctest --preset
+release passes 1/1 tests.
+
+This implementation is headset-unverified. The next candidate must prove, in
+the headset and with View Follow OFF and ON, that Warthog driver, passenger,
+mounted gunner, and a carrier-mounted Covenant gun each enter exactly once
+facing their rendered vehicle/carrier; that a same-seat pause does not repeat
+the reset; that a seat or vehicle change earns one new reset; and that settled
+exit remains position-only. Record edition, runtime, headset, and a refresh
+rate in the supported 72-144 Hz range. Nothing here advances CURRENT-STATE.
+
 ## R-V9 - acceptance still required
 
 Nothing in this document changes the accepted pointer. Packaging, successful
@@ -1410,7 +1497,8 @@ The minimum headset pass for this candidate is:
 1. identify MCC edition, OpenXR runtime, headset, refresh rate, source commit,
    and installed halo3xr.dll hash;
 2. enter and exit a Warthog driver and passenger, checking camera placement,
-   body, hands/gun, lean, recenter, steering, and per-seat F1 persistence;
+   body, hands/gun, lean, one full play-space reset per exact entry or seat
+   change, position-only exit, steering, and per-seat F1 persistence;
 3. enter Wraith driver and Wraith gunner, proving the marker fallback and
    child-frame/carrier split;
 4. test one walk-up turret, one Falcon player position, one Banshee or Sabre,

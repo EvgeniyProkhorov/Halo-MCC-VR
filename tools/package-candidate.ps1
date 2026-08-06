@@ -176,10 +176,28 @@ try {
         reach_vehicle_view_follow_off_preserved = $true
         reach_vehicle_view_follow_render_matched_enabled = $true
         reach_vehicle_view_follow_refresh_invariant = $true
+        reach_vehicle_exact_seat_entry_playspace_recenter_enabled = $true
+        reach_vehicle_entry_recenter_view_follow_independent = $true
+        reach_vehicle_entry_recenter_refresh_invariant = $true
+        reach_vehicle_entry_recenter_heading_policy =
+            'render-matched-root-or-carrier'
+        reach_vehicle_entry_recenter_openxr_present_owned = $true
+        reach_vehicle_entry_recenter_outer_commit_staged = $true
+        reach_vehicle_camera_proof_miss_preserves_occupation = $true
+        reach_vehicle_yaw_reference_atomic_pair = $true
+        reach_vehicle_yaw_reference_requires_committed_frame = $true
+        reach_vehicle_exit_recenter_position_only = $true
         reach_vehicle_blender_camera_defaults_enabled = $true
         reach_vehicle_retail_camera_aliases_enabled = $true
         reach_vehicle_body_hide_interval_lease_enabled = $false
         reach_vehicle_unit_camera_scoped_body_hide_enabled = $true
+        reach_vehicle_native_fp_body_seated_legs_enabled = $true
+        reach_vehicle_fp_body_centered_authored_pose = $true
+        reach_vehicle_fp_body_failure_isolated = $true
+        reach_vehicle_fp_body_identity_policy =
+            'hrek-checksum-count-exact-tag-next-pair'
+        reach_vehicle_fp_body_spartan_identity = '0x10041201/82'
+        reach_vehicle_fp_body_elite_identity = '0x1404030E/67'
         reach_native_seated_aim_reticle_enabled = $false
         reach_controller_vehicle_reticle_enabled = $true
         reach_personal_weapon_rendered_eye_origin_enabled = $true
@@ -207,7 +225,7 @@ try {
                 sha256 = $launcherHash
             }
         }
-        note = 'Cumulative Reach vehicle repair: headset-reported-good View Follow OFF is preserved; View Follow ON uses the render-matched carrier basis with no refresh-rate filter; all 25 user-authored Blender camera placements plus exact retail aliases remain embedded. The rejected between-frame seat camera-mode lease is dormant. A render-scoped unit-camera hide-player bit hides only the controlling player world body. The floating controller crosshair remains authoritative; the native selected vehicle barrel keeps its stock origin while its exact local central pre-spread direction passes through the presented stabilized sight, with stock spread, ballistics, aim assist and tracking retained. Both firing records have a 50 ms bound for 72-144 Hz. No Workshop content is required, activated, copied or redistributed. Not accepted until this exact DLL hash passes both View Follow options, camera placement, body, visible crosshair, Warthog/Scorpion/Covenant turret firing, lifecycle, and required Halo 3/ODST regression tests.'
+        note = 'Cumulative Reach vehicle repair: headset-reported-good View Follow OFF is preserved; View Follow ON uses the render-matched carrier basis with no refresh-rate filter; all 25 user-authored Blender camera placements plus exact retail aliases remain embedded. Each exact occupied-seat entry performs one full play-space recenter against the render-matched root/carrier heading in both View Follow modes; settled exit remains position-only. The rejected between-frame seat camera-mode lease is dormant. A render-scoped unit-camera hide-player bit hides only the controlling player world body, while the exact checksum/count/tag-qualified native fp_body palette retains Halo 3/ODST-style seated legs and the separate controller-owned hands/gun stay unchanged. The floating controller crosshair remains authoritative; the native selected vehicle barrel keeps its stock origin while its exact local central pre-spread direction passes through the presented stabilized sight, with stock spread, ballistics, aim assist and tracking retained. Both firing records have a 50 ms bound for 72-144 Hz. No Workshop content is required, activated, copied or redistributed. Not accepted until this exact DLL hash passes both View Follow options, entry orientation, passenger legs/hands, camera placement, body hide, visible crosshair, Warthog/Scorpion/Covenant turret firing, lifecycle, and required Halo 3/ODST regression tests.'
     }
 
     $manifestPath = Join-Path $packageDir 'CANDIDATE-MANIFEST.json'

@@ -899,6 +899,70 @@ int main()
     }
 
     {
+        using LegKind = ReachFpLegPaletteKind;
+        Check(
+            ClassifyReachFpLegPalette(
+                kReachSpartanFpLegRuntimeImportChecksum,
+                kReachSpartanFpLegNodeCount) == LegKind::Spartan &&
+            ClassifyReachFpLegPalette(
+                kReachEliteFpLegRuntimeImportChecksum,
+                kReachEliteFpLegNodeCount) == LegKind::Elite,
+            "Reach admits the exact HREK Spartan and Elite first-person leg identities");
+
+        // Counts collide with the ordinary world render models, so their
+        // distinct HREK checksums must remain on the collapse path.
+        Check(
+            ClassifyReachFpLegPalette(0x171B0502u, 82) == LegKind::None &&
+            ClassifyReachFpLegPalette(0x171C1D0Fu, 67) == LegKind::None,
+            "Reach rejects same-count world Spartan and Elite render models as legs");
+        Check(
+            ClassifyReachFpLegPalette(
+                kReachSpartanFpLegRuntimeImportChecksum, 81) ==
+                    LegKind::None &&
+            ClassifyReachFpLegPalette(
+                kReachEliteFpLegRuntimeImportChecksum, 68) ==
+                    LegKind::None &&
+            ClassifyReachFpLegPalette(
+                kReachSpartanFpLegRuntimeImportChecksum + 1, 82) ==
+                    LegKind::None &&
+            ClassifyReachFpLegPalette(0, 0) == LegKind::None,
+            "Reach leg identity rejects altered and empty observations");
+
+        constexpr uint16_t kLegTag = 0x3902;
+        constexpr uint16_t kArmsTag = 0x3901;
+        Check(
+            !ReachFpShouldCollapseVisiblePalette(
+                true, LegKind::Spartan, kLegTag, kLegTag) &&
+            ReachFpLegNodeCountMatchesKind(
+                LegKind::Spartan,kReachSpartanFpLegNodeCount) &&
+            ReachFpShouldCollapseVisiblePalette(
+                true, LegKind::Spartan, kLegTag, kArmsTag) &&
+            !ReachFpLegNodeCountMatchesKind(
+                LegKind::Spartan,kReachEliteFpLegNodeCount),
+            "Reach preserves only the exact leg palette while exact arms still collapse");
+        Check(
+            ReachFpShouldCollapseVisiblePalette(
+                false, LegKind::Spartan, kLegTag, kLegTag) &&
+            ReachFpShouldCollapseVisiblePalette(
+                true, LegKind::None, kLegTag, kLegTag) &&
+            ReachFpShouldCollapseVisiblePalette(
+                true, LegKind::Elite, 0x4702, kLegTag),
+            "Reach collapses when legs are disabled, unproven, or tag-mismatched");
+        Check(
+            !ReachFpLegObservationCanValidate(
+                true, 9, 100, 9, 100) &&
+            ReachFpLegObservationCanValidate(
+                true, 9, 100, 9, 101) &&
+            !ReachFpLegObservationCanValidate(
+                true, 9, 100, 10, 101) &&
+            !ReachFpLegObservationCanValidate(
+                false, 9, 100, 9, 101) &&
+            !ReachFpLegObservationCanValidate(
+                true, 9, 0, 9, 101),
+            "Reach verifies a leg observation only on a later pair in the same title generation");
+    }
+
+    {
         constexpr uint32_t kGeneration = 7;
         constexpr uint64_t kDiscoverySerial = 100;
         const auto decide = [](uint32_t learnedGeneration,
@@ -1342,6 +1406,180 @@ int main()
                 !ReachSeatLeaseKeyValid(
                     {37, 0x12340007, 0x23450009, 0x00030021, 16}),
                 "Reach body-hide lease key preserves generation, both salted handles, definition datum and raw seat");
+
+            // A complete exact seat earns one re-centre regardless of headset
+            // cadence or View Follow. Repeated frames carrying that same key
+            // can never fire again after the successful application commits.
+            bool cadenceInvariant = true;
+            for (const uint32_t refreshRate : {72u, 90u, 120u, 144u})
+            {
+                for (const bool viewFollow : {false, true})
+                {
+                    (void)viewFollow; // deliberately absent from the policy
+                    ReachSeatRecenterLatch latch;
+                    uint32_t requests = 0;
+                    for (uint32_t frame = 0; frame < refreshRate * 2; ++frame)
+                    {
+                        if (latch.NeedsApply(true, true, &leaseKey))
+                        {
+                            ++requests;
+                            cadenceInvariant = cadenceInvariant &&
+                                latch.Commit(leaseKey);
+                        }
+                    }
+                    cadenceInvariant = cadenceInvariant && requests == 1;
+                }
+            }
+            Check(cadenceInvariant,
+                "Reach seat re-centre fires once for the same exact seat at 72-144 Hz with View Follow off or on");
+
+            // Every member of the full key is an occupation boundary. Commit
+            // remains explicit so a failed runtime application can retry.
+            ReachSeatRecenterLatch changedKeyLatch;
+            const bool exactChangesRearm =
+                changedKeyLatch.NeedsApply(true, true, &leaseKey) &&
+                changedKeyLatch.Commit(leaseKey) &&
+                changedKeyLatch.NeedsApply(true, true, &otherSeat) &&
+                changedKeyLatch.Commit(otherSeat) &&
+                changedKeyLatch.NeedsApply(true, true, &otherParent) &&
+                changedKeyLatch.Commit(otherParent) &&
+                changedKeyLatch.NeedsApply(true, true, &otherUnit) &&
+                changedKeyLatch.Commit(otherUnit) &&
+                changedKeyLatch.NeedsApply(true, true, &otherDefinition) &&
+                changedKeyLatch.Commit(otherDefinition) &&
+                changedKeyLatch.NeedsApply(true, true, &otherGeneration) &&
+                changedKeyLatch.Commit(otherGeneration) &&
+                !changedKeyLatch.NeedsApply(
+                    true, true, &otherGeneration);
+            Check(exactChangesRearm,
+                "Reach seat re-centre treats seat, vehicle, unit, definition and generation changes as exact new occupations");
+            ReachSeatRecenterLatch stagedCommitLatch;
+            const bool rejectedStageRetries =
+                stagedCommitLatch.NeedsApply(true,true,&leaseKey) &&
+                stagedCommitLatch.NeedsApply(true,true,&leaseKey) &&
+                stagedCommitLatch.Commit(leaseKey) &&
+                !stagedCommitLatch.NeedsApply(true,true,&leaseKey);
+            Check(rejectedStageRetries,
+                "Reach rejected outer-camera stages remain pending until an explicit committed render consumes the exact seat");
+
+            // No complete key means there is nothing safe to apply, but it is
+            // not an exit. Preserve the applied key so a torn frame followed by
+            // the same seat cannot yank the play space a second time.
+            constexpr ReachSeatLeaseKey invalidKey{
+                37, -1, 0x23450009, 0x00030021, 3};
+            ReachSeatRecenterLatch missingLatch;
+            const bool missingPreserves =
+                missingLatch.NeedsApply(true, true, &leaseKey) &&
+                missingLatch.Commit(leaseKey) &&
+                !missingLatch.NeedsApply(true, true, nullptr) &&
+                !missingLatch.NeedsApply(true, true, &invalidKey) &&
+                !missingLatch.NeedsApply(true, true, &leaseKey) &&
+                missingLatch.NeedsApply(true, true, &otherSeat);
+            Check(missingPreserves,
+                "Reach seat re-centre preserves its exact key across missing, torn or invalid current samples");
+            Check(
+                ReachSeatOccupationObserved(
+                    leaseKey.directParent,leaseKey.seatIndex,16) &&
+                !ReachSeatOccupationObserved(-1,leaseKey.seatIndex,16) &&
+                !ReachSeatOccupationObserved(
+                    leaseKey.directParent,-1,16) &&
+                !ReachSeatOccupationObserved(
+                    leaseKey.directParent,16,16),
+                "Reach parent plus raw seat proves occupation independently of a torn seat-camera pointer");
+
+            // A settled exit and an explicit config disable are real
+            // boundaries. Both clear the latch so the next valid entry earns
+            // one new request. Invalid commits must not replace good state.
+            ReachSeatRecenterLatch boundaryLatch;
+            const bool boundariesRearm =
+                boundaryLatch.NeedsApply(true, true, &leaseKey) &&
+                boundaryLatch.Commit(leaseKey) &&
+                !boundaryLatch.NeedsApply(true, false, nullptr) &&
+                boundaryLatch.NeedsApply(true, true, &leaseKey) &&
+                boundaryLatch.Commit(leaseKey) &&
+                !boundaryLatch.NeedsApply(false, true, &leaseKey) &&
+                boundaryLatch.NeedsApply(true, true, &leaseKey) &&
+                boundaryLatch.Commit(leaseKey) &&
+                !boundaryLatch.Commit(invalidKey) &&
+                !boundaryLatch.NeedsApply(true, true, &leaseKey);
+            Check(boundariesRearm,
+                "Reach seat re-centre rearms only after settled exit/config disable and commits only valid exact keys");
+
+            // Once a seat is admitted, later identity/marker/bounds proof can
+            // miss without proving that the player left it. Feeding the
+            // already-stable occupation into the shared debounce must hold the
+            // latch indefinitely at every supported headset cadence. Only a
+            // genuinely observed OnFoot run earns the exit boundary.
+            bool proofMissesHoldOccupation = true;
+            for (const uint32_t refreshRate : {72u, 90u, 120u, 144u})
+            {
+                Halo3VehicleDebounce occupation{};
+                occupation.stable=Halo3VehicleState::Vehicle;
+                occupation.candidate=Halo3VehicleState::Vehicle;
+                ReachSeatRecenterLatch latch;
+                proofMissesHoldOccupation =
+                    proofMissesHoldOccupation &&
+                    latch.NeedsApply(true,true,&leaseKey) &&
+                    latch.Commit(leaseKey);
+                for (uint32_t frame=0;frame<refreshRate*2;++frame)
+                {
+                    proofMissesHoldOccupation =
+                        proofMissesHoldOccupation &&
+                        !occupation.Update(
+                            occupation.stable,
+                            kHalo3VehicleDebounceFrames) &&
+                        !latch.NeedsApply(
+                            true,
+                            occupation.stable==
+                                Halo3VehicleState::Vehicle,
+                            nullptr);
+                }
+                proofMissesHoldOccupation =
+                    proofMissesHoldOccupation &&
+                    !latch.NeedsApply(true,true,&leaseKey);
+                for (uint32_t frame=0;
+                     frame<kHalo3VehicleDebounceFrames;++frame)
+                {
+                    occupation.Update(
+                        Halo3VehicleState::OnFoot,
+                        kHalo3VehicleDebounceFrames);
+                }
+                proofMissesHoldOccupation =
+                    proofMissesHoldOccupation &&
+                    occupation.stable==Halo3VehicleState::OnFoot &&
+                    !latch.NeedsApply(true,false,nullptr) &&
+                    latch.NeedsApply(true,true,&leaseKey);
+            }
+            Check(proofMissesHoldOccupation,
+                "Reach camera-proof misses preserve an occupied seat at 72-144 Hz while a true OnFoot sample rearms entry");
+
+            float entryYaw = 0.0f;
+            const float forward[3]{0.0f, 1.0f, 0.0f};
+            const float vertical[3]{0.0f, 0.0f, 1.0f};
+            const float nonFinite[3]{
+                std::numeric_limits<float>::quiet_NaN(), 0.0f, 0.0f};
+            const bool headingGuarded =
+                ReachVehicleEntryYaw(forward, entryYaw) &&
+                std::fabs(entryYaw - 1.57079632679f) < 1.0e-5f &&
+                !ReachVehicleEntryYaw(vertical, entryYaw) &&
+                !ReachVehicleEntryYaw(nonFinite, entryYaw) &&
+                !ReachVehicleEntryYaw(nullptr, entryYaw);
+            Check(headingGuarded,
+                "Reach seat re-centre consumes only a finite render-matched horizontal vehicle heading");
+            constexpr float packedGameYaw = -2.375f;
+            constexpr float packedHeadYaw = 1.125f;
+            constexpr uint64_t packedYawReferences =
+                ReachPackYawReferencePair(packedGameYaw, packedHeadYaw);
+            constexpr ReachYawReferencePair unpackedYawReferences =
+                ReachUnpackYawReferencePair(packedYawReferences);
+            Check(
+                unpackedYawReferences.gameYaw == packedGameYaw &&
+                unpackedYawReferences.headYaw == packedHeadYaw &&
+                ReachYawReferencePairValid(unpackedYawReferences) &&
+                !ReachYawReferencePairValid(
+                    ReachUnpackYawReferencePair(
+                        kReachInvalidYawReferencePair)),
+                "Reach publishes game/head yaw references as one bit-exact input snapshot");
             Check(
                 ReachSeatLeaseRetainsHook(
                     ReachSeatLeaseState::Installing) &&

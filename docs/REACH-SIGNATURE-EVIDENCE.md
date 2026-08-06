@@ -2375,8 +2375,10 @@ session.
 
 ## Reach vehicle body visibility and projectile unit-adjust - 2026-08-05
 
-These are HREK-first bindings for implementation commit f370185. They remain
-headset-unverified and do not advance CURRENT-STATE.
+The body-hide and projectile bindings below are HREK-first bindings from
+implementation commit f370185. The native `fp_body` preservation design below
+builds on that implementation. Every Reach behavior in this section remains
+headset-unverified and does not advance CURRENT-STATE.
 
 Official HREK unit_camera_flags_definition has four flags. Bit 2, mask 0x0004,
 is named hides player-unit from camera: only the player controlling that camera
@@ -2400,6 +2402,122 @@ The runtime therefore scopes one 16-bit bit-2 CAS around only the admitted
 normal-player outer render. It restores only its owned bit in a bounded CAS
 loop, preserving unrelated changes, and retains no tag pointer. The rejected
 between-frame seat bit-4 lease remains dormant.
+
+### Native seated `fp_body` legs with separate floating hands (CANDIDATE)
+
+**Halo 3/ODST experience being matched.** Their native first-person body is a
+different render model from the first-person hands and personal weapon. Current
+Halo 3 `Halo3SampleVehicleState` calls `Halo3EnsureFirstPersonSeatFlag` for every
+successfully decoded occupied vehicle seat; ODST's occupant path does the same
+through `OdstEnsureFirstPersonSeatFlag`. Both helpers clear only the native
+third-person-camera seat bit 4 when `vehicle_first_person` and
+`vehicle_hide_body` are enabled. Neither helper asks whether the seat is a
+driver, passenger, or gunner. The independent seat bit 5 controls whether the
+occupant may use a personal weapon; it does not control the first-person body.
+
+The reference presentation is therefore native seated `fp_body` legs in every
+successfully admitted occupied seat, with the world/third-person biped hidden.
+The separately submitted first-person hands and personal weapon remain
+controller-owned/floating wherever the title emits them, normally an
+allows-weapons passenger. Drivers and vehicle gunners retain the native legs
+but normally do not submit that separate personal-weapon presentation.
+Historical accepted Halo 3 commit `5c12297` records both the distinct native
+`fp_body.render_model` finding and the user's explicit decision to retain its
+legs. This is the player-facing contract for Reach, not permission to copy a
+Halo 3 or ODST tag layout or seat offset.
+
+**Exact Reach HREK identities.** Official ManagedBlam exports prove that Reach
+also has separate Spartan and Elite `fp_body` render models with complete lower
+body chains. The Spartan export names pelvis, left/right thigh, calf, and foot
+nodes at lines 83, 128/158, 218/203, and 353/368. The Elite export names the
+same lower-body chain at lines 134, 164/194, 224/209, and 359/374.
+
+| HREK `render_model` | Runtime-import checksum | Nodes | Retained evidence artifact |
+| --- | ---: | ---: | --- |
+| `objects\characters\spartans\fp_body\fp_body.render_model` | `268702209` / `0x10041201` | 82 | `out/hrek-analysis/spartan_fp_body.xml`, SHA-256 `DA1D82E4D1B0BCF4A5259EDB2DBC6192F39C2612FB3846DA37A4DECE6C04E957` |
+| `objects\characters\elite\fp_body\fp_body.render_model` | `335807246` / `0x1404030E` | 67 | `out/hrek-analysis/elite_fp_body.xml`, SHA-256 `E10500DD947C1DF7C999A8CC5564AF1CB1B1570096C991B82E14465BCE87364E` |
+
+In each pinned XML the tag identity is line 2, the runtime-import checksum is
+line 6, and the node count is line 67 for Spartan or line 103 for Elite. The
+runtime-import checksum is the immutable tag identity used by this candidate;
+the unrelated `node list checksum` field is zero in both exports and is not an
+identity.
+
+Node count alone is unsafe. An exhaustive ManagedBlam scan of all 2,025
+official HREK `render_model` tags (zero scan failures) also found these exact
+ordinary world-model collisions:
+
+| HREK scan comparison | Runtime-import checksum | Nodes |
+| --- | ---: | ---: |
+| Ordinary world Spartan render model | `0x171B0502` | 82 |
+| Ordinary world Elite render model | `0x171C1D0F` | 67 |
+
+That scan did not retain standalone XML exports or hashes for the two world
+models, so those two rows are recorded as verified scan-comparison results, not
+as hash-pinned artifacts. The two `fp_body` identities above are retained and
+hash-pinned. Production consequently never classifies a palette from species or
+node count alone: it requires the exact `fp_body` checksum/count tuple and the
+exact observed tag.
+
+**Two-pair exact-tag verification.** This is a runtime safety policy, not a
+behavior discovered in HREK:
+
+1. During prepared stereo pair N, the existing visible-palette transaction may
+   observe a candidate 82- or 67-node palette. It records only the exact tag,
+   count, title generation, and prepared serial. Pair N retains the existing
+   floating-hands collapse behavior.
+2. Only at a later outer pair boundary does the runtime read the immutable
+   render-model descriptor for that exact observed tag. The generation must
+   still match, the new pair serial must be greater than the observation serial,
+   the descriptor count must equal the observed count, and checksum plus count
+   must equal one of the two pinned tuples. The result is cached by exact tag and
+   species, then revalidated before it is frozen into the new two-eye pair.
+3. On pair N+1 or later, only a palette call carrying that frozen exact tag may
+   skip final collapse. A tag mismatch, generation change, failed descriptor
+   read, altered checksum/count, unknown tag, or either same-count world model
+   stays on the existing collapse path. Both eyes consume the same frozen
+   decision.
+
+**Candidate presentation transaction.** An exact verified seated `fp_body`
+never enters the controller-owned arms reconstruction. Its visible source is
+built in private scratch as `inverse(palette_root) * center_root *
+untouched_live[i]` for every source record, then every output is checked finite
+before the stock palette builder consumes it. This keeps the complete native
+authored body pose, including its seated legs, centered on the same stereo VR
+root without dragging the pelvis or legs toward either hand controller. It does
+not substitute the ordinary world model, mutate the live source graph, use a
+source-node visibility mask, or expose an uncentered stock body.
+
+If the centered native-body conversion cannot prove finite output, only that
+palette is passed its untouched stock source and a dedicated failure counter is
+logged. The proven 47/41 arms layout and controller-owned live marker graph are
+not invalidated, so the optional legs feature cannot take down floating hands.
+
+Everything else retains the existing behavior:
+
+- the exact 47-node Spartan and 41-node Elite `fp\fp` arms models still use the
+  established floating-hands collapse, retaining the two hand descendant sets
+  and appended personal weapon while collapsing the hidden arm/body records at
+  their proven wrist-local anchors;
+- unknown tags, altered layouts, same-count world tags, on-foot presentation,
+  and every unproven state remain collapsed/stock under their existing gates;
+- Reach's unit-camera bit-2 CAS remains the sole seated world-biped hide and
+  continues to honor `vehicle_hide_body`; this candidate does not change its
+  scope, restore, or failure isolation; and
+- the leg gate is every successfully admitted occupied first-person vehicle
+  view. It has no driver/passenger/gunner, personal-weapon, vehicle identity,
+  refresh-rate, or View Follow condition.
+
+`vehicle_view_follow` changes only the carrier orientation composed into the
+camera. It is deliberately absent from both `fp_body` identity and visibility.
+The two-pair policy advances by prepared serial rather than elapsed time, so it
+has the same decision at 72, 90, 120, and 144 Hz and with View Follow OFF or ON;
+no smoothing or cadence-specific visibility state is introduced. These are
+design and unit-policy facts only. Visible centered native legs, separate
+floating hands and personal weapon in an allows-weapons passenger seat, hidden
+world body, all seat roles, both View Follow settings, and representative
+72-144 Hz operation still require an exact-candidate headset result before
+acceptance.
 
 Official HREK weapons.cpp establishes the vehicle firing locus. The projectile
 transaction begins at 0xDE4290. It resolves the active firing weapon/barrel and

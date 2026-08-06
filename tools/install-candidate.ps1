@@ -130,6 +130,21 @@ if ([int]$manifest.schema_version -ne 7 -or
         $manifest.reach_vehicle_view_follow_off_preserved -ne $true -or
         $manifest.reach_vehicle_view_follow_render_matched_enabled -ne $true -or
         $manifest.reach_vehicle_view_follow_refresh_invariant -ne $true -or
+        $manifest.reach_vehicle_exact_seat_entry_playspace_recenter_enabled -ne
+            $true -or
+        $manifest.reach_vehicle_entry_recenter_view_follow_independent -ne
+            $true -or
+        $manifest.reach_vehicle_entry_recenter_refresh_invariant -ne $true -or
+        [string]$manifest.reach_vehicle_entry_recenter_heading_policy -cne
+            'render-matched-root-or-carrier' -or
+        $manifest.reach_vehicle_entry_recenter_openxr_present_owned -ne $true -or
+        $manifest.reach_vehicle_entry_recenter_outer_commit_staged -ne $true -or
+        $manifest.reach_vehicle_camera_proof_miss_preserves_occupation -ne
+            $true -or
+        $manifest.reach_vehicle_yaw_reference_atomic_pair -ne $true -or
+        $manifest.reach_vehicle_yaw_reference_requires_committed_frame -ne
+            $true -or
+        $manifest.reach_vehicle_exit_recenter_position_only -ne $true -or
         $manifest.reach_vehicle_blender_camera_defaults_enabled -ne $true -or
         $manifest.reach_vehicle_retail_camera_aliases_enabled -ne $true -or
         $manifest.reach_projectile_alignment_enabled -ne $true -or
@@ -137,6 +152,15 @@ if ([int]$manifest.schema_version -ne 7 -or
             'exact-local-reach-vehicle-central-line' -or
         $manifest.reach_vehicle_body_hide_interval_lease_enabled -ne $false -or
         $manifest.reach_vehicle_unit_camera_scoped_body_hide_enabled -ne $true -or
+        $manifest.reach_vehicle_native_fp_body_seated_legs_enabled -ne $true -or
+        $manifest.reach_vehicle_fp_body_centered_authored_pose -ne $true -or
+        $manifest.reach_vehicle_fp_body_failure_isolated -ne $true -or
+        [string]$manifest.reach_vehicle_fp_body_identity_policy -cne
+            'hrek-checksum-count-exact-tag-next-pair' -or
+        [string]$manifest.reach_vehicle_fp_body_spartan_identity -cne
+            '0x10041201/82' -or
+        [string]$manifest.reach_vehicle_fp_body_elite_identity -cne
+            '0x1404030E/67' -or
         $manifest.reach_native_seated_aim_reticle_enabled -ne $false -or
         $manifest.reach_controller_vehicle_reticle_enabled -ne $true -or
         $manifest.reach_personal_weapon_rendered_eye_origin_enabled -ne $true -or

@@ -716,6 +716,77 @@ inline constexpr size_t kReachSpartanFpBodyNodeCount = 47;
 inline constexpr size_t kReachEliteFpBodyNodeCount = 41;
 inline constexpr size_t kReachFpBoneMatrixFloatCount = 13;
 
+// Reach also submits a separate first-person lower-body render model. Official
+// HREK's immutable runtime-import checksum and node count identify these exact
+// tags. Count alone is insufficient: the ordinary world Spartan and Elite
+// render models also contain 82 and 67 nodes respectively.
+inline constexpr uint32_t kReachSpartanFpLegRuntimeImportChecksum =
+    0x10041201u;
+inline constexpr uint32_t kReachEliteFpLegRuntimeImportChecksum =
+    0x1404030Eu;
+inline constexpr int kReachSpartanFpLegNodeCount = 82;
+inline constexpr int kReachEliteFpLegNodeCount = 67;
+
+// Keep this identity separate from ReachFpBodyKind below. ReachFpBodyKind is
+// the exact 47/41-node arms-layout fingerprint used for articulation; this
+// enum identifies only the independently submitted lower-body palette.
+enum class ReachFpLegPaletteKind : uint8_t
+{
+    None = 0,
+    Spartan,
+    Elite,
+};
+
+inline constexpr ReachFpLegPaletteKind ClassifyReachFpLegPalette(
+    uint32_t runtimeImportChecksum, int nodeCount) noexcept
+{
+    if (runtimeImportChecksum ==
+            kReachSpartanFpLegRuntimeImportChecksum &&
+        nodeCount == kReachSpartanFpLegNodeCount)
+    {
+        return ReachFpLegPaletteKind::Spartan;
+    }
+    if (runtimeImportChecksum == kReachEliteFpLegRuntimeImportChecksum &&
+        nodeCount == kReachEliteFpLegNodeCount)
+    {
+        return ReachFpLegPaletteKind::Elite;
+    }
+    return ReachFpLegPaletteKind::None;
+}
+
+// The pair boundary freezes an exact checksum/count-qualified lower-body tag.
+// Only that tag may take the centered native-body path when seated legs are
+// enabled. Arms, held-object attachments, unknown tags, and every disabled or
+// unproven state retain the existing floating-hands collapse policy. View
+// Follow is deliberately absent: it changes orientation, not presentation.
+inline constexpr bool ReachFpShouldCollapseVisiblePalette(
+    bool showSeatedLegs, ReachFpLegPaletteKind frozenKind,
+    uint16_t frozenTag, uint16_t observedTag) noexcept
+{
+    return !showSeatedLegs || frozenKind == ReachFpLegPaletteKind::None ||
+        observedTag != frozenTag;
+}
+
+inline constexpr bool ReachFpLegNodeCountMatchesKind(
+    ReachFpLegPaletteKind kind, int nodeCount) noexcept
+{
+    return (kind == ReachFpLegPaletteKind::Spartan &&
+            nodeCount == kReachSpartanFpLegNodeCount) ||
+        (kind == ReachFpLegPaletteKind::Elite &&
+         nodeCount == kReachEliteFpLegNodeCount);
+}
+
+inline constexpr bool ReachFpLegObservationCanValidate(
+    bool observationValid, uint32_t observationGeneration,
+    uint64_t observationPreparedSerial, uint32_t pairGeneration,
+    uint64_t pairPreparedSerial) noexcept
+{
+    return observationValid && observationGeneration != 0 &&
+        observationGeneration == pairGeneration &&
+        observationPreparedSerial != 0 &&
+        pairPreparedSerial > observationPreparedSerial;
+}
+
 inline bool ReachFpPackedGraphFinite(
     std::span<const float> packedRecords, size_t recordCount) noexcept
 {

@@ -15681,6 +15681,7 @@ namespace
     {
         bool active = false;
         bool carrierBasisValid = false;
+        bool entryForwardValid = false;
         bool unitAimValid = false;
         int32_t unitHandle = -1;
         int32_t directParent = -1;
@@ -15692,6 +15693,7 @@ namespace
         float cameraBase[3]{};
         float handsBase[3]{};
         float rawCarrierForward[3]{};
+        float entryForward[3]{};
         float unitAimForward[3]{};
     };
 
@@ -15847,6 +15849,15 @@ namespace
         ReachSymmetricFovCover rasterCover{};
     };
 
+    struct ReachPendingSeatRecenter
+    {
+        bool valid = false;
+        ReachSeatLeaseKey key{};
+        float gameYaw = 0.0f;
+        float headYaw = 0.0f;
+        float headPosition[3]{};
+    };
+
     struct ReachOwnerScope
     {
         bool active = false;
@@ -15860,6 +15871,7 @@ namespace
         float gameplayBasePosition[3]{};
         ReachVehicleFrame vehicle{};
         bool vehicleViewApplied = false;
+        ReachPendingSeatRecenter pendingSeatRecenter{};
         FpExplicitPoseTargets fpTargets{};
         alignas(16) unsigned char headCenter[kReachCompactCameraBytes]{};
         ReachEyeRenderInput eyes[2]{};
@@ -15988,7 +16000,30 @@ namespace
     std::atomic<uint32_t> g_reachUnitCameraHideRestores{0};
     std::atomic<uint32_t> g_reachUnitCameraHideFailures{0};
     std::atomic<uint32_t> g_reachVehicleSeatRecenters{0};
+    std::atomic<uint32_t> g_reachVehicleExitRecenters{0};
     std::atomic<uint32_t> g_reachSeatAuthorsSteering{0};
+    std::atomic<uint64_t> g_reachYawReferencePair{
+        kReachInvalidYawReferencePair};
+
+    void ReachPublishYawReferencePair(float gameYaw, float headYaw)
+    {
+        if (!isfinite(gameYaw) || !isfinite(headYaw))
+            return;
+        g_reachYawReferencePair.store(
+            ReachPackYawReferencePair(gameYaw,headYaw),
+            std::memory_order_release);
+    }
+
+    bool ReachReadYawReferencePair(float& gameYaw, float& headYaw)
+    {
+        const ReachYawReferencePair pair=ReachUnpackYawReferencePair(
+            g_reachYawReferencePair.load(std::memory_order_acquire));
+        if (!ReachYawReferencePairValid(pair))
+            return false;
+        gameYaw=pair.gameYaw;
+        headYaw=pair.headYaw;
+        return true;
+    }
 
     // Reach's camera thread publishes one coherent aim direction for the input
     // thread. Unlike the shared legacy three-float publication, this cannot
@@ -16720,6 +16755,7 @@ namespace
     }
 
     Halo3VehicleDebounce g_reachVehicleFpDebounce;
+    ReachSeatRecenterLatch g_reachSeatRecenterLatch;
     Halo3SeatYaw g_reachSeatYaw;
     Halo3SeatPositionKey g_reachYawSeat;
 
@@ -18304,8 +18340,12 @@ namespace
     struct ReachFpPairScope
     {
         bool armed = false;
+        bool showSeatedLegs = false;
+        bool legPaletteValid = false;
         uint32_t generation = 0;
         uint64_t preparedSerial = 0;
+        uint16_t legPaletteTag = 0;
+        ReachFpLegPaletteKind legPaletteKind = ReachFpLegPaletteKind::None;
         FpExplicitPoseTargets targets{};
         ReachFpLayoutCacheEntry layouts[kReachFpLayoutCacheCapacity]{};
     };
@@ -18326,12 +18366,35 @@ namespace
         FpExplicitPoseTargets targets{};
         BoneMatrix untouchedLive[kReachFpMaxSourceNodeCount]{};
     };
+    struct ReachFpLegPaletteObservation
+    {
+        bool valid = false;
+        uint32_t generation = 0;
+        uint64_t observedPreparedSerial = 0;
+        uint16_t tag = 0;
+        int nodeCount = 0;
+    };
+    struct ReachFpLegPaletteCacheEntry
+    {
+        bool valid = false;
+        uint32_t generation = 0;
+        uint64_t learnedPreparedSerial = 0;
+        uint16_t tag = 0;
+        ReachFpLegPaletteKind kind = ReachFpLegPaletteKind::None;
+    };
     thread_local ReachFpLayoutCacheEntry
         g_reachFpLayoutCache[kReachFpLayoutCacheCapacity];
     thread_local ReachFpPairScope g_reachFpPairScope;
     thread_local ReachFpInterpolationContext
         g_reachFpInterpolations[kReachFpTransactionCapacity];
+    thread_local ReachFpLegPaletteObservation
+        g_reachFpLegPaletteObservations[kReachFpTransactionCapacity];
+    thread_local ReachFpLegPaletteCacheEntry g_reachFpLegPaletteCache;
     thread_local uint64_t g_reachFpCaptureSerial = 0;
+    std::atomic<uint32_t> g_reachFpLegPaletteObservationCount{0};
+    std::atomic<uint32_t> g_reachFpLegPalettePreserved{0};
+    std::atomic<uint32_t> g_reachFpLegPaletteIdentityRejects{0};
+    std::atomic<uint32_t> g_reachFpLegPaletteBuildFailures{0};
 
     struct ReachFpStatus
     {
@@ -18371,7 +18434,8 @@ namespace
     }
 
     void ReachBeginFpPairScope(uint32_t generation, uint64_t preparedSerial,
-                               const FpExplicitPoseTargets& targets);
+                               const FpExplicitPoseTargets& targets,
+                               bool showSeatedLegs);
     void ReachEndFpPairScope();
 
     // Reach's apply_distortions pass divides motion_blur_max by
@@ -18812,8 +18876,12 @@ namespace
 
 
     bool ReachApplyHeadLook(
-        unsigned char* cam, const ReachVrRenderSnapshot& tracking)
+        unsigned char* cam, const ReachVrRenderSnapshot& tracking,
+        const ReachVehicleFrame* vehicle,
+        const ReachSeatLeaseKey* entryRecenterKey,
+        ReachPendingSeatRecenter& pendingSeatRecenter)
     {
+        pendingSeatRecenter={};
         float q[4] = {
             tracking.headOrientation[0], tracking.headOrientation[1],
             tracking.headOrientation[2], tracking.headOrientation[3]};
@@ -18859,34 +18927,76 @@ namespace
         float* fwd = reinterpret_cast<float*>(cam + 0x0C);
         float* up = reinterpret_cast<float*>(cam + 0x18);
 
+        bool vehicleEntryRecenter=false;
+        float vehicleEntryYaw=0.0f;
+        if (vehicle && vehicle->active && vehicle->entryForwardValid &&
+            entryRecenterKey &&
+            ReachSeatLeaseKeyValid(*entryRecenterKey))
+        {
+            vehicleEntryRecenter=ReachVehicleEntryYaw(
+                vehicle->entryForward,vehicleEntryYaw);
+        }
+
         // An authored camera cut realigns yaw only, exactly like Halo 3/ODST
         // at their scene/shot IDs: the current physical head-forward maps to
         // the new shot's authored facing. A manual recenter additionally
         // rebaselines the lean/position reference; a cut must not, or leaning
         // would snap mid-cinematic.
-        const bool manualRecenter = g_needRecenter.exchange(false);
-        const bool cutRealign = g_reachCineCutRealign.exchange(
-            false, std::memory_order_acq_rel);
-        if (manualRecenter || cutRealign)
+        // An exact-seat stage must not acquire global one-shot requests before
+        // the outer transaction commits. A projection/serial/camera rejection
+        // leaves them untouched; an admitted seat reset coalesces them at its
+        // commit because it performs the complete action.
+        const bool manualRecenter = !vehicleEntryRecenter &&
+            g_needRecenter.exchange(false,std::memory_order_acq_rel);
+        const bool cutRealign = !vehicleEntryRecenter &&
+            g_reachCineCutRealign.exchange(
+                false,std::memory_order_acq_rel);
+        float effectiveGameYawRef=g_gameYawRef;
+        float effectiveHeadYawRef=g_headYawRef;
+        float effectiveHeadPosRef[3]{
+            g_headPosRef[0],g_headPosRef[1],g_headPosRef[2]};
+        if (vehicleEntryRecenter)
         {
-            g_gameYawRef = atan2f(fwd[1], fwd[0]);
-            g_headYawRef = hy;
+            // Build this first vehicle frame from the new exact-seat
+            // references without publishing them yet. Projection, prepared
+            // serial and outer-camera commit can still reject the transaction;
+            // only the caller's admitted outer commit may consume the latch or
+            // request a new OpenXR centre.
+            effectiveGameYawRef=vehicleEntryYaw;
+            effectiveHeadYawRef=hy;
+            memcpy(effectiveHeadPosRef,hpos,sizeof(effectiveHeadPosRef));
+            pendingSeatRecenter.valid=true;
+            pendingSeatRecenter.key=*entryRecenterKey;
+            pendingSeatRecenter.gameYaw=vehicleEntryYaw;
+            pendingSeatRecenter.headYaw=hy;
+            memcpy(pendingSeatRecenter.headPosition,hpos,
+                   sizeof(pendingSeatRecenter.headPosition));
+        }
+        else if (manualRecenter || cutRealign)
+        {
+            g_gameYawRef=atan2f(fwd[1],fwd[0]);
+            g_headYawRef=hy;
             if (manualRecenter)
             {
-                g_headPosRef[0] = hpos[0]; g_headPosRef[1] = hpos[1];
-                g_headPosRef[2] = hpos[2];
-                g_needPosRecenter = false;
+                memcpy(g_headPosRef,hpos,sizeof(g_headPosRef));
+                g_needPosRecenter.store(false,std::memory_order_release);
             }
         }
         else if (g_needPosRecenter.exchange(false))
         {
-            g_headPosRef[0] = hpos[0]; g_headPosRef[1] = hpos[1];
-            g_headPosRef[2] = hpos[2];
+            memcpy(g_headPosRef,hpos,sizeof(g_headPosRef));
+        }
+        if (!vehicleEntryRecenter)
+        {
+            effectiveGameYawRef=g_gameYawRef;
+            effectiveHeadYawRef=g_headYawRef;
+            memcpy(effectiveHeadPosRef,g_headPosRef,
+                   sizeof(effectiveHeadPosRef));
         }
 
         const float trackedYawDelta =
-            g_yawSign.load() * WrapPi(hy - g_headYawRef);
-        const float gy = g_gameYawRef + trackedYawDelta;
+            g_yawSign.load() * WrapPi(hy - effectiveHeadYawRef);
+        const float gy = effectiveGameYawRef + trackedYawDelta;
         const float gp = Clamp(g_pitchSign.load() * hp + g_pitchTrim.load(),
                                -1.5f, 1.5f);
         const float cgp = cosf(gp), sgp = sinf(gp), cgy = cosf(gy), sgy = sinf(gy);
@@ -18894,7 +19004,7 @@ namespace
         const bool rotationFollows =
             Halo3ReadRollStableFollow(hullYaw, hullPitch) &&
             Halo3ComposeRollStableFollowBasis(
-                hullYaw, hullPitch, g_gameYawRef, trackedYawDelta,
+                hullYaw, hullPitch, effectiveGameYawRef, trackedYawDelta,
                 gp, headRoll, followBasis);
         if (rotationFollows)
         {
@@ -18915,9 +19025,9 @@ namespace
         }
         if (g_positional.load())
         {
-            const float dx = hpos[0] - g_headPosRef[0];
-            const float dy = hpos[1] - g_headPosRef[1];
-            const float dz = hpos[2] - g_headPosRef[2];
+            const float dx = hpos[0] - effectiveHeadPosRef[0];
+            const float dy = hpos[1] - effectiveHeadPosRef[1];
+            const float dz = hpos[2] - effectiveHeadPosRef[2];
             float hlen = sqrtf(hfx * hfx + hfz * hfz);
             if (hlen < 1e-4f) hlen = 1e-4f;
             const float hfhx = hfx / hlen, hfhz = hfz / hlen;
@@ -18931,7 +19041,7 @@ namespace
             const bool positionFollows =
                 rotationFollows &&
                 Halo3ComposeRollStableFollowBasis(
-                    hullYaw, hullPitch, g_gameYawRef, trackedYawDelta,
+                    hullYaw, hullPitch, effectiveGameYawRef, trackedYawDelta,
                     0.0f, 0.0f, positionBasis) &&
                 Halo3TransformBasisVector(
                     positionBasis, positionLocal, positionWorld);
@@ -18951,6 +19061,40 @@ namespace
             oz = Clamp(oz, -1.5f, 1.5f);
             pos[0] += ox; pos[1] += oy; pos[2] += oz;
         }
+        return true;
+    }
+
+    bool ReachCommitPendingSeatRecenter(
+        ReachPendingSeatRecenter& pending)
+    {
+        if (!pending.valid || !ReachSeatLeaseKeyValid(pending.key) ||
+            !isfinite(pending.gameYaw) || !isfinite(pending.headYaw))
+        {
+            return false;
+        }
+        for (float component : pending.headPosition)
+            if (!isfinite(component))
+                return false;
+        if (!g_reachSeatRecenterLatch.Commit(pending.key))
+            return false;
+
+        // The admitted head-centre camera already used these exact local
+        // values. Publish them only now, after the outer camera commit can no
+        // longer return to stock, then hand the OpenXR screen-centre request to
+        // Present. The caller publishes the committed pair to input alongside
+        // every other successfully committed Reach camera frame.
+        g_gameYawRef=pending.gameYaw;
+        g_headYawRef=pending.headYaw;
+        memcpy(g_headPosRef,pending.headPosition,sizeof(g_headPosRef));
+        g_needRecenter.exchange(false,std::memory_order_acq_rel);
+        g_reachCineCutRealign.exchange(false,std::memory_order_acq_rel);
+        // Do not clear a position-only token here: it may have been published
+        // after this stage captured its headset pose. If present, the next
+        // committed frame consumes it without repeating yaw/OpenXR recenter.
+        VR_RequestRecenter();
+        g_reachVehicleSeatRecenters.fetch_add(
+            1,std::memory_order_relaxed);
+        pending={};
         return true;
     }
 
@@ -19268,6 +19412,8 @@ namespace
         const ReachSymmetricFovCover& cullCover,
         const ReachVrRenderSnapshot& tracking,
         const ReachVehicleFrame* vehicle,
+        const ReachSeatLeaseKey* entryRecenterKey,
+        ReachPendingSeatRecenter& pendingSeatRecenter,
         unsigned char* headCenter,
         unsigned char* headDerived,
         float authoredAspect,
@@ -19276,6 +19422,7 @@ namespace
     {
         authoredTheater = false;
         vehicleViewApplied = false;
+        pendingSeatRecenter={};
         // Log-only cinematic-state sample on the engine thread that owns the
         // per-frame camera work. If cutscenes stop this path from running, the
         // worker-side stall report is itself the finding.
@@ -19453,7 +19600,11 @@ namespace
         if (!authoredTheater)
         {
             ApplyVrTurn(tracking.pad);
-            if (!ReachApplyHeadLook(headCenter, tracking))
+            if (!ReachApplyHeadLook(
+                    headCenter,tracking,
+                    vehicleViewApplied ? vehicle : nullptr,
+                    vehicleViewApplied ? entryRecenterKey : nullptr,
+                    pendingSeatRecenter))
                 return false;
         }
         if (!authoredTheater)
@@ -20413,9 +20564,10 @@ namespace
                 b.leftControllerOwnedSourceBranch;
     }
 
-    bool ReachResolvePaletteNodeCount(uint16_t tag, int& count)
+    bool ReachResolveRenderModelDescriptor(
+        uint16_t tag, const uint8_t*& descriptor)
     {
-        count=0;
+        descriptor=nullptr;
         const uintptr_t base=g_reachCamera.base;
         if (!base) return false;
         const uint8_t* modelTable=nullptr;
@@ -20430,10 +20582,41 @@ namespace
                 base+kReachNodeRecordBlockTableRva)+
                 static_cast<size_t>(modelHandle>>28)*8u,
                 &blockBase,sizeof(blockBase)) || !blockBase) return false;
+        descriptor=
+            blockBase+static_cast<size_t>(modelHandle)*4u;
+        return true;
+    }
+
+    bool ReachReadRenderModelIdentity(
+        uint16_t tag, uint32_t& runtimeImportChecksum, int& count)
+    {
+        runtimeImportChecksum=0;
+        count=0;
+        const uint8_t* descriptor=nullptr;
+        if (!ReachResolveRenderModelDescriptor(tag,descriptor))
+            return false;
         uint32_t rawCount=0;
-        if (!SafeReadBytes(blockBase+static_cast<size_t>(modelHandle)*4u+0x30,
-                           &rawCount,sizeof(rawCount)) ||
+        if (!SafeReadBytes(
+                descriptor+0x08,&runtimeImportChecksum,
+                sizeof(runtimeImportChecksum)) ||
+            !SafeReadBytes(descriptor+0x30,&rawCount,sizeof(rawCount)) ||
             rawCount==0 || rawCount>kReachFpMaxSourceNodeCount) return false;
+        count=static_cast<int>(rawCount);
+        return true;
+    }
+
+    bool ReachResolvePaletteNodeCount(uint16_t tag, int& count)
+    {
+        count=0;
+        const uint8_t* descriptor=nullptr;
+        if (!ReachResolveRenderModelDescriptor(tag,descriptor))
+            return false;
+        uint32_t rawCount=0;
+        if (!SafeReadBytes(descriptor+0x30,&rawCount,sizeof(rawCount)) ||
+            rawCount==0 || rawCount>kReachFpMaxSourceNodeCount)
+        {
+            return false;
+        }
         count=static_cast<int>(rawCount);
         return true;
     }
@@ -20503,16 +20686,86 @@ namespace
         PublishReachFpStatus(3,0,context.liveSourceCount);
     }
     void ReachBeginFpPairScope(uint32_t generation, uint64_t preparedSerial,
-                               const FpExplicitPoseTargets& targets)
+                               const FpExplicitPoseTargets& targets,
+                               bool showSeatedLegs)
     {
         g_reachFpPairScope={};
         for (auto& context : g_reachFpInterpolations)
             context={};
         g_reachFpCaptureSerial=0;
         g_reachFpPairScope.armed=true;
+        g_reachFpPairScope.showSeatedLegs=showSeatedLegs;
         g_reachFpPairScope.generation=generation;
         g_reachFpPairScope.preparedSerial=preparedSerial;
         g_reachFpPairScope.targets=targets;
+
+        // The 82/67 output counts alone also belong to Reach's third-person
+        // Spartan/Elite render models. A palette may only become the native
+        // seated-leg consumer on a LATER stereo pair after its exact immutable
+        // HREK checksum/count tuple has been read at this outer boundary.
+        for (const ReachFpLegPaletteObservation& observation :
+             g_reachFpLegPaletteObservations)
+        {
+            if (!ReachFpLegObservationCanValidate(
+                    observation.valid,observation.generation,
+                    observation.observedPreparedSerial,
+                    generation,preparedSerial))
+            {
+                continue;
+            }
+            uint32_t checksum=0;
+            int nodeCount=0;
+            const bool identityRead=ReachReadRenderModelIdentity(
+                observation.tag,checksum,nodeCount);
+            const ReachFpLegPaletteKind kind=identityRead
+                ? ClassifyReachFpLegPalette(checksum,nodeCount)
+                : ReachFpLegPaletteKind::None;
+            if (kind!=ReachFpLegPaletteKind::None &&
+                nodeCount==observation.nodeCount)
+            {
+                g_reachFpLegPaletteCache={
+                    true,generation,observation.observedPreparedSerial,
+                    observation.tag,kind};
+                break;
+            }
+            g_reachFpLegPaletteIdentityRejects.fetch_add(
+                1,std::memory_order_relaxed);
+        }
+        for (auto& observation : g_reachFpLegPaletteObservations)
+            observation={};
+
+        if (g_reachFpLegPaletteCache.valid &&
+            g_reachFpLegPaletteCache.generation==generation &&
+            preparedSerial>g_reachFpLegPaletteCache.learnedPreparedSerial)
+        {
+            uint32_t checksum=0;
+            int nodeCount=0;
+            const bool identityRead=ReachReadRenderModelIdentity(
+                g_reachFpLegPaletteCache.tag,checksum,nodeCount);
+            const ReachFpLegPaletteKind kind=identityRead
+                ? ClassifyReachFpLegPalette(checksum,nodeCount)
+                : ReachFpLegPaletteKind::None;
+            if (kind==g_reachFpLegPaletteCache.kind &&
+                kind!=ReachFpLegPaletteKind::None)
+            {
+                g_reachFpPairScope.legPaletteValid=true;
+                g_reachFpPairScope.legPaletteTag=
+                    g_reachFpLegPaletteCache.tag;
+                g_reachFpPairScope.legPaletteKind=kind;
+            }
+            else
+            {
+                g_reachFpLegPaletteCache={};
+                g_reachFpLegPaletteIdentityRejects.fetch_add(
+                    1,std::memory_order_relaxed);
+            }
+        }
+        else if (g_reachFpLegPaletteCache.valid &&
+                 g_reachFpLegPaletteCache.generation!=generation)
+        {
+            g_reachFpLegPaletteCache={};
+        }
+
         size_t frozen=0;
         for (ReachFpLayoutCacheEntry& entry : g_reachFpLayoutCache)
         {
@@ -20543,6 +20796,37 @@ namespace
             context={};
         g_reachFpCaptureSerial=0;
         g_reachFpPairScope={};
+    }
+
+    void ReachObserveFpLegPalette(uint16_t tag, int nodeCount)
+    {
+        if (!g_reachFpPairScope.armed ||
+            (nodeCount!=kReachSpartanFpLegNodeCount &&
+             nodeCount!=kReachEliteFpLegNodeCount))
+        {
+            return;
+        }
+        ReachFpLegPaletteObservation* destination=nullptr;
+        for (auto& observation : g_reachFpLegPaletteObservations)
+        {
+            if (observation.valid &&
+                observation.generation==g_reachFpPairScope.generation &&
+                observation.observedPreparedSerial==
+                    g_reachFpPairScope.preparedSerial &&
+                observation.tag==tag)
+            {
+                return;
+            }
+            if (!observation.valid && !destination)
+                destination=&observation;
+        }
+        if (!destination)
+            return;
+        *destination={
+            true,g_reachFpPairScope.generation,
+            g_reachFpPairScope.preparedSerial,tag,nodeCount};
+        g_reachFpLegPaletteObservationCount.fetch_add(
+            1,std::memory_order_relaxed);
     }
 
     bool ReachBuildCenterFpRoot(
@@ -20897,6 +21181,39 @@ namespace
         return true;
     }
 
+    bool ReachBuildCenteredNativeFpPalette(
+        const BoneMatrix& paletteRoot, const BoneMatrix& centerRoot,
+        const BoneMatrix* untouchedSource, int sourceCount,
+        const BoneMatrix*& replacement)
+    {
+        replacement=untouchedSource;
+        if (!untouchedSource || sourceCount<=0 ||
+            sourceCount>static_cast<int>(kReachFpMaxSourceNodeCount) ||
+            !ReachBoneMatrixFinite(paletteRoot) ||
+            !ReachBoneMatrixFinite(centerRoot))
+        {
+            return false;
+        }
+        BoneMatrix inverseRoot{},centerToPalette{};
+        if (!InvertBoneMatrix(paletteRoot,inverseRoot) ||
+            !ComposeBoneMatrices(inverseRoot,centerRoot,centerToPalette))
+        {
+            return false;
+        }
+        for (int node=0;node<sourceCount;++node)
+        {
+            if (!ComposeBoneMatrices(
+                    centerToPalette,untouchedSource[node],
+                    g_fpPaletteScratch[node]) ||
+                !ReachBoneMatrixFinite(g_fpPaletteScratch[node]))
+            {
+                return false;
+            }
+        }
+        replacement=g_fpPaletteScratch;
+        return true;
+    }
+
     void ReachProcessFpPalette(
         uint16_t tag, const BoneMatrix* root, BoneMatrix* destination,
         uintptr_t unused, const BoneMatrix* source, const int32_t* boneMap)
@@ -20937,8 +21254,11 @@ namespace
         int32_t mapCopy[64]{};
         ReachFpBodyLayout observed{};
         bool bodyLayout=false;
-        if (contextCurrent && boneMap &&
-            ReachResolvePaletteNodeCount(tag,paletteCount) &&
+        const bool paletteCountResolved=contextCurrent &&
+            ReachResolvePaletteNodeCount(tag,paletteCount);
+        if (paletteCountResolved)
+            ReachObserveFpLegPalette(tag,paletteCount);
+        if (paletteCountResolved && boneMap &&
             (paletteCount==static_cast<int>(kReachSpartanFpBodyNodeCount) ||
              paletteCount==static_cast<int>(kReachEliteFpBodyNodeCount)) &&
             SafeReadBytes(boneMap,mapCopy,
@@ -20955,6 +21275,16 @@ namespace
         const ReachFpPaletteAction action=DecideReachFpPaletteAction(
             contextCurrent,frozenLayoutValid,context.transformed,bodyLayout,
             exactBodyMatchesFrozen,tag==context.bodyTag);
+        const ReachFpLegPaletteKind frozenLegKind=
+            g_reachFpPairScope.legPaletteValid
+                ? g_reachFpPairScope.legPaletteKind
+                : ReachFpLegPaletteKind::None;
+        const bool exactSeatedLegPalette=
+            paletteCountResolved &&
+            ReachFpLegNodeCountMatchesKind(frozenLegKind,paletteCount) &&
+            !ReachFpShouldCollapseVisiblePalette(
+                g_reachFpPairScope.showSeatedLegs,frozenLegKind,
+                g_reachFpPairScope.legPaletteTag,tag);
         auto restoreStockAndInvalidate=[&](bool relearnExactBody) {
             if (context.transformed)
             {
@@ -20976,7 +21306,40 @@ namespace
         }
         else if (action==ReachFpPaletteAction::ArticulateKnownTransaction)
         {
-            if (!root || !context.targets.rightWristValid ||
+            if (exactSeatedLegPalette)
+            {
+                selectedSource=context.untouchedLive;
+                BoneMatrix centerRoot=context.targets.centerRoot;
+                if (root)
+                    centerRoot.scale=root->scale;
+                const bool nativeBodyReady=root &&
+                    context.targets.centerRootValid &&
+                    ReachBuildCenteredNativeFpPalette(
+                        *root,centerRoot,context.untouchedLive,
+                        context.liveSourceCount,selectedSource);
+                if (!nativeBodyReady)
+                {
+                    // This is a leg-presentation failure, not evidence that the
+                    // proven 47/41 arms layout changed. Pass this exact body
+                    // palette its untouched stock source and leave the
+                    // controller-owned live marker graph alone. Invalidating
+                    // the shared layout here would take working floating hands
+                    // down with an optional native-body conversion failure.
+                    selectedSource=context.untouchedLive;
+                    g_reachFpLegPaletteBuildFailures.fetch_add(
+                        1,std::memory_order_relaxed);
+                }
+                else
+                {
+                    g_reachFpLegPalettePreserved.fetch_add(
+                        1,std::memory_order_relaxed);
+                    PublishReachFpStatus(
+                        2,static_cast<int>(
+                            context.layout.paletteBodyNodeCount),
+                        context.liveSourceCount);
+                }
+            }
+            else if (!root || !context.targets.rightWristValid ||
                 context.liveSourceCount<=0 ||
                 context.liveSourceCount>
                     static_cast<int>(kReachFpMaxSourceNodeCount) ||
@@ -21070,8 +21433,9 @@ namespace
                     // Reach temporarily forces the accepted floating-hands
                     // presentation independent of the universal config. The
                     // exact hand masks and held-object boundary come from the
-                    // pinned HREK/retail body maps; no arm or body geometry is
-                    // admitted into this title's visible FP palette.
+                    // pinned HREK/retail arms maps. The exact native fp_body
+                    // palette returned through the centered authored-body path
+                    // above, so only arms/attachments can reach this collapse.
                     if (selectedSource==g_fpPaletteScratch)
                     {
                         const uint64_t keep=fp.wristDescendants|
@@ -21878,14 +22242,17 @@ namespace
         g_reachVehicleFpStable.store(
             static_cast<uint32_t>(g_reachVehicleFpDebounce.stable),
             std::memory_order_relaxed);
+        // Entry is a full exact-seat play-space reset performed only after the
+        // immersive vehicle camera actually wins. A settled exit remains the
+        // accepted position-only neutralization so leaving a car cannot snap
+        // the player's facing.
         if (g_config.vehicle_first_person &&
-            (g_reachVehicleFpDebounce.stable ==
-                 Halo3VehicleState::Vehicle ||
-             previousStable == Halo3VehicleState::Vehicle) &&
+            previousStable==Halo3VehicleState::Vehicle &&
+            g_reachVehicleFpDebounce.stable==Halo3VehicleState::OnFoot &&
             g_config.vehicle_recenter_on_seat)
         {
             g_needPosRecenter.store(true, std::memory_order_release);
-            g_reachVehicleSeatRecenters.fetch_add(
+            g_reachVehicleExitRecenters.fetch_add(
                 1, std::memory_order_relaxed);
         }
     }
@@ -21911,6 +22278,7 @@ namespace
 
         const uint64_t nowMs = GetTickCount64();
         bool unitKnown = false;
+        bool seatOccupationObserved = false;
         bool structurallySeated = false;
         bool complete = false;
         bool identityMiss = false;
@@ -21933,10 +22301,11 @@ namespace
                     break;
                 ReachNativeUnitCameraInfo info{};
                 g_reachCamera.unitGetCameraInfo(unit, &info);
-                structurallySeated = info.directParent != -1 &&
-                    info.seatIndex >= 0 &&
-                    info.seatIndex < kReachVehicleSeatLimit &&
-                    info.seatCamera != nullptr;
+                seatOccupationObserved=ReachSeatOccupationObserved(
+                    info.directParent,info.seatIndex,
+                    kReachVehicleSeatLimit);
+                structurallySeated=seatOccupationObserved &&
+                    info.seatCamera!=nullptr;
                 if (!structurallySeated)
                     break;
                 for (float component : info.worldCameraPoint)
@@ -22181,6 +22550,9 @@ namespace
                 frame.identity = identity;
                 frame.seatFlags = seatFlags;
                 frame.unitAimValid = unitAimValid;
+                frame.entryForwardValid = true;
+                memcpy(frame.entryForward,rootMarker.matrix.forward,
+                       sizeof(frame.entryForward));
                 if (unitAimValid)
                 {
                     memcpy(frame.unitAimForward, unitAimForward,
@@ -22302,6 +22674,9 @@ namespace
                             memcpy(frame.rawCarrierForward,
                                    carrierRoot.matrix.forward,
                                    sizeof(frame.rawCarrierForward));
+                            memcpy(frame.entryForward,
+                                   carrierRoot.matrix.forward,
+                                   sizeof(frame.entryForward));
                             // R-V19 keeps follow on the rendered carrierRoot
                             // already copied above, matching camera placement
                             // and accepted Halo 3. Preserve R-V15's disproven
@@ -22318,10 +22693,18 @@ namespace
                                        sizeof(frame.rawCarrierForward));
                             }
                         }
-                        else if (g_config.vehicle_view_follow &&
-                                 ReachVehicleIsAttachedWeapon(identity))
+                        else
                         {
-                            followFallback = true;
+                            // This seat has a real carrier by construction.
+                            // Its direct gun root is not a vehicle-heading
+                            // substitute; retry the entry reset after the
+                            // render-matched carrier root becomes available.
+                            frame.entryForwardValid = false;
+                            if (g_config.vehicle_view_follow &&
+                                ReachVehicleIsAttachedWeapon(identity))
+                            {
+                                followFallback = true;
+                            }
                         }
                     }
                 }
@@ -22356,8 +22739,9 @@ namespace
 
         const ReachVehicleInputState inputState = !unitKnown
             ? ReachVehicleInputState::Unknown
-            : (structurallySeated ? ReachVehicleInputState::Vehicle
-                                  : ReachVehicleInputState::OnFoot);
+            : (seatOccupationObserved
+                ? ReachVehicleInputState::Vehicle
+                : ReachVehicleInputState::OnFoot);
         g_reachVehicleInputSnapshot.store(
             ReachVehicleInputSnapshot(generation, inputState),
             std::memory_order_release);
@@ -22374,6 +22758,7 @@ namespace
             g_reachHeadReference = {};
             g_reachSeatAnchorLatch = {};
             g_reachVehicleFpDebounce = {};
+            g_reachSeatRecenterLatch.Clear();
             g_reachVehicleFpStable.store(
                 static_cast<uint32_t>(Halo3VehicleState::Unknown),
                 std::memory_order_relaxed);
@@ -22414,9 +22799,19 @@ namespace
             g_reachVehicleTrimSnapshot.store(0, std::memory_order_release);
             ReachPublishShotOccupation(generation, nullptr);
             g_reachHeadReference = {};
+            // Marker, bounds and identity proof can fail while the occupied
+            // seat relationship itself remains structurally valid. Hold the
+            // already-debounced occupation through those camera-only misses:
+            // reporting OnFoot here created a false settled exit, cleared the
+            // exact-seat latch and caused the same occupation to recenter
+            // again on recovery. A not-yet-admitted entry stays pending until
+            // a complete camera frame proves it.
             ReachUpdateVehicleTransition(
-                unitKnown ? Halo3VehicleState::OnFoot
-                          : Halo3VehicleState::Unknown,
+                !unitKnown
+                    ? Halo3VehicleState::Unknown
+                    : (seatOccupationObserved
+                        ? g_reachVehicleFpDebounce.stable
+                        : Halo3VehicleState::OnFoot),
                 nowMs);
             return false;
         }
@@ -22894,6 +23289,21 @@ namespace
         if (!vehicleFrameReady)
             vehicleFrame = {};
         ReachApplySeatYawFollow(vehicleFrame);
+        const bool stableVehicle =
+            g_reachVehicleFpStable.load(std::memory_order_relaxed)==
+                static_cast<uint32_t>(Halo3VehicleState::Vehicle);
+        const ReachSeatLeaseKey seatRecenterKey{
+            epoch.generation,vehicleFrame.unitHandle,
+            vehicleFrame.directParent,vehicleFrame.definitionDatum,
+            vehicleFrame.seatIndex};
+        const ReachSeatLeaseKey* currentSeatKey=vehicleFrameReady
+            ? &seatRecenterKey
+            : nullptr;
+        const bool seatEntryRecenterPending=
+            g_reachSeatRecenterLatch.NeedsApply(
+                g_config.vehicle_first_person &&
+                    g_config.vehicle_recenter_on_seat,
+                stableVehicle,currentSeatKey);
 
         ReachOwnerScope candidate{};
         candidate.workspace = workspace;
@@ -22938,6 +23348,8 @@ namespace
             headCullReady = ReachBuildHeadCullCamera(
                 primaryCompact, cullCover, tracking,
                 vehicleFrameReady ? &candidate.vehicle : nullptr,
+                seatEntryRecenterPending ? &seatRecenterKey : nullptr,
+                candidate.pendingSeatRecenter,
                 candidate.headCenter, headDerived,
                 candidate.cutsceneTheaterAspect,
                 candidate.cutsceneTheater,
@@ -22966,24 +23378,6 @@ namespace
             memcpy(candidate.gameplayBasePosition, handOrigin,
                    sizeof(candidate.gameplayBasePosition));
         }
-        candidate.fpTargets={};
-        candidate.fpTargets.centerRootValid=ReachBuildCenterFpRoot(
-            candidate.headCenter,
-            candidate.vehicleViewApplied
-                ? candidate.gameplayBasePosition
-                : nullptr,
-            candidate.fpTargets.centerRoot);
-        candidate.fpTargets.rightWristValid=
-            ReachBuildPreparedControllerTarget(
-                tracking,false,candidate.gameplayBasePosition,
-                candidate.fpTargets.rightWrist,
-                candidate.fpTargets.rightScale);
-        candidate.fpTargets.leftWristValid=
-            ReachBuildPreparedControllerTarget(
-                tracking,true,candidate.gameplayBasePosition,
-                candidate.fpTargets.leftWrist,
-                candidate.fpTargets.leftScale);
-
         alignas(16) unsigned char savedWorkspace[kReachCameraPairDataSize];
         alignas(16) unsigned char savedPv[kReachPvSnapshotBytes];
         memcpy(savedWorkspace, reinterpret_cast<const void*>(workspace),
@@ -23043,6 +23437,34 @@ namespace
             return g_reachOrigMainRenderView(
                 workspace, playerView, windowIndex);
         }
+        if (candidate.pendingSeatRecenter.valid)
+            ReachCommitPendingSeatRecenter(
+                candidate.pendingSeatRecenter);
+        // Input follows the last camera state that actually crossed the outer
+        // commit. Rejected candidates never publish a half-rendered follow or
+        // turn update.
+        ReachPublishYawReferencePair(g_gameYawRef,g_headYawRef);
+        // Controller targets consume the committed reference triplet. Building
+        // them before the exact-seat commit made the first owned passenger
+        // frame use the previous seat's hand origin even though headCenter
+        // already used the new one.
+        candidate.fpTargets={};
+        candidate.fpTargets.centerRootValid=ReachBuildCenterFpRoot(
+            candidate.headCenter,
+            candidate.vehicleViewApplied
+                ? candidate.gameplayBasePosition
+                : nullptr,
+            candidate.fpTargets.centerRoot);
+        candidate.fpTargets.rightWristValid=
+            ReachBuildPreparedControllerTarget(
+                tracking,false,candidate.gameplayBasePosition,
+                candidate.fpTargets.rightWrist,
+                candidate.fpTargets.rightScale);
+        candidate.fpTargets.leftWristValid=
+            ReachBuildPreparedControllerTarget(
+                tracking,true,candidate.gameplayBasePosition,
+                candidate.fpTargets.leftWrist,
+                candidate.fpTargets.leftScale);
         candidate.renderAccess = &access;
         candidate.active = true;
         g_reachOwnerScope = candidate;
@@ -23052,7 +23474,8 @@ namespace
         // boundary so that pre-inner work can learn or apply the exact body
         // layout, and keep the same scope across both stereo eyes.
         ReachBeginFpPairScope(
-            epoch.generation,candidate.preparedSerial,candidate.fpTargets);
+            epoch.generation,candidate.preparedSerial,candidate.fpTargets,
+            candidate.vehicleViewApplied);
 
         uintptr_t result = 0;
         ReachUnitCameraHideScope bodyHide{};
@@ -23863,6 +24286,10 @@ namespace
             static_cast<uint32_t>(Halo3VehicleState::Unknown),
             std::memory_order_relaxed);
         g_reachVehicleFpDebounce = {};
+        g_reachSeatRecenterLatch.Clear();
+        g_reachYawReferencePair.store(
+            kReachInvalidYawReferencePair,
+            std::memory_order_release);
         g_reachHeadReference = {};
         g_reachSeatYaw = {};
         g_reachYawSeat = {};
@@ -23910,6 +24337,14 @@ namespace
         g_reachOrigHudDrawWidget = nullptr;
         g_reachFpStatus.key.store(0,std::memory_order_release);
         g_reachFpLoggedStatusKey.store(0,std::memory_order_release);
+        g_reachFpLegPaletteObservationCount.store(
+            0,std::memory_order_relaxed);
+        g_reachFpLegPalettePreserved.store(
+            0,std::memory_order_relaxed);
+        g_reachFpLegPaletteIdentityRejects.store(
+            0,std::memory_order_relaxed);
+        g_reachFpLegPaletteBuildFailures.store(
+            0,std::memory_order_relaxed);
         g_reachFpCameraUploadStatus.preparedSerial.store(
             0, std::memory_order_release);
         g_reachFpCameraUploadStatus.generation.store(
@@ -25600,6 +26035,15 @@ namespace
         g_reachUnitCameraHideRestores.store(0, std::memory_order_relaxed);
         g_reachUnitCameraHideFailures.store(0, std::memory_order_relaxed);
         g_reachVehicleSeatRecenters.store(0, std::memory_order_relaxed);
+        g_reachVehicleExitRecenters.store(0, std::memory_order_relaxed);
+        g_reachFpLegPaletteObservationCount.store(
+            0,std::memory_order_relaxed);
+        g_reachFpLegPalettePreserved.store(
+            0,std::memory_order_relaxed);
+        g_reachFpLegPaletteIdentityRejects.store(
+            0,std::memory_order_relaxed);
+        g_reachFpLegPaletteBuildFailures.store(
+            0,std::memory_order_relaxed);
         g_reachSeatAuthorsSteering.store(0, std::memory_order_relaxed);
         ReachClearAimFeedback();
         ReachClearCompletedFrameFeedback();
@@ -25611,6 +26055,10 @@ namespace
         g_reachReticleAimFallbacks.store(0, std::memory_order_relaxed);
         ReachClearHullHeading();
         g_reachVehicleFpDebounce = {};
+        g_reachSeatRecenterLatch.Clear();
+        g_reachYawReferencePair.store(
+            kReachInvalidYawReferencePair,
+            std::memory_order_release);
         g_reachHeadReference = {};
         g_reachSeatAnchorLatch = {};
         g_reachVehicleAnchorFallbacks.store(0, std::memory_order_relaxed);
@@ -26132,6 +26580,62 @@ namespace
 
     void LogReachFpStatusIfNew()
     {
+        static uint32_t legLogGeneration=0;
+        static bool loggedLegObservation=false;
+        static bool loggedLegPreserved=false;
+        static bool loggedLegIdentityReject=false;
+        static bool loggedLegBuildFailure=false;
+        const uint32_t currentGeneration=
+            g_reachCamera.generation.load(std::memory_order_acquire);
+        if (currentGeneration!=legLogGeneration)
+        {
+            legLogGeneration=currentGeneration;
+            loggedLegObservation=false;
+            loggedLegPreserved=false;
+            loggedLegIdentityReject=false;
+            loggedLegBuildFailure=false;
+        }
+        const uint32_t legObservations=
+            g_reachFpLegPaletteObservationCount.load(
+                std::memory_order_relaxed);
+        const uint32_t legPreserved=
+            g_reachFpLegPalettePreserved.load(std::memory_order_relaxed);
+        const uint32_t legRejects=
+            g_reachFpLegPaletteIdentityRejects.load(
+                std::memory_order_relaxed);
+        const uint32_t legBuildFailures=
+            g_reachFpLegPaletteBuildFailures.load(
+                std::memory_order_relaxed);
+        if (!loggedLegObservation && legObservations)
+        {
+            loggedLegObservation=true;
+            LOG("Reach FP seated legs: 82/67-node palette candidate observed "
+                "(count=%u); exact HREK checksum verification runs at the "
+                "next prepared pair",legObservations);
+        }
+        if (!loggedLegPreserved && legPreserved)
+        {
+            loggedLegPreserved=true;
+            LOG("Reach FP seated legs ACTIVE: exact native fp_body palette "
+                "preserved in the occupied first-person seat (palettes=%u); "
+                "controller hands remain separate; the independent world-biped "
+                "hide transaction is unchanged",legPreserved);
+        }
+        if (!loggedLegIdentityReject && legRejects)
+        {
+            loggedLegIdentityReject=true;
+            LOG("Reach FP seated legs: a count candidate did not match the "
+                "exact native fp_body checksum/tag identity (rejected=%u)",
+                legRejects);
+        }
+        if (!loggedLegBuildFailure && legBuildFailures)
+        {
+            loggedLegBuildFailure=true;
+            LOG("Reach FP seated legs STOCK FOR THIS PALETTE: centered native "
+                "body conversion failed (failures=%u); floating hands and the "
+                "shared FP layout remain active",legBuildFailures);
+        }
+
         const uint64_t key=g_reachFpStatus.key.load(std::memory_order_acquire);
         if (!key || key==g_reachFpLoggedStatusKey.load(
                 std::memory_order_relaxed)) return;
@@ -26182,6 +26686,7 @@ namespace
         static bool loggedAimReadFallback = false;
         static bool loggedReticleAimFallback = false;
         static uint32_t loggedRecenters = 0;
+        static uint32_t loggedExitRecenters = 0;
         static uint64_t loggedSeat = 0;
         const uint32_t generation = g_reachCamera.generation.load(
             std::memory_order_acquire);
@@ -26201,6 +26706,7 @@ namespace
             loggedPatchActivity = false;
             loggedPatchFailure = false;
             loggedRecenters = 0;
+            loggedExitRecenters = 0;
             loggedSeat = 0;
             loggedShotMove = false;
             loggedShotSkip = false;
@@ -26409,9 +26915,19 @@ namespace
             std::memory_order_relaxed);
         if (recenters != loggedRecenters)
         {
-            LOG("Reach first-person vehicles: positional reference recentered "
-                "on seat transition (count=%u)", recenters);
+            LOG("Reach first-person vehicles: full play-space recentered on "
+                "exact occupied-seat entry (count=%u; View Follow independent)",
+                recenters);
             loggedRecenters = recenters;
+        }
+        const uint32_t exitRecenters=g_reachVehicleExitRecenters.load(
+            std::memory_order_relaxed);
+        if (exitRecenters!=loggedExitRecenters)
+        {
+            LOG("Reach first-person vehicles: position-only reference "
+                "recentered on settled vehicle exit (count=%u)",
+                exitRecenters);
+            loggedExitRecenters=exitRecenters;
         }
         const uint64_t seatSnapshot = g_reachVehicleTrimSnapshot.load(
             std::memory_order_acquire);
@@ -29343,14 +29859,32 @@ bool Game_ComputeAimStick(float& outRx, float& outRy)
     if (tl > 1e-3f) { tx /= tl; ty /= tl; tz /= tl; }
     const float cy = atan2f(tx, -tz);
     const float cp = asinf(Clamp(ty, -1.0f, 1.0f));
+    float gameYawReference = 0.0f;
+    float headYawReference = 0.0f;
+#if HALOMCCVR_EXPERIMENTAL_REACH_RENDER_CANDIDATE
+    if (TitleAdapter_GetActiveTitle() == GameTitle::HaloReach)
+    {
+        if (!ReachReadYawReferencePair(
+                gameYawReference,headYawReference))
+        {
+            return blocked(7,"Reach yaw reference snapshot invalid");
+        }
+    }
+    else
+#endif
+    {
+        gameYawReference=g_gameYawRef;
+        headYawReference=g_headYawRef;
+    }
     float desiredYaw =
-        g_gameYawRef + g_yawSign.load() * WrapPi(cy - g_headYawRef);
+        gameYawReference +
+        g_yawSign.load() * WrapPi(cy - headYawReference);
     float desiredPitch = Clamp(g_pitchSign.load() * cp, -1.45f, 1.45f);
     float hullYaw = 0.0f, hullPitch = 0.0f, followedAim[9];
     if (Halo3ReadRollStableFollow(hullYaw, hullPitch) &&
         Halo3ComposeRollStableFollowBasis(
-            hullYaw, hullPitch, g_gameYawRef,
-            g_yawSign.load() * WrapPi(cy - g_headYawRef),
+            hullYaw, hullPitch, gameYawReference,
+            g_yawSign.load() * WrapPi(cy - headYawReference),
             Clamp(g_pitchSign.load() * cp, -1.45f, 1.45f), 0.0f,
             followedAim))
     {
@@ -29437,8 +29971,9 @@ bool Game_ComputeAimStick(float& outRx, float& outRy)
         {
             // Invert the same mapping the desired angles came through, so the
             // published direction is the engine's aim expressed in VR space.
-            const float vrYaw = g_headYawRef +
-                g_yawSign.load() * WrapPi(aimYaw - g_gameYawRef);
+            const float vrYaw = headYawReference +
+                g_yawSign.load() * WrapPi(
+                    aimYaw - gameYawReference);
             const float vrPitch = g_pitchSign.load() * aimPitch;
             g_aimClampedVrYaw.store(vrYaw, std::memory_order_relaxed);
             g_aimClampedVrPitch.store(vrPitch, std::memory_order_relaxed);
@@ -29595,7 +30130,18 @@ void Game_MapMoveStick(float& mx, float& my)
         const float fx = -2.0f * (w * y + x * z);
         const float fz = -(1.0f - 2.0f * (x * x + y * y));
         const float hy = atan2f(fx, -fz);
-        const float gaze = g_gameYawRef + g_yawSign.load() * WrapPi(hy - g_headYawRef);
+#if HALOMCCVR_EXPERIMENTAL_REACH_RENDER_CANDIDATE
+        float gameYawReference=0.0f;
+        float headYawReference=0.0f;
+        if (!ReachReadYawReferencePair(
+                gameYawReference,headYawReference))
+            return;
+#else
+        const float gameYawReference=g_gameYawRef;
+        const float headYawReference=g_headYawRef;
+#endif
+        const float gaze = gameYawReference +
+            g_yawSign.load() * WrapPi(hy - headYawReference);
         const float stockYaw =
             g_reachStockHeadingYaw.load(std::memory_order_relaxed);
         const float delta = WrapPi(gaze - stockYaw);
