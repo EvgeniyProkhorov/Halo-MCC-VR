@@ -6236,6 +6236,26 @@ namespace
     // re-neutralisation. The sampler is log-free, so the worker reports it.
     std::atomic<uint32_t> g_halo3SeatRecenters{0};
 
+    // How many aim frames took the seated personal-weapon re-origin. Reported
+    // by the worker so a "shots do not follow the crosshair" result can be told
+    // apart from the correction never running.
+    std::atomic<uint32_t> g_halo3SeatAimReOrigins{0};
+
+    // The occupied Halo 3 seat's own flags, or 0 when no seat is owned. The
+    // first-person seat patch already re-reads this record from the loaded tag
+    // on entry and keeps the ORIGINAL word, so no second tag walk is needed.
+    uint32_t Halo3OccupiedSeatFlags()
+    {
+        const Halo3NativeSeatPatch& patch = g_halo3NativeSeatPatch;
+        if (!patch.active ||
+            g_halo3NativeSeatState.load(std::memory_order_acquire) !=
+                static_cast<uint32_t>(Halo3NativeSeatState::Active))
+        {
+            return 0;
+        }
+        return patch.originalFlags;
+    }
+
     void Halo3RestoreNativeSeatPatch()
     {
         Halo3NativeSeatPatch& patch = g_halo3NativeSeatPatch;
@@ -7820,9 +7840,18 @@ namespace
             const auto nativeState = static_cast<Halo3NativeSeatState>(
                 g_halo3NativeSeatState.load(std::memory_order_acquire));
             if (nativeState == Halo3NativeSeatState::Active)
+            {
+                const uint32_t seatFlags = Halo3OccupiedSeatFlags();
                 LOG("H3 first-person seat: Active; occupied seat reports "
                     "first person, so Halo stops drawing the player's own "
-                    "character model. Camera anchor unchanged");
+                    "character model. Camera anchor unchanged. Seat flags "
+                    "%08X (allows-weapons=%d); personal-weapon shots are "
+                    "re-origined onto the engine's own eye so they pass "
+                    "through the floating reticle (%u aim frames so far)",
+                    seatFlags,
+                    Halo3SeatFiresPersonalWeapon(seatFlags) ? 1 : 0,
+                    g_halo3SeatAimReOrigins.load(std::memory_order_relaxed));
+            }
             else if (nativeState == Halo3NativeSeatState::StockFallback)
                 LOG("H3 first-person seat: StockFallback; loaded seat layout "
                     "did not validate, character model stays drawn and the "
@@ -30399,14 +30428,59 @@ bool Game_ComputeAimStick(float& outRx, float& outRy)
         desiredPitch = asinf(Clamp(followedAim[2], -1.0f, 1.0f));
     }
 
-    // The engine's own eye point no longer needs correcting here. A seated
-    // occupant's shot line is (unit_get_camera_position, aiming vector), and
-    // the shot-origin hook substitutes our rendered eye for that first term on
-    // the firing call site alone -- so the shot line and the sight line are
-    // now the SAME line, at every distance. The re-origin that used to live
-    // here bent the aim so the two merely CROSSED at crosshair_distance_m,
-    // which left ~5 degrees of miss at 5 m; keeping it would now double-correct
-    // an error that no longer exists.
+    // ODST and Reach need no correction here: each has a shot-origin hook that
+    // substitutes our rendered eye into (unit_get_camera_position, aiming
+    // vector) on the firing call site alone, so their shot line and sight line
+    // are the SAME line at every distance, and re-aiming here would
+    // double-correct.
+    //
+    // HALO 3 HAS NO SUCH HOOK. It was built for ODST (O6) and Reach (R-V10),
+    // and never ported. The correction below is O5's, which was written for
+    // exactly this defect and deliberately gated "ODST only ... Halo 3's
+    // first-person vehicles are the accepted baseline, which this must not
+    // disturb. Halo 3 can be brought in later on its own evidence." This is
+    // that later: the user reports Halo 3 passenger shots not following the
+    // crosshair, and O5's own measurement predicts it exactly - the Warthog
+    // passenger's shipped trims of +0.55 m up and -0.10 m lateral put the
+    // engine's eye 0.56 m from the rendered one, and the loop above aims from
+    // the RENDERED eye through the reticle, so the shot leaves the engine's eye
+    // PARALLEL to the sight line. Parallel lines never converge: that is a
+    // fixed 0.56 m low-and-right miss at every range, which no crosshair
+    // distance can tune out. The driver ships 0.00 on both axes and so shows
+    // nothing, which is why only the passenger was ever reported.
+    //
+    // Self-neutralising: when the two camera points coincide - on foot, or in a
+    // seat with no trim - the correction is exactly zero. Gated to a seat whose
+    // own loaded tag sets `allows weapons`, because a driver's or mounted
+    // gunner's shots leave a vehicle barrel rather than the occupant's eye.
+    if (Halo3SeatFiresPersonalWeapon(Halo3OccupiedSeatFlags()) && tl > 1e-3f &&
+        g_camValid.load(std::memory_order_acquire) &&
+        g_baseCamValid.load(std::memory_order_acquire))
+    {
+        const float offsetX = g_camX.load() - g_baseCamX.load();
+        const float offsetY = g_camY.load() - g_baseCamY.load();
+        const float offsetZ = g_camZ.load() - g_baseCamZ.load();
+        // The reticle floats `tl` metres from the rendered eye along the
+        // desired direction; put that same point in world units and aim at it
+        // from where the engine actually shoots.
+        const float range = tl * g_worldScale.load(std::memory_order_relaxed);
+        const float cosDesiredPitch = cosf(desiredPitch);
+        const float toReticleX =
+            cosDesiredPitch * cosf(desiredYaw) * range + offsetX;
+        const float toReticleY =
+            cosDesiredPitch * sinf(desiredYaw) * range + offsetY;
+        const float toReticleZ = sinf(desiredPitch) * range + offsetZ;
+        const float reticleLength = sqrtf(toReticleX * toReticleX +
+                                          toReticleY * toReticleY +
+                                          toReticleZ * toReticleZ);
+        if (std::isfinite(reticleLength) && reticleLength > 1e-3f)
+        {
+            desiredYaw = atan2f(toReticleY, toReticleX);
+            desiredPitch = asinf(
+                Clamp(toReticleZ / reticleLength, -1.0f, 1.0f));
+            g_halo3SeatAimReOrigins.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
 
     float aimForward[3] = {
         g_aimFwdX.load(), g_aimFwdY.load(), g_aimFwdZ.load()};

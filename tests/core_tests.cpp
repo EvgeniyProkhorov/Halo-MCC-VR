@@ -1177,6 +1177,19 @@ int main()
         // R-V25: the trim bank carries one row MORE than the identity list -
         // the unmatched row every unresolved vehicle keys instead of the
         // shared universal trim.
+        // Halo 3 seat flags, from real values recorded during ODST O5: the
+        // Warthog passenger's 0x1070 fires a personal weapon, the driver's
+        // 0x40014 does not. That single bit is what decides whether a seated
+        // shot gets re-origined onto the engine's own eye.
+        Check(kHalo3SeatAllowsWeaponsBit == (1u << 5) &&
+              kHalo3SeatThirdPersonCameraBit == (1u << 4) &&
+              Halo3SeatFiresPersonalWeapon(0x1070u) &&
+              !Halo3SeatFiresPersonalWeapon(0x40014u) &&
+              !Halo3SeatFiresPersonalWeapon(0u) &&
+              Halo3SeatFlagsLookLikePlayerSeat(0x1070u) &&
+              Halo3FirstPersonSeatFlags(0x1070u) == 0x1060u &&
+              Halo3SeatFiresPersonalWeapon(Halo3FirstPersonSeatFlags(0x1070u)),
+            "Halo 3 allows-weapons is bit 5 and survives clearing the third-person bit");
         Check(kReachVehicleIdentityCount == kReachVehicleIdentityTrimCount &&
               kReachVehicleTrimCount == kReachVehicleIdentityCount + 1 &&
               kReachUnmatchedVehicleTrimId == kReachVehicleTrimCount &&

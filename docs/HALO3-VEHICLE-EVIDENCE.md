@@ -1985,3 +1985,55 @@ checked: no pitch-follow transition there either. Treat the C25 pitch-follow
 and wheel-turn behaviors as user-endorsed to build on, and fold their formal
 confirmation into the next headset session that runs with the follow toggle
 on.
+
+## C26 - 2026-08-06: the passenger's shots leave the engine's eye, not ours
+
+**User report against 8336b32:** "in halo 3 the passenger is not having the
+shots follow proper." This is an original gap, not a regression. Two facts
+settle it without a probe:
+
+1. **Halo 3 has no shot-origin hook.** The substitution that puts a seated
+   occupant's shot on the sight line was built for ODST (O6) and Reach (R-V10),
+   and never ported - `git grep` finds zero Halo 3 call sites.
+2. **O5 predicted this exact failure, in writing, and deliberately excluded
+   Halo 3 from its own fix.** Its commit message reads: "the gate is narrow:
+   ODST only, and only a seat whose tag sets the allows-weapons flag ... Halo
+   3's first-person vehicles are the accepted baseline, which this must not
+   disturb. Halo 3 can be brought in later on its own evidence."
+
+The mechanism is arithmetic, not theory. `Game_ComputeAimStick` steers the aim
+from the RENDERED eye through the floating reticle, so the aim direction and
+the sight direction are identical. The engine still fires from ITS OWN eye. Two
+rays with the same direction and different origins are parallel, and parallel
+lines never converge - so the miss is a constant vector at every range and no
+`crosshair_distance_m` can tune it out. O5 measured the size from the shipped
+trims: the Warthog passenger's +0.55 m up and -0.10 m lateral is a ~0.56 m
+low-and-right miss, about 6.4 degrees at 5 m; the driver ships 0.00 on both
+axes and shows nothing, which is why only the passenger was ever reported.
+
+C26 restores O5's correction for Halo 3 alone. The desired ray is re-origined
+onto the engine's eye using the two camera points already published every
+frame - `g_cam` (post-head-look, the rendered eye) and `g_baseCam` (the
+engine-owned origin snapshotted before it). It is self-neutralising: on foot,
+or in a seat with no trim, the two coincide and the correction is exactly zero.
+
+The gate is the seat's own loaded tag word. `Halo3OccupiedSeatFlags` returns
+the ORIGINAL flags the first-person seat patch already captured on entry, so
+there is no second tag walk, and `kHalo3SeatAllowsWeaponsBit` (bit 5) decides:
+a driver's or mounted gunner's shots leave a vehicle barrel rather than the
+occupant's eye and are left alone. The real Halo 3 values recorded during O5
+are pinned in the core tests - the Warthog passenger's `0x1070` carries bit 5,
+the driver's `0x40014` does not - along with the fact that clearing the
+third-person bit for the first-person seat leaves bit 5 intact.
+
+**ODST and Reach are untouched.** Both keep their shot-origin hooks and take no
+part in this branch; re-aiming there would double-correct an error their hooks
+have already removed. The `H3 first-person seat: Active` line now prints the
+seat flags, the decoded allows-weapons bit and a running count of re-origined
+aim frames, so a "still not following" result can be told apart from the
+correction never running.
+
+Release x64 builds, `ctest --preset release` passes 1/1, and the Reach parity
+gate passes. Headset acceptance requires a Halo 3 Warthog or Hornet passenger
+landing shots on the crosshair at close range AND at distance, with the driver
+and a mounted gunner unchanged.

@@ -1515,6 +1515,17 @@ inline constexpr uintptr_t kHalo3DefBlurSpeedOffset = 0x3B4;
 inline constexpr uintptr_t kHalo3VehicleSeatsBlockOffset = 0x258;
 inline constexpr size_t kHalo3VehicleSeatStride = 0xD4;
 inline constexpr uint32_t kHalo3SeatThirdPersonCameraBit = 1u << 4;
+// Seat flags bit 5, `allows weapons`: the occupant fires their OWN weapon
+// rather than a vehicle barrel. Read straight off the loaded seat record, and
+// confirmed against real Halo 3 values recorded during the ODST O5 work - the
+// Warthog passenger's 0x1070 carries it, the driver's 0x40014 does not, which
+// is exactly why only the passenger shows the parallax miss.
+inline constexpr uint32_t kHalo3SeatAllowsWeaponsBit = 1u << 5;
+
+inline constexpr bool Halo3SeatFiresPersonalWeapon(uint32_t seatFlags)
+{
+    return (seatFlags & kHalo3SeatAllowsWeaponsBit) != 0;
+}
 inline constexpr uintptr_t kHalo3SeatCameraTracksBlockOffset = 0x80;
 
 // C20 — the one field that decides whether a seated player is first person.
