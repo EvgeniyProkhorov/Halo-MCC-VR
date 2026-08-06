@@ -21,6 +21,7 @@
 #include "halo3_vehicle_logic.h"
 #include "hud_layout_logic.h"
 #include "input_logic.h"
+#include "level_load_gate_logic.h"
 #include "odst_bringup_logic.h"
 #include "odst_vehicle_logic.h"
 #include "reach_adapter.h"
@@ -138,6 +139,118 @@ namespace
 
 int main()
 {
+    {
+        // Level-load gate decision core. Each Observe() is one 50 ms worker
+        // sample; `true` means the engine's player-view fingerprint changed.
+        // Scenarios replay the preserved captures in
+        // docs/ODST-LEVEL-LOAD-LOCKOUT.md.
+        using Gate = LevelLoadGateLogic;
+
+        // The b70141d bounce, replayed: a Save & Quit leaves ~3 s of the
+        // OUTGOING level's dying ticks running when observation begins. The
+        // shipped 12-sample "already running" rule opened at 0.6 s and the
+        // load bounced. The dying ticks must hold, the loading screen's
+        // freeze must hold, and the NEW level's first tick must open.
+        Gate bounced;
+        bool heldThroughDyingTicks = true;
+        for (int i = 0; i < 60; ++i) // 3 s of dying ticks
+            heldThroughDyingTicks &=
+                bounced.Observe(true) == Gate::Decision::Hold;
+        Check(heldThroughDyingTicks,
+              "gate holds through 3 s of the outgoing level's dying ticks");
+        bool heldThroughLoadFreeze = true;
+        for (int i = 0; i < 144; ++i) // 7.2 s loading-screen freeze
+            heldThroughLoadFreeze &=
+                bounced.Observe(false) == Gate::Decision::Hold;
+        Check(heldThroughLoadFreeze,
+              "gate holds through the loading screen freeze");
+        Check(bounced.Observe(true) ==
+                  Gate::Decision::OpenFrozenThenTicking,
+              "gate opens on the new level's first tick");
+
+        // The 11,766 ms successful retry: the OLD 12 s unconditional timeout
+        // was within 300 ms of installing into this loading screen. There is
+        // no timeout now - stillness holds indefinitely and only the tick
+        // opens.
+        Gate longLoad;
+        bool heldThroughLongFreeze = true;
+        for (int i = 0; i < 400; ++i) // 20 s of freeze, past any old timeout
+            heldThroughLongFreeze &=
+                longLoad.Observe(false) == Gate::Decision::Hold;
+        Check(heldThroughLongFreeze,
+              "gate holds a 20 s freeze with no timeout install");
+        Check(longLoad.Observe(true) ==
+                  Gate::Decision::OpenFrozenThenTicking,
+              "gate still opens after an arbitrarily long freeze");
+
+        // A menu idle is stillness forever; the gate must simply keep
+        // holding (the flat screen layer still shows in the headset).
+        Gate menuIdle;
+        bool heldThroughMenu = true;
+        for (int i = 0; i < 2400; ++i) // 2 minutes in a lobby
+            heldThroughMenu &=
+                menuIdle.Observe(false) == Gate::Decision::Hold;
+        Check(heldThroughMenu && !menuIdle.IsOpen(),
+              "gate holds a menu idle indefinitely");
+
+        // A title genuinely mid-level when observation begins never
+        // freezes: 6 s of uninterrupted change opens, one sample earlier
+        // holds. Dying ticks measured <= ~4 s can never reach it.
+        Gate running;
+        bool heldBeforeThreshold = true;
+        for (uint32_t i = 0; i + 1 < Gate::kAlreadyRunningSamples; ++i)
+            heldBeforeThreshold &=
+                running.Observe(true) == Gate::Decision::Hold;
+        Check(heldBeforeThreshold,
+              "gate holds one sample short of already-running");
+        Check(running.Observe(true) == Gate::Decision::OpenAlreadyRunning,
+              "gate opens for a title already running 6 s");
+
+        // A short hiccup inside the dying ticks (a fingerprint that happens
+        // to repeat for a few samples) must not count as the loading
+        // screen's freeze, and must also reset the already-running run.
+        Gate hiccup;
+        for (int i = 0; i < 40; ++i)
+            hiccup.Observe(true);
+        for (uint32_t i = 0; i + 1 < Gate::kFrozenMinSamples; ++i)
+            hiccup.Observe(false);
+        Check(hiccup.Observe(true) == Gate::Decision::Hold &&
+                  !hiccup.SawFrozen(),
+              "a sub-threshold still hiccup is not the loading screen");
+        for (int i = 0; i < 40; ++i)
+            Check(hiccup.Observe(true) == Gate::Decision::Hold,
+                  "change run restarts after a hiccup");
+        for (int i = 0; i < 20; ++i)
+            hiccup.Observe(false);
+        Check(hiccup.Observe(true) ==
+                  Gate::Decision::OpenFrozenThenTicking,
+              "the real freeze after the hiccup still opens the gate");
+
+        // Pause -> resume (the 07:14:13 capture): the pause menu's freeze is
+        // the frozen half, the resume tick opens. With the 6-sample minimum
+        // this costs ~300 ms of witnessed stillness, nothing more.
+        Gate resume;
+        for (uint32_t i = 0; i < Gate::kFrozenMinSamples; ++i)
+            resume.Observe(false);
+        Check(resume.Observe(true) ==
+                  Gate::Decision::OpenFrozenThenTicking,
+              "pause-resume reopens after 300 ms of witnessed stillness");
+
+        // Rearm: once open, Reset() closes it and the proof must be
+        // re-earned - the b934b61 one-shot defect, expressed as a test.
+        Gate rearm;
+        for (uint32_t i = 0; i < Gate::kFrozenMinSamples; ++i)
+            rearm.Observe(false);
+        rearm.Observe(true);
+        Check(rearm.IsOpen(), "gate open before rearm");
+        rearm.Reset();
+        Check(!rearm.IsOpen(), "rearm closes the gate");
+        bool heldAfterRearm = true;
+        for (int i = 0; i < 60; ++i)
+            heldAfterRearm &= rearm.Observe(true) == Gate::Decision::Hold;
+        Check(heldAfterRearm,
+              "after rearm the dying ticks hold again until a real freeze");
+    }
     {
         const float neutral[4]{1.0f, 0.3f, 0.6f, 0.9f};
         const float neutralFaded[4]{0.5f, 0.15f, 0.3f, 0.45f};

@@ -270,10 +270,9 @@ a build:
    forcing and metric spoofing disabled. This is the largest thing we do to a
    title while it loads and it is one config line.
 
-**Status of the gate.** Behaviorally reverted - `kLevelLoadGateEnabled = false`
-in `src/dll/game.cpp`. The implementation and its evidence are retained because
-the invariant is correct, but arming it cost 7.2 s and 11.8 s of delay before
-VR engaged and bought nothing measurable.
+**Status of the gate.** ~~Behaviorally reverted~~ **SUPERSEDED - the refutation
+misread the log; see the next section.** The gate is re-enabled with corrected
+thresholds.
 
 **Separately: Halo 3 was never detected in that session.** The user reported
 that hopping to Halo 3 did not hook. The log contains no
@@ -284,6 +283,74 @@ title. After the last Reach level exited at 07:21:18 the runtime stayed in
 `loading` with Reach detected for the final 64 seconds until MCC closed. That
 line does appear normally in older logs (`halo3xr-1d6dcb6-steam-prev.log`), so
 this is not a permanent break. It needs a session that actually reaches Halo 3.
+
+## THE THEORY-7 REFUTATION WAS MISREAD (2026-08-06, same log, full timeline)
+
+A second pass over the SAME preserved b70141d log shows the "bounced with zero
+hooks" window was not a bounce at all:
+
+- The REAL bounce was at **07:14:42.948** - `Runtime mode: gameplay -> loading
+  -> unsupported` with the module list churning - **2.4 s after** the gate's
+  12-sample "already running" fast path opened at 07:14:38.580 and installed
+  the ten-hook core at 07:14:39.509, ~1.5 s into a `paused -> loading`
+  transition. Hooks were installed and armed when the level died.
+- The 07:15:05-07:15:07 window the refutation cited is the **menu's module
+  churn during the automatic reload that follows a bounce**: ODST was
+  transiently re-detected at 07:15:05, the gate held (camera still), and the
+  poll flipped to ambiguous at 07:15:07 as more modules loaded. Nothing
+  bounced there - that same load continued, froze for **11,766 ms**, ticked,
+  installed at 07:15:17-07:15:25 and played fine for two minutes. Reading
+  that adapter flap as a second, hook-free bounce is what produced the
+  refutation.
+
+**The corrected tally across all preserved captures.** Every bounced load was
+preceded by an install into the load window, and every install that waited for
+the real frozen-then-ticking transition survived:
+
+| Capture | Install path | Result |
+| --- | --- | --- |
+| 50ddf56, 3 loads | ungated, 1.5 s in | all 3 BOUNCED |
+| b934b61, 07:04:29 + 07:04:47 | one-shot-bypassed, 1.5 s in | both BOUNCED |
+| b70141d, 07:14:38 / 07:18:32 / 07:19:26 | 12-sample fast path, 0.5 s in | all 3 BOUNCED ~2.5 s later |
+| b934b61 07:03:51 (7172 ms), b70141d 07:14:13 (94 ms resume), 07:15:17 (11766 ms), 07:19:08 (7250 ms), Reach 07:19:41 (5921 ms) | frozen -> ticking | all 5 PLAYED |
+
+The 12-sample fast path (0.6 s of change) is exactly the hole the second
+capture predicted: the outgoing level's dying ticks run 3-4 s after a
+Save & Quit, so "0.6 s of uninterrupted change" is routinely satisfied by the
+camera of the level being LEFT.
+
+**The corrected gate (this candidate).** Decision core extracted to
+`src/common/level_load_gate_logic.h` with offline tests in
+`tests/core_tests.cpp` replaying these captures:
+
+- FROZEN now requires 6 consecutive still samples (300 ms) so a single-sample
+  hiccup inside the dying ticks cannot count as the loading screen.
+- ALREADY RUNNING now requires 120 consecutive changed samples (6 s) - above
+  the measured dying-tick window with margin. Cost: a mid-play adapter flap
+  re-engages VR in 6 s instead of 0.6 s.
+- The unconditional 12 s timeout is REMOVED. The successful retry froze for
+  11,766 ms - within 300 ms of that timeout converting it into an
+  install-during-load. Menus hold indefinitely (correct - the flat screen
+  layer still shows in the headset), and both legitimate open paths cover
+  every real level entry and every genuinely-running title.
+
+**What this does NOT explain, kept open.** The Reach kick at 07:21:14 in the
+same log came 84 s after a clean frozen-then-ticking install and ~3 s after a
+vehicle seat entry, mid-gameplay with no load transition of ours - install
+timing cannot account for it. The earlier Reach kick (07:05:18, prev log) came
+14.7 s after a fast-path install. So installing into a load is proven
+sufficient to bounce a load; it is not proven to be the ONLY trigger of the
+kick-to-menu family. If a mid-play kick recurs on this build, its log now
+carries the full gate history for that generation.
+
+**The session end (the "Halo 3 did not hook" report).** After the 07:21:14
+kick, the menu's module churn transiently narrowed to a unique
+`haloreach.dll` and Reach was re-detected at 07:21:18; the runtime correctly
+sat in `loading` with the gate holding. From then until MCC closed at
+07:22:22, `halo3.dll` was never loaded again (the adapter polls every 50 ms
+and logs every module-list change; there were none), so no Halo 3 mission
+reached gameplay in that session. Nothing of ours blocked it; a session that
+actually enters a Halo 3 mission on this build will gate and install normally.
 
 ## What is still unsettled
 

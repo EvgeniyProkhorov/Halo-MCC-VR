@@ -33,6 +33,7 @@
 #include "../common/halo3_vehicle_logic.h"
 #include "../common/hud_layout_logic.h"
 #include "../common/input_logic.h"
+#include "../common/level_load_gate_logic.h"
 #include "../common/odst_bringup_logic.h"
 #include "../common/odst_vehicle_logic.h"
 #include "../common/scope_logic.h"
@@ -449,16 +450,21 @@ namespace
     // way yields +0x2D73590, which is exactly the `array=2D73590` the accepted
     // runtime log already reports - the method is validated against a
     // known-good result before being applied to the other two titles.
-    // REFUTED AND BEHAVIORALLY REVERTED (2026-08-06, build b70141d). Once the
-    // gate re-armed correctly it did hold ODST's loads - and one still bounced
-    // to the menu at 07:15:05-07:15:07 with the gate holding and NOT ONE HOOK
-    // INSTALLED for that generation. Installing during the loading screen is
-    // therefore not what bounces the load. See
-    // `out/analysis/odst-level-load-lockout/halo3xr-b70141d-steam-20260806-bounced-with-ZERO-hooks-installed.log`.
-    // The implementation is retained as evidence and as a correct invariant,
-    // but it is not armed: it cost 7.2 s and 11.8 s of delay before VR engaged
-    // and bought nothing. Flip this to true only with a fresh reason.
-    constexpr bool kLevelLoadGateEnabled = false;
+    // RE-ENABLED (2026-08-06, second look at the SAME b70141d log). The
+    // "REFUTED - bounced with zero hooks" reading examined the wrong window:
+    // 07:15:05-07:15:07 is the tail of the menu's module churn AFTER the real
+    // bounce, and the load it belongs to SUCCEEDED at 07:15:17-07:15:26. The
+    // real bounce was at 07:14:42 - 2.4 s after the gate's 12-sample
+    // "already running" fast path accepted the outgoing level's dying ticks
+    // and installed into the loading screen at 07:14:38. Every bounced load
+    // in every preserved capture (8 of 8 across 50ddf56/b934b61/b70141d) was
+    // preceded by an install <= 1.6 s into the load; every install that
+    // waited for the real frozen-then-ticking transition (5 of 5) survived.
+    // The decision thresholds that close the dying-ticks hole live in
+    // LevelLoadGateLogic (src/common/level_load_gate_logic.h), and the
+    // unconditional 12 s timeout is gone - the preserved successful retry
+    // froze for 11,766 ms, within 300 ms of that timeout re-creating the bug.
+    constexpr bool kLevelLoadGateEnabled = true;
 
     struct PlayerViewArrayEvidence
     {
@@ -506,17 +512,6 @@ namespace
             return 0;
         return array;
     }
-
-    // Never deny VR forever on an unforeseen case. If the engine's camera has
-    // not moved this long the gate opens anyway and says so loudly, which
-    // restores exactly the pre-2026-08-06 behavior instead of a silent failure.
-    // Sized above the 7.6 s a cold first load took in the preserved capture.
-    constexpr uint64_t kPlayerViewLivenessTimeoutMs = 12000;
-    // Consecutive changing samples that mean "this title was already running
-    // when we started watching" rather than "a level is loading". At the 50 ms
-    // title-worker poll this is about 0.6 s of uninterrupted camera motion,
-    // which no loading screen produces.
-    constexpr uint32_t kPlayerViewAlreadyRunningSamples = 12;
 
     // Fingerprint the WHOLE of player view 0, not a prefix. A prefix would
     // cover only the compact camera (position/forward/fov/clips), which a
@@ -570,9 +565,7 @@ namespace
                 m_array = ResolvePlayerViewArray(base, size, evidence);
                 m_stride = evidence.expectedStride;
                 m_haveSample = false;
-                m_sawFrozen = false;
-                m_changeRun = 0;
-                m_live = false;
+                m_logic.Reset();
                 m_firstSampleMs = 0;
                 m_lastLogMs = 0;
                 m_resolveLogged = false;
@@ -605,14 +598,12 @@ namespace
             // Logged so a future session can prove the gate re-armed instead of
             // inferring it from absent lines, which is how the one-shot defect
             // hid: the failing loads simply had no gate output at all.
-            if (m_live && m_titleName)
+            if (m_logic.IsOpen() && m_titleName)
                 LOG("%s level-load gate: re-armed after teardown; the next "
                     "install must prove the level is running again",
                     m_titleName);
             m_haveSample = false;
-            m_sawFrozen = false;
-            m_changeRun = 0;
-            m_live = false;
+            m_logic.Reset();
             m_firstSampleMs = 0;
             m_lastLogMs = 0;
         }
@@ -631,22 +622,32 @@ namespace
         // Continuity means the outgoing level's camera can still be ticking
         // when the new title generation is detected: in the same capture, a
         // Save & Quit at 06:28:28 left the camera changing for ~3 more seconds.
-        // A gate that opened on the first observed change would happily accept
-        // those dying ticks as the NEW level's liveness and install into the
-        // loading screen anyway - the exact bug, undetected.
-        //
-        // So the gate requires the sequence a real level load must produce:
-        // first the camera FROZEN (the loading screen, or a cold zeroed array),
-        // and only then a change (the new level's first tick). An engine that
-        // is already running when observation starts never freezes, so a run of
-        // uninterrupted change is accepted separately as "already running".
+        // A gate that opened on the first observed change - or on the 0.6 s
+        // change run build b70141d shipped - accepts those dying ticks as the
+        // NEW level's liveness and installs into the loading screen anyway,
+        // which is exactly what preceded every bounced load in the preserved
+        // b70141d log. The thresholds that survive the dying ticks live in
+        // LevelLoadGateLogic; see src/common/level_load_gate_logic.h for the
+        // measurements each one rests on.
         bool Observe(const char* titleName)
         {
-            if (m_live)
+            if (m_logic.IsOpen())
                 return true;
             uint64_t fingerprint = 0;
             if (!ReadPlayerViewFingerprint(m_array, m_stride, fingerprint))
+            {
+                // An unreadable array means the module is in no state to hook;
+                // keep holding, but never silently.
+                const uint64_t now = GetTickCount64();
+                if (now - m_lastLogMs >= 2000)
+                {
+                    m_lastLogMs = now;
+                    LOG("%s level-load gate: player-view read FAILED; holding "
+                        "install (the module is not in a hookable state)",
+                        titleName);
+                }
                 return false;
+            }
             const uint64_t now = GetTickCount64();
             if (!m_haveSample)
             {
@@ -658,55 +659,38 @@ namespace
 
             const bool changed = fingerprint != m_fingerprint;
             m_fingerprint = fingerprint;
-            if (changed)
-                ++m_changeRun;
-            else
+            switch (m_logic.Observe(changed))
             {
-                m_changeRun = 0;
-                m_sawFrozen = true;
-            }
-
-            if (changed && m_sawFrozen)
-            {
-                m_live = true;
+            case LevelLoadGateLogic::Decision::OpenFrozenThenTicking:
                 LOG("%s level-load gate: the engine's camera was frozen and has "
                     "now started ticking (%llu ms); the level is running, so "
                     "installing here instead of during its loading screen",
                     titleName,
                     static_cast<unsigned long long>(now - m_firstSampleMs));
                 return true;
-            }
-            if (m_changeRun >= kPlayerViewAlreadyRunningSamples)
-            {
-                m_live = true;
+            case LevelLoadGateLogic::Decision::OpenAlreadyRunning:
                 LOG("%s level-load gate: the engine's camera has changed on "
-                    "%u consecutive samples without ever being still, so this "
-                    "title was already running rather than loading; installing",
-                    titleName, m_changeRun);
-                return true;
-            }
-            if (now - m_firstSampleMs >= kPlayerViewLivenessTimeoutMs)
-            {
-                m_live = true;
-                LOG("%s level-load gate: no frozen-then-ticking transition in "
-                    "%llu ms. Opening the gate anyway so VR is never denied "
-                    "outright - this is the pre-gate behavior and is worth "
-                    "reporting if the level then bounces to the menu",
-                    titleName,
+                    "%u consecutive samples (%llu ms) without ever being "
+                    "still; no loading screen does that, so this title was "
+                    "already running when observation began; installing",
+                    titleName, m_logic.ChangeRun(),
                     static_cast<unsigned long long>(now - m_firstSampleMs));
                 return true;
+            case LevelLoadGateLogic::Decision::Hold:
+                break;
             }
             if (now - m_lastLogMs >= 2000)
             {
                 m_lastLogMs = now;
                 LOG("%s level-load gate: holding install after %llu ms "
-                    "(generation %u) - camera still=%d, consecutive "
-                    "changes=%u. A loading screen leaves the previous level's "
+                    "(generation %u) - frozen seen=%d, still run=%u, change "
+                    "run=%u. A loading screen leaves the previous level's "
                     "camera untouched; installing into that is what bounces "
                     "the load to the menu",
                     titleName,
                     static_cast<unsigned long long>(now - m_firstSampleMs),
-                    m_generation, m_sawFrozen ? 1 : 0, m_changeRun);
+                    m_generation, m_logic.SawFrozen() ? 1 : 0,
+                    m_logic.StillRun(), m_logic.ChangeRun());
             }
             return false;
         }
@@ -719,11 +703,9 @@ namespace
         uint64_t m_fingerprint = 0;
         uint64_t m_firstSampleMs = 0;
         uint64_t m_lastLogMs = 0;
-        uint32_t m_changeRun = 0;
         bool m_haveSample = false;
-        bool m_sawFrozen = false;
-        bool m_live = false;
         bool m_resolveLogged = false;
+        LevelLoadGateLogic m_logic;
     };
 
     PlayerViewLivenessGate g_halo3LevelLoadGate;
