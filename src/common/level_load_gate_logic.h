@@ -18,14 +18,20 @@
 // FROZEN, THEN TICKING - a real level load must produce this sequence: the
 // loading screen leaves the player-view memory untouched (or a cold module's
 // array is zeroed), then the new level's first frame writes it.
-//   - The frozen half requires kFrozenMinSamples CONSECUTIVE still samples
-//     (300 ms at the 50 ms poll). One still sample is not enough: the
-//     outgoing level's camera keeps "dying ticks" running for 3-4 s after a
-//     Save & Quit (measured 06:28:28-06:28:32 in the 50ddf56 capture), and a
-//     single-sample hiccup inside that run must not count as the loading
-//     screen. Real loading screens freeze for 7-12 s; a pause menu freezes
-//     for as long as the user reads it; 300 ms costs nothing real.
-//   - The ticking half is the first change after a proven freeze. In every
+//   - The frozen half is satisfied by kFrozenMinSamples consecutive still
+//     samples, and that constant is 1 ON MEASURED EVIDENCE. The captured
+//     ODST pause-resume witnesses exactly ONE still sample between the
+//     rearm boundary and gameplay's first tick, so any higher minimum sends
+//     every pause-resume down the 6 s already-running path - build 19757f6
+//     shipped a 6-sample (300 ms) minimum as theoretical hardening against
+//     a still hiccup inside the dying ticks, and the user rejected it the
+//     same day as "way too slow to go into 3D". No preserved capture has
+//     ever shown a frozen-then-tick misfire with the 1-sample rule: in
+//     every bounced load, sampling began INSIDE the dying-tick run and no
+//     stillness was ever witnessed (still=0 at the first gate log line, all
+//     three b70141d bounces), so the hole the 6-sample rule guarded is
+//     unobserved, while its cost was real and constant.
+//   - The ticking half is the first change after the freeze. In every
 //     capture nothing ticks the player view mid-load after the freeze
 //     begins, so the first tick IS the level running.
 //
@@ -57,8 +63,8 @@ public:
         OpenAlreadyRunning,
     };
 
-    // 300 ms of consecutive stillness at the 50 ms worker poll.
-    static constexpr uint32_t kFrozenMinSamples = 6;
+    // One still sample: the captured pause-resume only ever witnesses one.
+    static constexpr uint32_t kFrozenMinSamples = 1;
     // 6 s of consecutive change at the 50 ms worker poll.
     static constexpr uint32_t kAlreadyRunningSamples = 120;
 

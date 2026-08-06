@@ -323,8 +323,14 @@ camera of the level being LEFT.
 `src/common/level_load_gate_logic.h` with offline tests in
 `tests/core_tests.cpp` replaying these captures:
 
-- FROZEN now requires 6 consecutive still samples (300 ms) so a single-sample
-  hiccup inside the dying ticks cannot count as the loading screen.
+- FROZEN is satisfied by a single still sample (revised same day: candidate
+  19757f6 shipped a 6-sample / 300 ms minimum as theoretical hardening, and
+  the user rejected it as far too slow to enter 3D - the captured
+  pause-resume witnesses exactly ONE still sample, so any higher minimum
+  sends every resume down the 6 s already-running path. No preserved capture
+  has ever shown a frozen-then-tick misfire with the 1-sample rule; in every
+  bounced load, sampling began inside the dying ticks and no stillness was
+  witnessed at all).
 - ALREADY RUNNING now requires 120 consecutive changed samples (6 s) - above
   the measured dying-tick window with margin. Cost: a mid-play adapter flap
   re-engages VR in 6 s instead of 0.6 s.

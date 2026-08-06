@@ -206,35 +206,34 @@ int main()
         Check(running.Observe(true) == Gate::Decision::OpenAlreadyRunning,
               "gate opens for a title already running 6 s");
 
-        // A short hiccup inside the dying ticks (a fingerprint that happens
-        // to repeat for a few samples) must not count as the loading
-        // screen's freeze, and must also reset the already-running run.
-        Gate hiccup;
+        // The frozen half is deliberately satisfied by a SINGLE still
+        // sample. In every bounced capture the dying ticks ran with no
+        // still sample at all (still=0 at the first gate log line), while
+        // the captured pause-resume witnesses exactly one still before
+        // gameplay's first tick - a higher minimum (300 ms in build
+        // 19757f6) sent every resume down the 6 s already-running path and
+        // was rejected as far too slow to enter 3D.
+        Gate oneStill;
         for (int i = 0; i < 40; ++i)
-            hiccup.Observe(true);
-        for (uint32_t i = 0; i + 1 < Gate::kFrozenMinSamples; ++i)
-            hiccup.Observe(false);
-        Check(hiccup.Observe(true) == Gate::Decision::Hold &&
-                  !hiccup.SawFrozen(),
-              "a sub-threshold still hiccup is not the loading screen");
-        for (int i = 0; i < 40; ++i)
-            Check(hiccup.Observe(true) == Gate::Decision::Hold,
-                  "change run restarts after a hiccup");
-        for (int i = 0; i < 20; ++i)
-            hiccup.Observe(false);
-        Check(hiccup.Observe(true) ==
+            oneStill.Observe(true);
+        Check(!oneStill.SawFrozen(),
+              "uninterrupted dying ticks never satisfy the frozen half");
+        oneStill.Observe(false);
+        Check(oneStill.SawFrozen(),
+              "a single witnessed still satisfies the frozen half");
+        Check(oneStill.Observe(true) ==
                   Gate::Decision::OpenFrozenThenTicking,
-              "the real freeze after the hiccup still opens the gate");
+              "the next tick after a witnessed still opens the gate");
 
-        // Pause -> resume (the 07:14:13 capture): the pause menu's freeze is
-        // the frozen half, the resume tick opens. With the 6-sample minimum
-        // this costs ~300 ms of witnessed stillness, nothing more.
+        // Pause -> resume (the 07:14:13 capture): the pause fade's single
+        // witnessed still is the frozen half, the resume tick opens - the
+        // ~94 ms resume the accepted builds had.
         Gate resume;
         for (uint32_t i = 0; i < Gate::kFrozenMinSamples; ++i)
             resume.Observe(false);
         Check(resume.Observe(true) ==
                   Gate::Decision::OpenFrozenThenTicking,
-              "pause-resume reopens after 300 ms of witnessed stillness");
+              "pause-resume reopens on the first tick after stillness");
 
         // Rearm: once open, Reset() closes it and the proof must be
         // re-earned - the b934b61 one-shot defect, expressed as a test.
