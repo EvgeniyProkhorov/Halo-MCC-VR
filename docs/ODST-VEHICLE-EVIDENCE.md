@@ -762,3 +762,42 @@ snapshots after the engine's own advance and uses offsets that differ in Halo 3
 baseline. Left for a separate candidate. O6's read-back telemetry is what
 decides it: if the log now reports the hold verified against the engine's own
 copy and the brightness still moves, this is the remaining mechanism.
+
+## O7 - REJECTED 2026-08-06: identity by unit_in_vehicle alone
+
+> **Headset-rejected and reverted (4f0c8b7).** Source d91b893, DLL
+> `85B9534C379B0452C7641DCAE5A1AEF31543785B2F3E18059C32CB70D7786598`.
+> The user's result: "you messed with the warthog turrets and made them off and
+> the covenant turrets are still in the ground." It caused a regression AND did
+> not fix the reported defect.
+
+**What it changed.** `OdstResolveVehicleId` split Shade from walk-up turret on
+`(seat0Flags & driver) && inVehicle`. The session's probe showed a Covenant
+Shade arriving as `native=1 ... type=5 ... seats=2 seat0Flags=0x101188
+(driver=0 gunner=1)` and resolving to `StationaryTurret`, so O7 made
+`inVehicle` the sole discriminator.
+
+**Why it broke the Warthog turret.** The Warthog's mounted chaingun is its own
+object with turret physics, and the engine reports its gunner as in a vehicle.
+`inVehicle` alone therefore reclassified it from `StationaryTurret` to `Shade`,
+and it took the Shade's authored seat point instead of the one it had been
+using. The driver-bit test O7 removed was doing real work for that case. Any
+future change here must be checked against BOTH turret families, not one.
+
+**What the failure additionally proves about the Covenant turret.** Making it
+resolve as `Shade` did not lift it out of the ground. So the Shade seat point
+`-0.1252/0.0000/0.9791` is not the answer for this vehicle either, and the
+fault is upstream of the identity - in the anchor, not the trim or the identity
+switch. Two facts for the next candidate to start from:
+
+1. ODST hardcodes `xf.mountedTurret = 0` in its sampler, so ODST never reaches
+   the `mounted = true` rows of `kOdstSeatPoints` at all. Halo 3 sets the same
+   field from a real carrier test. That asymmetry is unexplained and is the
+   most likely place for a Covenant gun mounted on a carrier to lose its
+   anchor.
+2. The probe already prints everything needed to tell the two turret families
+   apart (`def`, `type`, `seats`, `seat0Flags`, `native`). A Warthog-turret
+   probe line beside the Covenant one would settle which field actually
+   separates them, and no build is needed to collect it.
+
+Nothing here advances the accepted pointer.
