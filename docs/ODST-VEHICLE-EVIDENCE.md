@@ -846,3 +846,106 @@ checked, which is the specific way O7 failed.
 Release x64 builds, `ctest --preset release` passes 1/1, and the Reach parity
 gate passes. Headset acceptance: the Covenant turret seats the player at the
 gun, and the Warthog turret is unchanged from `dc50e6b`.
+
+## O9 - a turret's aim is a rate-capped machine, and the loop was fighting it
+
+Headset result for O8, 2026-08-06: "ok i fixed the turret lacements but the
+shots dont follow th covenant turret proper and in both halo 3 and odst the
+turrets wiggle like crazy up and down trying to keep up with the vr cross
+hair." O8's identity fix stands; these are two different, older faults that a
+working seat finally made visible. **Neither involves a seat point, a trim, or
+any Blender-authored placement.**
+
+### The authored evidence
+
+Exported from H3EK with `tool export-tag-to-xml`, seat blocks:
+
+| tag | seat | yaw rate bounds | pitch rate bounds | pitch range |
+|---|---|---|---|---|
+| `objects\vehicles\warthog\turrets\chaingun` | `warthog_g` | **60,60** | **0,0** | -19,35 |
+| `objects\vehicles\shade` | `shade_d` | **15,15** | **15,15** | -45,45 |
+
+A seat authors a cap on how fast the occupant's aim may slew. `0` is no cap.
+This is the shared engine-family `unit_seat` block; HREK's Reach warthog carries
+the same fields (`warthog_d` = 70,50 yaw and 30,30 pitch), so the shape is not
+Halo-3-only inference.
+
+### Fault 1: the wiggle is a quantised actuator, and pitch is the axis with
+### nothing to absorb it
+
+`ToRawStick` floors every non-zero command at `9000/32767` = **27.5%**
+deflection so that it clears MCC's inner deadzone. The engine therefore only
+ever hears "stop" or "at least 27.5%", and a pure proportional command is
+essentially never exactly zero - `Game_ComputeAimStick` had no deadband at all,
+so `|error| > 0.005 deg` was enough to command a quarter of the stick. The loop
+lands on a lattice straddling the target, overshoots by one quantum, flips
+sign, and drives back: a permanent limit cycle.
+
+The Warthog turret's **yaw is capped at 60 deg/s and its pitch is not capped at
+all**. The cap absorbs the quantum; an uncapped axis spends it entirely on
+overshoot. That is precisely why the user sees the gun wiggle *up and down* and
+not side to side.
+
+Measured offline against the real actuator (`tests/core_tests.cpp`, plant =
+27.5% floor + look rate + authored cap, 120 Hz):
+
+| look rate | stock loop, peak-to-peak | servo |
+|---|---|---|
+| 1.0 rad/s | 0.0023 rad (0.13 deg) | **0.000000** |
+| 3.0 rad/s | 0.0069 rad (0.39 deg) | **0.000000** |
+| 9.0 rad/s | 0.0206 rad (1.18 deg) | **0.000000** |
+
+The cycle scales linearly with look sensitivity and never decays.
+
+**O9 gives turret seats rest hysteresis.** Hysteresis, not gain, is what a
+quantised actuator needs: once the gun is inside the band the loop commands
+exactly zero, and it only takes authority again past a wider band. The band
+cannot be a constant - the quantum is the player's own look sensitivity times
+the floor times a frame, and the seat's cap may bind first - so the servo
+**measures** it, sampling only the frames where our requested command was
+inside the floor region and the engine therefore ran at minimum authority. An
+unparked loop must come within S/2 of the target within one cycle, so a band of
+`0.6*S` is guaranteed to catch it and `1.5*S` to hold it. Verified to park at
+every sensitivity from 1 to 12 rad/s in 0.5 steps, within the actuator's own
+resolution - which no controller can beat, because a stick that moves the aim
+only in steps of S cannot be parked closer than S/2.
+
+The first draft of this tracked the *largest* observed step and failed the
+sweep at 6, 8 and 9 rad/s. The quantity that matters is the *smallest* step the
+stick can express, which is why the sampling is restricted to floor-region
+frames.
+
+### Fault 2: a 15 deg/s barrel can never follow a hand, so the reticle must
+### follow the barrel
+
+The Shade slews at **15 deg/s on both axes**. A hand crosses its whole 90 deg
+pitch range in a flick the gun needs six seconds to complete, so the barrel
+spends most of its life far from the hand ray the reticle is drawn along. A
+turret's shots leave the **barrel**, never the occupant's eye, so no origin
+substitution can help - `OdstSeatFiresPersonalWeapon()` correctly refuses these
+seats, and should keep refusing.
+
+The honest-crosshair path already existed for a seat's angular LIMIT, but it
+waits for the error to **stall**, and it explicitly exempts a *converging*
+error (`errorMagnitude < previousErrorMagnitude - kAimConvergingRadians`). A
+15 deg/s gun is never stalled - it is converging, one degree at a time - so
+that exemption reset the stall timer every single frame and the reticle kept
+promising the hand's direction for seconds on end. That is "the shots don't
+follow the covenant turret proper".
+
+**In a turret seat the reticle now rides the barrel unconditionally**, never on
+the stall timer. The hand steers; the crosshair reports. Shots follow the
+crosshair by construction, because the crosshair *is* the gun.
+
+### Scope
+
+Both corrections are gated on `OdstSeatIsTurret` / `Halo3SeatIsTurret` -
+a walk-up emplacement, the shade, or any mounted gunner. Every other seat,
+both drivers and passengers, on-foot play, and Reach all keep byte-identical
+behaviour: the servo is not even observed outside a turret seat, and the
+reticle keeps the original stall gate. The shade is included on the evidence
+that its plant is identical to the walk-up gun's (15,15 both), not on a report.
+
+`Turret seat: aim servo armed` / `released after N frames, M parked (P%);
+measured stick quantum pitch X rad, yaw Y rad` bracket every occupation in the
+log, so a residual report is diagnosable without a probe build.

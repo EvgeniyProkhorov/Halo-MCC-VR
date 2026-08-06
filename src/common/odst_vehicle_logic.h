@@ -492,6 +492,20 @@ inline constexpr bool OdstSeatFollowsPitch(OdstVehicleId id, int seatIndex,
     return id != OdstVehicleId::Banshee && id != OdstVehicleId::Hornet;
 }
 
+// A seat whose weapon is a physically slewing gun rather than the occupant's
+// own: the walk-up emplacements, the shade, and any mounted gunner. Their aim
+// carries an authored rate cap the closed loop cannot exceed (H3EK shade_d is
+// 15 deg/s on both axes, warthog_g is 60 deg/s yaw with NO pitch cap), so they
+// take the servo's rest hysteresis and the barrel-riding reticle. Every other
+// seat keeps exactly the loop it shipped with.
+inline constexpr bool OdstSeatIsTurret(OdstVehicleId id, bool mountedTurret)
+{
+    if (mountedTurret)
+        return true;
+    return id == OdstVehicleId::StationaryTurret ||
+        id == OdstVehicleId::Shade;
+}
+
 inline constexpr bool OdstSeatAuthorsSteering(OdstVehicleId id, int seatIndex,
                                               bool mountedTurret,
                                               bool followEnabled)

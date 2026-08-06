@@ -25,6 +25,7 @@
 #include "reach_render_candidate.h"
 #include "../common/reach_observer_logic.h"
 #endif
+#include "../common/aim_servo_logic.h"
 #include "../common/log.h"
 #include "../common/config.h"
 #include "../common/cutscene_theater_logic.h"
@@ -30340,6 +30341,39 @@ const char* Game_VehicleSeatTrimName(int slot, VehicleTrimBank bank)
 #endif
 }
 
+// True while the player occupies a seat whose weapon is a physically slewing
+// gun with an authored rate cap, in either title that has one. Read once per
+// aim frame; both the servo and the reticle publication key off it, so they
+// can never disagree about which seat is being flown.
+namespace
+{
+    bool OccupiedTurretSeat()
+    {
+        if (Halo3VehicleFpActive())
+        {
+            Halo3SeatSnapshot seat;
+            if (Halo3ReadSeatSnapshot(seat) &&
+                Halo3SeatIsTurret(
+                    static_cast<Halo3VehicleId>(seat.identity), seat.mounted))
+            {
+                return true;
+            }
+        }
+#if HALOMCCVR_EXPERIMENTAL_ODST_BRINGUP
+        if (OdstVehicleFpActive())
+        {
+            OdstSeatSnapshot seat;
+            if (OdstReadSeatSnapshot(seat) &&
+                OdstSeatIsTurret(seat.identity, seat.mounted))
+            {
+                return true;
+            }
+        }
+#endif
+        return false;
+    }
+}
+
 bool Game_ComputeAimStick(float& outRx, float& outRy)
 {
     if (!Game_HasTitleCapability(TitleCapability_ControllerAim) &&
@@ -30518,6 +30552,10 @@ bool Game_ComputeAimStick(float& outRx, float& outRy)
     const float errYaw = WrapPi(desiredYaw - aimYaw);
     const float errPitch = desiredPitch - aimPitch;
 
+    // A turret's gun is a rate-capped machine, not the occupant's weapon.
+    // Both corrections below are scoped to exactly this seat.
+    const bool turretSeat = OccupiedTurretSeat();
+
     // A passenger's weapon is bounded to a cone around the VEHICLE, not the
     // world: the ODST/Halo 3 warthog rider seat authors yaw -90..+90 and pitch
     // -45..+45 (docs/ODST-VEHICLE-EVIDENCE.md). Point a hand outside that cone
@@ -30566,7 +30604,16 @@ bool Game_ComputeAimStick(float& outRx, float& outRy)
         else if (!stalledSinceMs)
             stalledSinceMs = nowMs;
         previousErrorMagnitude = errorMagnitude;
-        if (stalledSinceMs && nowMs - stalledSinceMs >= stallMs)
+        // A turret reports the truth ALWAYS, never on the stall timer. Its
+        // barrel is capped by authored seat data - 15 deg/s on both axes for
+        // the shade, so a hand flick outruns it for seconds - and a gun that
+        // is slowly converging is by definition not stalled, which reset the
+        // timer every single frame and left the reticle promising the hand's
+        // direction the whole time. That is the reported "the shots don't
+        // follow the covenant turret proper": the shots leave the BARREL, so
+        // the only reticle that can be honest about them is the one riding it.
+        if (turretSeat ? kAimServoTurretReticleRidesBarrel
+                       : (stalledSinceMs && nowMs - stalledSinceMs >= stallMs))
         {
             // Invert the same mapping the desired angles came through, so the
             // published direction is the engine's aim expressed in VR space.
@@ -30588,7 +30635,59 @@ bool Game_ComputeAimStick(float& outRx, float& outRy)
     // slow). The ceiling is the game's own turn rate — raising in-game look
     // sensitivity raises it further.
     const float k = 12.0f;
-    outRy = Clamp(errPitch * k, -1.0f, 1.0f);
+
+    // A turret seat parks instead of hunting. ToRawStick floors every non-zero
+    // command at 27.5% deflection so it clears MCC's inner deadzone, so the
+    // engine only ever hears "stop" or "at least 27.5%" — the proportional
+    // form has no small correction to give, and on the Warthog turret's
+    // UNCAPPED pitch axis that minimum step walks straight past the target,
+    // flips the error, and drives back. That is the "wiggle like crazy up and
+    // down"; yaw stays smooth only because its authored 60 deg/s cap absorbs
+    // the same step. Hysteresis is what a quantised actuator needs: once the
+    // gun is within a third of a degree the loop commands exactly zero, and it
+    // takes authority again only past a band that the measured step widens.
+    static AimServoAxis servoPitch, servoYaw;
+    static float servoLastPitchCommand = 0.0f;
+    static float servoLastYawCommand = 0.0f;
+    static bool servoWasTurret = false;
+    static uint32_t servoFrames = 0, servoParkedFrames = 0;
+    if (turretSeat)
+    {
+        if (!servoWasTurret)
+        {
+            AimServoReset(servoPitch);
+            AimServoReset(servoYaw);
+            servoLastPitchCommand = 0.0f;
+            servoLastYawCommand = 0.0f;
+            servoFrames = 0;
+            servoParkedFrames = 0;
+            LOG("Turret seat: aim servo armed. The gun is a rate-capped "
+                "machine (H3EK: shade 15 deg/s both axes, warthog turret "
+                "60 deg/s yaw and NO pitch cap), so the loop parks instead "
+                "of hunting and the reticle rides the barrel");
+        }
+        AimServoObserve(servoPitch, aimPitch, servoLastPitchCommand);
+        AimServoObserve(servoYaw, aimYaw, servoLastYawCommand);
+        ++servoFrames;
+    }
+    else if (servoWasTurret)
+    {
+        LOG("Turret seat: aim servo released after %u frames, %u parked "
+            "(%u%%); measured stick quantum pitch %.4f rad, yaw %.4f rad",
+            servoFrames, servoParkedFrames,
+            servoFrames ? servoParkedFrames * 100u / servoFrames : 0u,
+            servoPitch.minStep, servoYaw.minStep);
+        AimServoReset(servoPitch);
+        AimServoReset(servoYaw);
+        servoLastPitchCommand = 0.0f;
+        servoLastYawCommand = 0.0f;
+    }
+    servoWasTurret = turretSeat;
+
+    outRy = turretSeat
+        ? AimServoCommand(servoPitch, errPitch, k, kAimServoRestEnterRadians,
+                          kAimServoRestExitRadians)
+        : Clamp(errPitch * k, -1.0f, 1.0f);
 
     // C9: with the view reference following the hull, a look-steered driver's
     // yaw error stops depending on the vehicle's heading — the closed loop has
@@ -30640,7 +30739,16 @@ bool Game_ComputeAimStick(float& outRx, float& outRy)
         return true;
     }
 #endif
-    outRx = Clamp(-errYaw * k, -1.0f, 1.0f);
+    outRx = turretSeat
+        ? -AimServoCommand(servoYaw, errYaw, k, kAimServoRestEnterRadians,
+                           kAimServoRestExitRadians)
+        : Clamp(-errYaw * k, -1.0f, 1.0f);
+    // What the engine is about to act on, so the next frame's quantum
+    // measurement only counts motion this loop actually asked for.
+    servoLastPitchCommand = fabsf(outRy);
+    servoLastYawCommand = fabsf(outRx);
+    if (turretSeat && outRx == 0.0f && outRy == 0.0f)
+        ++servoParkedFrames;
     return true;
 }
 

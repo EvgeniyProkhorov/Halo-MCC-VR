@@ -12,6 +12,7 @@
 #include <string_view>
 #include <windows.h>
 
+#include "aim_servo_logic.h"
 #include "config.h"
 #include "coop_probe_logic.h"
 #include "cutscene_theater_logic.h"
@@ -1190,6 +1191,151 @@ int main()
               Halo3FirstPersonSeatFlags(0x1070u) == 0x1060u &&
               Halo3SeatFiresPersonalWeapon(Halo3FirstPersonSeatFlags(0x1070u)),
             "Halo 3 allows-weapons is bit 5 and survives clearing the third-person bit");
+        // Turret seats, both titles. A mounted gunner is a turret whatever it
+        // hangs off; the walk-up emplacements and the shade are turrets on
+        // their own identity. Nothing else may enter the servo.
+        Check(Halo3SeatIsTurret(Halo3VehicleId::StationaryTurret, false) &&
+              Halo3SeatIsTurret(Halo3VehicleId::Warthog, true) &&
+              !Halo3SeatIsTurret(Halo3VehicleId::Warthog, false) &&
+              !Halo3SeatIsTurret(Halo3VehicleId::Unknown, false) &&
+              OdstSeatIsTurret(OdstVehicleId::StationaryTurret, false) &&
+              OdstSeatIsTurret(OdstVehicleId::Shade, false) &&
+              OdstSeatIsTurret(OdstVehicleId::Warthog, true) &&
+              !OdstSeatIsTurret(OdstVehicleId::Warthog, false) &&
+              !OdstSeatIsTurret(OdstVehicleId::Unknown, false),
+            "only turret seats take the aim servo");
+        {
+            // The plant the loop actually drives, reproduced from measured
+            // facts: MCC receives our stick through ToRawStick, whose 9000/32767
+            // floor means the engine only ever hears "stop" or "at least 27.5%
+            // deflection", and the aim then moves at the look rate, capped by
+            // the seat's authored rate bounds (H3EK: warthog_g has NO pitch
+            // cap, shade_d is 15 deg/s).
+            const auto step = [](float aim, float command, float lookRateRad,
+                                 float capRad, float dt) {
+                float deflection = 0.0f;
+                if (std::fabs(command) >= 1.0e-3f)
+                {
+                    deflection = std::fabs(command) < 0.2747f
+                        ? 0.2747f : std::fabs(command);
+                    if (deflection > 1.0f) deflection = 1.0f;
+                    if (command < 0.0f) deflection = -deflection;
+                }
+                float rate = deflection * lookRateRad;
+                if (capRad > 0.0f)
+                {
+                    if (rate > capRad) rate = capRad;
+                    if (rate < -capRad) rate = -capRad;
+                }
+                return aim + rate * dt;
+            };
+            const float dt = 1.0f / 120.0f;
+            const float target = 0.30f;
+            // Uncapped pitch (warthog_g) at a mid look rate. The proportional
+            // form cannot rest, so it hunts forever; the servo parks.
+            // Peak-to-peak of the settled aim, and how far it settled from the
+            // hand. Both matter: parking anywhere is easy, parking ON the
+            // target is the requirement.
+            const auto settle = [&](bool useServo, float lookRateRad,
+                                    float capRad, float* outFinalError) {
+                AimServoAxis axis{};
+                float aim = 0.0f;
+                float commanded = 0.0f;
+                float lo = 1.0e9f, hi = -1.0e9f;
+                for (int frame = 0; frame < 900; ++frame)
+                {
+                    const float error = target - aim;
+                    AimServoObserve(axis, aim, commanded);
+                    float command;
+                    if (useServo)
+                    {
+                        command = AimServoCommand(
+                            axis, error, 12.0f, kAimServoRestEnterRadians,
+                            kAimServoRestExitRadians);
+                    }
+                    else
+                    {
+                        command = error * 12.0f;
+                        if (command > 1.0f) command = 1.0f;
+                        if (command < -1.0f) command = -1.0f;
+                    }
+                    commanded = std::fabs(command);
+                    aim = step(aim, command, lookRateRad, capRad, dt);
+                    if (frame >= 700)
+                    {
+                        if (aim < lo) lo = aim;
+                        if (aim > hi) hi = aim;
+                    }
+                }
+                if (outFinalError)
+                    *outFinalError = std::fabs(target - aim);
+                return hi - lo;
+            };
+            // 3 rad/s ~ 172 deg/s, a plain uncapped look rate. Measured: the
+            // proportional loop never rests, cycling 0.0069 rad (0.39 deg)
+            // peak to peak forever, while the servo parks dead still.
+            const float stockUncapped = settle(false, 3.0f, 0.0f, nullptr);
+            const float servoUncapped = settle(true, 3.0f, 0.0f, nullptr);
+            Check(stockUncapped > 0.004f && servoUncapped < 0.001f,
+                "uncapped pitch: the proportional loop limit-cycles, the servo parks");
+            // The same actuator under the warthog turret's 60 deg/s YAW cap.
+            // The cap binds only once the look rate would exceed it, and then
+            // it shrinks the quantum and so the chatter -- which is exactly
+            // why the user sees the wiggle up and down and not side to side.
+            const float stockFast = settle(false, 6.0f, 0.0f, nullptr);
+            const float stockFastCapped = settle(false, 6.0f, 1.047f, nullptr);
+            Check(stockFastCapped < stockFast,
+                "an authored rate cap shrinks the same chatter on yaw");
+            // Robust across look sensitivity: the rest band is set by the
+            // quantum the servo measures, so no sensitivity re-opens the
+            // cycle. The parked offset is bounded by the actuator's OWN
+            // resolution - a stick that can only move the aim in steps of S
+            // cannot be parked closer than S/2 in the worst case, and no
+            // controller can beat that. Worst case here is ~0.95 deg at the
+            // top sensitivity, which the barrel-riding reticle then reports
+            // honestly rather than hiding.
+            bool servoStableEverywhere = true;
+            for (float lookRate = 1.0f; lookRate <= 12.0f; lookRate += 0.5f)
+            {
+                const float quantum = kAimServoStickFloor * lookRate * dt;
+                const float bound = 1.05f *
+                    (kAimServoRestEnterRadians > 0.6f * quantum
+                         ? kAimServoRestEnterRadians : 0.6f * quantum);
+                float finalError = 0.0f;
+                if (settle(true, lookRate, 0.0f, &finalError) >= 0.001f ||
+                    finalError > bound)
+                {
+                    servoStableEverywhere = false;
+                }
+            }
+            Check(servoStableEverywhere,
+                "the servo parks within the actuator's own resolution at every sensitivity");
+            // A real hand move must break the park and be followed.
+            AimServoAxis axis{};
+            float aim = 0.0f;
+            float commanded = 0.0f;
+            const float moved = target + 0.60f;
+            bool retook = false;
+            for (int frame = 0; frame < 1800; ++frame)
+            {
+                const float goal = frame < 900 ? target : moved;
+                const float error = goal - aim;
+                AimServoObserve(axis, aim, commanded);
+                const float command = AimServoCommand(
+                    axis, error, 12.0f, kAimServoRestEnterRadians,
+                    kAimServoRestExitRadians);
+                commanded = std::fabs(command);
+                if (frame > 900 && commanded != 0.0f)
+                    retook = true;
+                aim = step(aim, command, 3.0f, 0.0f, dt);
+            }
+            Check(retook && std::fabs(moved - aim) < 0.012f,
+                "a real hand move breaks the park and the gun follows it");
+            // A 15 deg/s shade cannot be made to follow a hand flick by any
+            // gain, which is why its reticle must ride the barrel instead.
+            static_assert(kAimServoTurretReticleRidesBarrel,
+                          "a turret's reticle reports the gun, not the hand");
+        }
         Check(kReachVehicleIdentityCount == kReachVehicleIdentityTrimCount &&
               kReachVehicleTrimCount == kReachVehicleIdentityCount + 1 &&
               kReachUnmatchedVehicleTrimId == kReachVehicleTrimCount &&

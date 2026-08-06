@@ -2087,3 +2087,26 @@ Release x64 builds, `ctest --preset release` passes 1/1, and the Reach parity
 gate passes. Headset acceptance: a Halo 3 passenger's shots land on the
 crosshair including while turned near the edge of the seat's cone, and every
 seat entry starts facing the vehicle's nose with View Follow off.
+
+## C28 - turret seats take the aim servo and the barrel-riding reticle
+
+Same change as ODST O9, same evidence, same code. See
+`docs/ODST-VEHICLE-EVIDENCE.md` section O9 for the authored seat data, the
+measured limit cycle and the derivation of the rest band; the aim loop is
+shared, so documenting it twice would let the two copies drift.
+
+Halo 3 side of the gate is `Halo3SeatIsTurret(id, mounted)`: the walk-up
+emplacement (`StationaryTurret`) or any mounted gunner. The Warthog's mounted
+chaingun is `objects\vehicles\warthog\turrets\chaingun` seat `warthog_g`, whose
+authored `pitch rate bounds` are **0,0** - no cap at all - which is why its
+pitch is the axis that visibly oscillated while its 60 deg/s yaw stayed smooth.
+
+Nothing else in Halo 3 changes. Drivers, passengers, `Halo3SeatAuthorsSteering`
+seats and on-foot aiming never reach the servo, and C26's personal-weapon
+re-origin and C27's zero stall are untouched - a turret has neither the
+`allows weapons` bit (`warthog_g` and the Covenant walk-up both clear bit 5)
+nor a personal weapon to re-origin.
+
+No seat point, trim, or anchor is touched by C28. Every authored placement in
+`kHalo3SeatPoints` and every `vehicle_cam_*` value in the live config is
+byte-for-byte what it was before.

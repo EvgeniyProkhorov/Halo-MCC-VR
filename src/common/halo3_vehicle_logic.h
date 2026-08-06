@@ -1820,6 +1820,18 @@ inline constexpr bool Halo3SeatFollowsPitch(Halo3VehicleId id, int seatIndex,
     return id != Halo3VehicleId::Banshee && id != Halo3VehicleId::Hornet;
 }
 
+// A seat whose weapon is a physically slewing gun rather than the occupant's
+// own: a walk-up emplacement or any mounted gunner. Their aim carries an
+// authored rate cap the closed loop cannot exceed. From H3EK seat blocks,
+// `shade_d` is 15 deg/s on both axes and `warthog_g` is 60 deg/s yaw with NO
+// pitch cap at all - which is why pitch is the axis that visibly oscillates.
+// These seats take the servo's rest hysteresis and the barrel-riding reticle;
+// every other seat keeps exactly the loop it shipped with.
+inline constexpr bool Halo3SeatIsTurret(Halo3VehicleId id, bool mountedTurret)
+{
+    return mountedTurret || id == Halo3VehicleId::StationaryTurret;
+}
+
 // The one gate that hands a seat's steering to the wheel/stick author instead
 // of the closed-loop hand aim. It must switch on exactly the same condition
 // that makes the view follow the hull, which is why the follow toggle is an
