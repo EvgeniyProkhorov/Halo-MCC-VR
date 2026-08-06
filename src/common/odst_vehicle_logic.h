@@ -291,9 +291,20 @@ inline OdstVehicleId OdstResolveVehicleId(const OdstDefinitionFields& def)
     case kOdstPhysicsTypeNoneAuthored:            // nothing authored
         if (!def.seatFlagsValid)
             return OdstVehicleId::Unknown;
-        // A driven vehicle: seat 0 is a driver seat and the engine agrees the
-        // occupant is in a vehicle. Walk-up turrets satisfy neither.
-        if ((def.seat0Flags & kOdstSeatDriverBit) && def.inVehicle)
+        // The engine's own unit_in_vehicle answer is the discriminator, not
+        // the seat's driver bit. Halo 3's C7 evidence records the same split
+        // on the same engine: a mounted turret reports nativeInVehicle=1, a
+        // walk-up emplacement reports 0.
+        //
+        // The driver-bit test was too narrow. The 2026-08-06 ODST probe caught
+        // a Covenant Shade reporting `native=1 ... seat0Flags=0x101188
+        // (driver=0 gunner=1)` - a GUNNER seat 0 - so it fell through to
+        // StationaryTurret and was placed at the walk-up machinegun's authored
+        // point, 0.5743 up instead of the Shade's own 0.9791. That 0.40 m is
+        // the user's "covenant turrets in ODST, I'm in the ground", and it
+        // also handed the seat the wrong per-seat trim row and the wrong
+        // hull-follow and driver policy.
+        if (def.inVehicle)
             return OdstVehicleId::Shade;
         if (!(def.seat0Flags & kOdstSeatDriverBit))
             return OdstVehicleId::StationaryTurret;

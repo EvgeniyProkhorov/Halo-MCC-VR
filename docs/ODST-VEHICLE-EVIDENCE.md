@@ -762,3 +762,50 @@ snapshots after the engine's own advance and uses offsets that differ in Halo 3
 baseline. Left for a separate candidate. O6's read-back telemetry is what
 decides it: if the log now reports the hold verified against the engine's own
 copy and the brightness still moves, this is the remaining mechanism.
+
+## O7 - 2026-08-06: a Covenant Shade with a gunner seat 0
+
+User report: "you broke covenant turrets in ODST, I'm in the ground." The
+runtime probe in the same session names the cause exactly:
+
+~~~text
+ODST vehProbe: seated - seat=0 native=1 parent=0xE38800C4 kind=1 def=0xE32
+  type=5 id=turret seats=2 seat0Flags=0x101188
+  (driver=0 gunner=1 thirdPerson=0 invalidForPlayer=0)
+~~~
+
+`id=turret` is `StationaryTurret`, the walk-up machinegun. This is a Covenant
+Shade: `native=1` says the engine itself reports the occupant as being in a
+vehicle, and it authors two seats.
+
+`OdstResolveVehicleId` split Shade from walk-up turret on the seat's DRIVER
+bit: `(seat0Flags & driver) && inVehicle` meant Shade. This Shade's seat 0 is a
+**gunner** seat with no driver bit, so it fell through to the walk-up branch.
+Three consequences, all wrong at once:
+
+1. It took `StationaryTurret`'s authored seat point, `-0.2368/0.0000/0.5743`,
+   instead of the Shade's own `-0.1252/0.0000/0.9791`. That 0.40 m drop is the
+   reported "in the ground".
+2. It took the `odst_turret_driver` per-seat trim row (0.36/0.09/-0.29) rather
+   than the Shade's own.
+3. `OdstSeatIsDriver` and `OdstSeatFollowsHull` both branch on the identity, so
+   the seat also got walk-up policy.
+
+The discriminator is now the engine's own `unit_in_vehicle` answer alone.
+Halo 3's C7 evidence records the identical split on the same engine - a mounted
+turret reports `nativeInVehicle=1`, a walk-up emplacement reports `0` - so this
+is the title-appropriate homolog, not a Halo 3 constant copied across.
+
+The change reclassifies exactly one case: turret physics, in-vehicle, no driver
+bit, which was `StationaryTurret` and is now `Shade`. Every other combination is
+bit-for-bit unchanged, including in-vehicle **with** the driver bit (already
+Shade), not-in-vehicle without it (still StationaryTurret), and not-in-vehicle
+with it (still Unknown, because the engine and the tag disagree and guessing is
+worse than staying stock). The core tests pin the real probe word `0x101188`
+alongside the existing authored `0x1C` case, and assert the two identities do
+not share a seat point.
+
+Release x64 builds, `ctest --preset release` passes 1/1, and the Reach parity
+gate passes. Headset acceptance: an ODST Covenant Shade seats the player at the
+gun rather than in the ground, and a walk-up machinegun/plasma cannon/missile
+pod is unchanged.
