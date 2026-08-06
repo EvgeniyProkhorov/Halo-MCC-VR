@@ -449,6 +449,17 @@ namespace
     // way yields +0x2D73590, which is exactly the `array=2D73590` the accepted
     // runtime log already reports - the method is validated against a
     // known-good result before being applied to the other two titles.
+    // REFUTED AND BEHAVIORALLY REVERTED (2026-08-06, build b70141d). Once the
+    // gate re-armed correctly it did hold ODST's loads - and one still bounced
+    // to the menu at 07:15:05-07:15:07 with the gate holding and NOT ONE HOOK
+    // INSTALLED for that generation. Installing during the loading screen is
+    // therefore not what bounces the load. See
+    // `out/analysis/odst-level-load-lockout/halo3xr-b70141d-steam-20260806-bounced-with-ZERO-hooks-installed.log`.
+    // The implementation is retained as evidence and as a correct invariant,
+    // but it is not armed: it cost 7.2 s and 11.8 s of delay before VR engaged
+    // and bought nothing. Flip this to true only with a fresh reason.
+    constexpr bool kLevelLoadGateEnabled = false;
+
     struct PlayerViewArrayEvidence
     {
         const char* constructorPattern;
@@ -549,6 +560,8 @@ namespace
                            const PlayerViewArrayEvidence& evidence,
                            const char* titleName)
         {
+            if (!kLevelLoadGateEnabled)
+                return true;
             m_titleName = titleName;
             if (generation != m_generation || base != m_base)
             {

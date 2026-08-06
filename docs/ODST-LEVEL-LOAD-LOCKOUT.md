@@ -219,6 +219,72 @@ code: on the main menu nothing of ours is installed and the gate is shut. The
 re-arm and the live generation number are both logged, so absent gate output
 can never again be mistaken for a gate that passed.
 
+## THEORY 7 REFUTED: the load bounces with ZERO hooks installed (build `b70141d`)
+
+Preserved:
+`out/analysis/odst-level-load-lockout/halo3xr-b70141d-steam-20260806-bounced-with-ZERO-hooks-installed.log`
+(SHA-256 `BDAE266590580C5B567D01AD29C71662D7B210230FA1BC01FCCD18EAE4FD4E15`).
+
+With `Rearm()` in place the gate finally ran on every load, and the log proves
+it: `re-armed after teardown` before each one, then a hold, then an open. It
+behaved exactly as designed. And the bug still happened.
+
+**The decisive window, 07:14:44 to 07:15:07:**
+
+```
+07:14:44.077  ODST camera teardown complete (title exit)
+07:14:44.077  ODST level-load gate: re-armed after teardown
+07:15:05.308  Title adapter: detected Halo 3: ODST -> Runtime mode: loading
+07:15:05.358  ODST level-load gate: holding install ... camera still=1
+              (no ODST camera install line - NOTHING was hooked)
+07:15:07.275  Runtime mode: loading -> unsupported      <-- bounced to the menu
+```
+
+The level bounced with the ODST camera core **entirely absent**: torn down at
+07:14:44, gate holding from 07:15:05, no install of any kind for that
+generation. **Installing during the loading screen is not what bounces the
+load.** The stale-camera finding remains a true and useful description of the
+engine's memory, but it is not the cause of this bug.
+
+The user's report matches: "kicks me out once now then works the second time."
+
+**What the successful retry adds.** At 07:15:17 the load worked, and its
+readiness line reads `tail=[0,0,0,0,0,0,0,0] ... fov=0.000000` - the camera
+array is genuinely ZEROED, which only happens when `halo3odst.dll` is really
+unloaded and re-mapped. So the observed pattern is: a load into a *reused*
+title module bounces; the bounce is followed by a real module reload; the next
+load then works. That is also why switching games "fixes" it - a game switch
+forces the same reload.
+
+**What this narrows it to.** Our per-title camera cores are exonerated for the
+failing load. What remains live during it is everything global and always-on:
+the D3D11 present/swapchain hooks, the XInput hooks, and the
+`fit_desktop_window` backbuffer forcing plus its `GetSystemMetrics` /
+`GetMonitorInfo` spoofing - which in this session was forcing MCC's backbuffer
+to 3262x2352. Two cheap tests separate those from MCC itself, and neither needs
+a build:
+
+1. **No-mod control run.** Launch MCC without the VR launcher, repeat
+   load/quit/load. Still the only test that settles blame outright.
+2. **`fit_desktop_window = 0`.** Repeat the same cycle with the backbuffer
+   forcing and metric spoofing disabled. This is the largest thing we do to a
+   title while it loads and it is one config line.
+
+**Status of the gate.** Behaviorally reverted - `kLevelLoadGateEnabled = false`
+in `src/dll/game.cpp`. The implementation and its evidence are retained because
+the invariant is correct, but arming it cost 7.2 s and 11.8 s of delay before
+VR engaged and bought nothing measurable.
+
+**Separately: Halo 3 was never detected in that session.** The user reported
+that hopping to Halo 3 did not hook. The log contains no
+`Title adapter: detected supported title Halo 3` line and **no `Halo 3
+level-load gate` line at all**, so `AllowsInstall` was never reached and the
+gate cannot be what blocked it - the adapter never made Halo 3 the active
+title. After the last Reach level exited at 07:21:18 the runtime stayed in
+`loading` with Reach detected for the final 64 seconds until MCC closed. That
+line does appear normally in older logs (`halo3xr-1d6dcb6-steam-prev.log`), so
+this is not a permanent break. It needs a session that actually reaches Halo 3.
+
 ## What is still unsettled
 
 The mod's hooks ARE installed into `halo3odst.dll` during the failing load, so
