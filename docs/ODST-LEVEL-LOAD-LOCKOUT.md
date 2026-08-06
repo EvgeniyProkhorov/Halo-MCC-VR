@@ -102,13 +102,51 @@ not causation. The mod remains passive in the log during the failures, so
 dying load looks exactly like this" both still fit. The no-mod control run
 below remains the only test that settles blame outright.
 
+## The user's pattern, and what the log says about it (2026-08-06)
+
+After reading the finding above the user reported the shape of the bug from
+play: **"it seems to happen if you load back into the same game, not when
+switching games."** The same capture explains both halves, and this is
+independent support for the stale-camera mechanism rather than a restatement of
+it - the theory predicts exactly this pattern.
+
+`halo3odst.dll` appears in **16 of the 17** module snapshots in the session.
+The single snapshot without it (`halo3.dll,halo1.dll,halo2.dll`, 06:29:54) is
+the moment the user finally left ODST for good. So:
+
+- **Loading back into the same game.** The title module is never unloaded
+  across a Save & Quit -> menu -> load cycle. Its `.data`, including the
+  four-slot player-view array, is CONTINUOUS - it still holds the level you
+  just left. Our readiness check sees populated memory, calls it ready, and
+  hooks into the loading screen. Bug.
+- **Switching games.** The module genuinely unloads. When it comes back, its
+  `.data` is restored from the file image and the array is zeroed, so the
+  readiness check correctly waits for the engine to fill it in. No bug.
+
+**This also exposed a hole in the first version of the fix.** Module continuity
+means the OUTGOING level's camera can still be ticking when the new title
+generation is detected: in this same capture the Save & Quit at 06:28:28 left
+the camera changing for roughly three more seconds (06:28:31.442 -> 06:28:32.354
+shows `tailValid` alternating normally). A gate that opened on the first
+observed change would have accepted those dying ticks as the new level's
+liveness and installed into the loading screen anyway - reproducing the bug
+while appearing to guard against it.
+
 ## The fix under test (2026-08-06)
 
 `PlayerViewLivenessGate` in `src/dll/game.cpp`. No title installs any hook until
-the engine's own player-view memory has been observed to **change** since the
-current title generation began. It interprets nothing about the camera - it
-fingerprints the whole of player view 0 and waits for the fingerprint to move -
-so one implementation serves all three titles.
+the engine's own player-view memory has produced the sequence a real level load
+must produce: **frozen, then ticking**. It interprets nothing about the camera -
+it fingerprints the whole of player view 0 - so one implementation serves all
+three titles.
+
+"Frozen then ticking" rather than merely "changed" is what closes the
+same-game hole above. A loading screen leaves the previous level's camera
+untouched, which supplies the frozen half; the new level's first frame supplies
+the tick. A cold zeroed array is frozen too, so a first load still works. A
+title that was already running when observation began never freezes, so a run
+of 12 consecutive changing samples (about 0.6 s at the 50 ms worker poll, which
+no loading screen produces) is separately accepted as "already running".
 
 All three engines build their four player views with the same constructor
 shape; only the view stride differs, and the array base is that constructor's

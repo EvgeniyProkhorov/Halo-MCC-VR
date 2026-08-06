@@ -501,6 +501,11 @@ namespace
     // restores exactly the pre-2026-08-06 behavior instead of a silent failure.
     // Sized above the 7.6 s a cold first load took in the preserved capture.
     constexpr uint64_t kPlayerViewLivenessTimeoutMs = 12000;
+    // Consecutive changing samples that mean "this title was already running
+    // when we started watching" rather than "a level is loading". At the 50 ms
+    // title-worker poll this is about 0.6 s of uninterrupted camera motion,
+    // which no loading screen produces.
+    constexpr uint32_t kPlayerViewAlreadyRunningSamples = 12;
 
     // Fingerprint the WHOLE of player view 0, not a prefix. A prefix would
     // cover only the compact camera (position/forward/fov/clips), which a
@@ -551,6 +556,8 @@ namespace
                 m_array = ResolvePlayerViewArray(base, size, evidence);
                 m_stride = evidence.expectedStride;
                 m_haveSample = false;
+                m_sawFrozen = false;
+                m_changeRun = 0;
                 m_live = false;
                 m_firstSampleMs = 0;
                 m_lastLogMs = 0;
@@ -572,8 +579,28 @@ namespace
         }
 
     private:
-        // True once the engine's camera has been seen to change, or once the
-        // timeout has expired. `titleName` only labels the log.
+        // FREEZE, THEN TICK. A plain "has it changed?" test is not enough, and
+        // the user's own observation is what exposed the hole: the bug happens
+        // when you load back into the SAME game, not when you switch games.
+        // The preserved capture explains both halves - across every same-game
+        // load/quit cycle `halo3odst.dll` stays loaded (present in 16 of 17
+        // module snapshots; the one absence is the moment ODST was finally
+        // left), so its camera memory is CONTINUOUS across the transition,
+        // while switching games unloads the module and its data comes back
+        // zeroed from the file image.
+        //
+        // Continuity means the outgoing level's camera can still be ticking
+        // when the new title generation is detected: in the same capture, a
+        // Save & Quit at 06:28:28 left the camera changing for ~3 more seconds.
+        // A gate that opened on the first observed change would happily accept
+        // those dying ticks as the NEW level's liveness and install into the
+        // loading screen anyway - the exact bug, undetected.
+        //
+        // So the gate requires the sequence a real level load must produce:
+        // first the camera FROZEN (the loading screen, or a cold zeroed array),
+        // and only then a change (the new level's first tick). An engine that
+        // is already running when observation starts never freezes, so a run of
+        // uninterrupted change is accepted separately as "already running".
         bool Observe(const char* titleName)
         {
             if (m_live)
@@ -589,21 +616,41 @@ namespace
                 m_firstSampleMs = now;
                 return false;
             }
-            if (fingerprint != m_fingerprint)
+
+            const bool changed = fingerprint != m_fingerprint;
+            m_fingerprint = fingerprint;
+            if (changed)
+                ++m_changeRun;
+            else
+            {
+                m_changeRun = 0;
+                m_sawFrozen = true;
+            }
+
+            if (changed && m_sawFrozen)
             {
                 m_live = true;
-                LOG("%s level-load gate: the engine's own camera is ticking "
-                    "after %llu ms; installing now that the level is running "
-                    "rather than during its loading screen",
+                LOG("%s level-load gate: the engine's camera was frozen and has "
+                    "now started ticking (%llu ms); the level is running, so "
+                    "installing here instead of during its loading screen",
                     titleName,
                     static_cast<unsigned long long>(now - m_firstSampleMs));
+                return true;
+            }
+            if (m_changeRun >= kPlayerViewAlreadyRunningSamples)
+            {
+                m_live = true;
+                LOG("%s level-load gate: the engine's camera has changed on "
+                    "%u consecutive samples without ever being still, so this "
+                    "title was already running rather than loading; installing",
+                    titleName, m_changeRun);
                 return true;
             }
             if (now - m_firstSampleMs >= kPlayerViewLivenessTimeoutMs)
             {
                 m_live = true;
-                LOG("%s level-load gate: the engine's camera has NOT changed "
-                    "in %llu ms. Opening the gate anyway so VR is never denied "
+                LOG("%s level-load gate: no frozen-then-ticking transition in "
+                    "%llu ms. Opening the gate anyway so VR is never denied "
                     "outright - this is the pre-gate behavior and is worth "
                     "reporting if the level then bounces to the menu",
                     titleName,
@@ -613,11 +660,13 @@ namespace
             if (now - m_lastLogMs >= 2000)
             {
                 m_lastLogMs = now;
-                LOG("%s level-load gate: holding install - the engine's camera "
-                    "still holds the previous level's contents, so this is a "
-                    "loading screen and not a running level (%llu ms)",
+                LOG("%s level-load gate: holding install after %llu ms - camera "
+                    "still=%d, consecutive changes=%u. A loading screen leaves "
+                    "the previous level's camera untouched; installing into "
+                    "that is what bounces the load to the menu",
                     titleName,
-                    static_cast<unsigned long long>(now - m_firstSampleMs));
+                    static_cast<unsigned long long>(now - m_firstSampleMs),
+                    m_sawFrozen ? 1 : 0, m_changeRun);
             }
             return false;
         }
@@ -629,7 +678,9 @@ namespace
         uint64_t m_fingerprint = 0;
         uint64_t m_firstSampleMs = 0;
         uint64_t m_lastLogMs = 0;
+        uint32_t m_changeRun = 0;
         bool m_haveSample = false;
+        bool m_sawFrozen = false;
         bool m_live = false;
         bool m_resolveLogged = false;
     };
