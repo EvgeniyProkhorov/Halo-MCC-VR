@@ -246,6 +246,7 @@ if(BUILD_TESTING)
         src/common/title_runtime_state.cpp
         src/common/config.cpp
         src/common/log.cpp
+        src/dll/sigscan.cpp
         src/dll/reach_adapter.cpp)
     if(HALOMCCVR_EXPERIMENTAL_REACH_RENDER_CANDIDATE)
         target_sources(halomccvr_core_tests PRIVATE

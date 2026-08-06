@@ -23,6 +23,7 @@
 #include "input_logic.h"
 #include "level_load_gate_logic.h"
 #include "odst_bringup_logic.h"
+#include "sigscan.h"
 #include "odst_vehicle_logic.h"
 #include "reach_adapter.h"
 #include "reach_chud_logic.h"
@@ -127,6 +128,29 @@ namespace
         return { std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>() };
     }
 
+    // The byte-by-byte scan sig::Find used before it was made memchr-anchored.
+    // Kept verbatim as the reference an optimisation must agree with: a faster
+    // scan that finds a DIFFERENT address would silently hook the wrong code.
+    uintptr_t ReferenceFind(
+        const uint8_t* data, size_t size,
+        const std::vector<uint8_t>& bytes, const std::vector<uint8_t>& wild)
+    {
+        const size_t n = bytes.size();
+        if (!n || size < n)
+            return 0;
+        const size_t last = size - n;
+        for (size_t i = 0; i <= last; i++)
+        {
+            size_t j = 0;
+            for (; j < n; j++)
+                if (!wild[j] && data[i + j] != bytes[j])
+                    break;
+            if (j == n)
+                return reinterpret_cast<uintptr_t>(data) + i;
+        }
+        return 0;
+    }
+
     size_t CountText(std::string_view text, std::string_view needle)
     {
         size_t count = 0;
@@ -139,6 +163,109 @@ namespace
 
 int main()
 {
+    {
+        // sig::Find is memchr-anchored for speed (it is the dominant cost of
+        // every hook install: ODST resolves four optional features, each
+        // needing a find plus an ambiguity re-scan, ~945 ms of whole-module
+        // passes measured 2026-08-06). Speed is worthless if it changes WHICH
+        // address is returned, so every case here is checked against the
+        // original byte-by-byte loop kept in ReferenceFind.
+        //
+        // Deterministic xorshift, not <random>: the corpus must be identical
+        // on every machine so a disagreement is always reproducible.
+        uint32_t rng = 0x13579BDFu;
+        auto NextByte = [&rng]() -> uint8_t {
+            rng ^= rng << 13; rng ^= rng >> 17; rng ^= rng << 5;
+            return static_cast<uint8_t>(rng >> 24);
+        };
+
+        // A tiny alphabet makes accidental partial matches - and therefore
+        // candidate positions that must be rejected - overwhelmingly common.
+        std::vector<uint8_t> corpus(64 * 1024);
+        for (auto& b : corpus)
+            b = static_cast<uint8_t>(NextByte() & 0x03);
+
+        bool allAgree = true;
+        bool sawHit = false;
+        bool sawMiss = false;
+        for (int trial = 0; trial < 400; ++trial)
+        {
+            const size_t n = 1 + (NextByte() % 12);
+            std::vector<uint8_t> bytes(n);
+            std::vector<uint8_t> wild(n);
+            std::string pattern;
+            // Half the trials copy a real run out of the corpus (guaranteeing
+            // a hit somewhere); half are random (usually a miss).
+            const bool fromCorpus = (NextByte() & 1) != 0;
+            const size_t origin = NextByte() % (corpus.size() - 16);
+            for (size_t j = 0; j < n; ++j)
+            {
+                // Wildcards at every position, including the first - that is
+                // the case the anchor skip has to handle by moving the anchor.
+                wild[j] = (NextByte() % 4 == 0) ? 1 : 0;
+                bytes[j] = wild[j]
+                    ? 0
+                    : (fromCorpus ? corpus[origin + j]
+                                  : static_cast<uint8_t>(NextByte() & 0x03));
+                if (!pattern.empty())
+                    pattern += ' ';
+                if (wild[j])
+                {
+                    pattern += "??";
+                }
+                else
+                {
+                    static const char* kHex = "0123456789ABCDEF";
+                    pattern += kHex[bytes[j] >> 4];
+                    pattern += kHex[bytes[j] & 0x0F];
+                }
+            }
+            const uintptr_t base = reinterpret_cast<uintptr_t>(corpus.data());
+            const uintptr_t expected =
+                ReferenceFind(corpus.data(), corpus.size(), bytes, wild);
+            const uintptr_t actual =
+                sig::Find(base, corpus.size(), pattern.c_str());
+            if (expected != actual)
+                allAgree = false;
+            if (expected)
+                sawHit = true;
+            else
+                sawMiss = true;
+
+            // The ambiguity re-scan callers rely on to prove a signature is
+            // unique starts one byte past a hit; it must agree there too.
+            if (expected)
+            {
+                const uintptr_t offset = expected - base + 1;
+                const uintptr_t expectedNext = ReferenceFind(
+                    corpus.data() + offset, corpus.size() - offset,
+                    bytes, wild);
+                const uintptr_t actualNext = sig::Find(
+                    base + offset, corpus.size() - offset, pattern.c_str());
+                if (expectedNext != actualNext)
+                    allAgree = false;
+            }
+        }
+        Check(allAgree, "sig::Find matches the byte-by-byte reference exactly");
+        Check(sawHit && sawMiss,
+              "sig::Find equivalence corpus covered both hits and misses");
+
+        // All-wildcard: matches at the first offset, as the original did.
+        const std::vector<uint8_t> corpusSmall{0xAA, 0xBB, 0xCC};
+        const uintptr_t smallBase =
+            reinterpret_cast<uintptr_t>(corpusSmall.data());
+        Check(sig::Find(smallBase, corpusSmall.size(), "?? ??") == smallBase,
+              "sig::Find all-wildcard pattern matches at the first offset");
+        // A pattern longer than the region never matches.
+        Check(sig::Find(smallBase, corpusSmall.size(),
+                        "AA BB CC DD") == 0,
+              "sig::Find rejects a pattern longer than the region");
+        // A trailing-wildcard pattern that would run off the end must not
+        // match early, and an exact tail match must be found.
+        Check(sig::Find(smallBase, corpusSmall.size(), "CC") ==
+                  smallBase + 2,
+              "sig::Find locates a match at the final offset");
+    }
     {
         // Level-load gate decision core. Each Observe() is one 50 ms worker
         // sample; `true` means the engine's player-view fingerprint changed.

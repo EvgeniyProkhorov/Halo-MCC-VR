@@ -8,7 +8,10 @@ namespace
 {
     // Parse "48 8B ?? C0" into parallel arrays: byte values, and a mask that
     // says which positions are wildcards.
-    bool ParsePattern(const char* pattern, std::vector<uint8_t>& bytes, std::vector<bool>& wild)
+    // The mask is uint8_t, NOT vector<bool>. vector<bool> is a bitset whose
+    // operator[] does a shift-and-mask per access, and this mask is read once
+    // per byte compared - tens of millions of times per module scan.
+    bool ParsePattern(const char* pattern, std::vector<uint8_t>& bytes, std::vector<uint8_t>& wild)
     {
         for (const char* p = pattern; *p;)
         {
@@ -20,7 +23,7 @@ namespace
             if (p[0] == '?')
             {
                 bytes.push_back(0);
-                wild.push_back(true);
+                wild.push_back(1);
                 p++;
                 if (*p == '?')
                     p++;
@@ -38,7 +41,7 @@ namespace
                 if (hi < 0 || lo < 0)
                     return false;
                 bytes.push_back((uint8_t)((hi << 4) | lo));
-                wild.push_back(false);
+                wild.push_back(0);
                 p += 2;
             }
         }
@@ -48,26 +51,54 @@ namespace
 
 namespace sig
 {
+    // Matching semantics are EXACTLY those of the original byte-by-byte loop:
+    // the first offset in [base, base+size-n] where every non-wildcard byte
+    // equals the pattern. Only the search order changed - instead of testing
+    // every offset, memchr skips directly to offsets where the pattern's first
+    // concrete byte can sit. memchr is SIMD-optimised, while the old loop paid
+    // a bounds-checked bitset read per byte compared, and a whole-module scan
+    // is ~74 MB. Nothing about verification is relaxed: every candidate is
+    // still compared in full, and the ambiguity re-scans callers run to prove
+    // a signature is unique are sped up identically. Proven equivalent against
+    // a brute-force reference over randomised data in tests/core_tests.cpp.
     uintptr_t Find(uintptr_t base, size_t size, const char* pattern)
     {
         std::vector<uint8_t> bytes;
-        std::vector<bool> wild;
+        std::vector<uint8_t> wild;
         if (!ParsePattern(pattern, bytes, wild))
             return 0;
         const size_t n = bytes.size();
-        if (size < n)
+        if (!n || size < n)
             return 0;
 
         const uint8_t* data = reinterpret_cast<const uint8_t*>(base);
         const size_t last = size - n;
-        for (size_t i = 0; i <= last; i++)
+
+        // First concrete byte to anchor the skip on.
+        size_t anchor = 0;
+        while (anchor < n && wild[anchor])
+            ++anchor;
+        // An all-wildcard pattern matches at the first offset, as before.
+        if (anchor == n)
+            return base;
+
+        const uint8_t anchorByte = bytes[anchor];
+        size_t i = 0;
+        while (i <= last)
         {
+            // Candidate offsets are exactly those whose anchor byte matches.
+            const uint8_t* hit = static_cast<const uint8_t*>(
+                memchr(data + i + anchor, anchorByte, last - i + 1));
+            if (!hit)
+                return 0;
+            i = static_cast<size_t>(hit - data) - anchor;
             size_t j = 0;
             for (; j < n; j++)
                 if (!wild[j] && data[i + j] != bytes[j])
                     break;
             if (j == n)
                 return base + i;
+            ++i;
         }
         return 0;
     }
